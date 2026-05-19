@@ -1,0 +1,2320 @@
+C+ LprEcpi ­ Integration
+
+DOCUMENT TYPE:
+
+TECHNICAL DOCUMENTATION
+
+DOCUMENT TITLE:
+
+LPR ECPI ­ Integration Guide
+
+TARGET AUDIENCE:
+Project management team, software and hardware development team. Limited to technology partners and internal
+use only (PRIVATE AND CONFIDENTIAL)
+
+2023
+
+This document was created by CoherentPlus Sdn. Bhd. Document's contents may be changed without prior notice. External links
+are provided for information only. CoherentPlus Sdn. Bhd. does not claim liability for access to and correctness of the referenced
+content.
+COPYRIGHT
+All information contained in this document is intended for the person or entity to which it is addressed and contains confidential
+and/or privileged material. Any review or dissemination in reliance upon this information by persons or entities other than the
+intended recipient is prohibited.
+
+                          
+Copyright © 2023 CoherentPlus Sdn. Bhd. All rights reserved
+Created at: Oct 31, 2023 Version.
+
+                                                                                                                                                                           Page | 1
+C+ LprEcpi ­ Integration
+
+Document Version
+
+Version  Date             By  Description
+1.0
+1.1      2023-10-31 SF Lee    Initial Release
+
+         2023-12-26 SF Lee    Added:
+                                   - ShowStatus command
+1.2      2024-05-29 SF Lee         - TngAbt Scheme Id
+
+1.3      2024-07-16 SF Lee    Added:
+                                   - Updated error code
+1.4      2024-08-16 SF Lee
+                              Added:
+1.5      2024-09-18 SF Lee         - EntryDt, VehicleNo in InitTxn
+                                   - Tid, Mid, BatchNo in TxnStatus
+1.6      2024-09-25 SF Lee
+                              Added:
+1.7      2024-10-11 Seow Yen       - Fare Details in InitTxn
+                                   - Heartbeat command
+1.8      2024-10-30 Seow Yen       - QR B scan C response
+
+1.9      2024-11-01 Justin    Updated:
+                                   - Process Flow
+1.10     2024-11-26 Seow Yen
+                              Added:
+                                   - entryLane in initTxn
+                                   - txID in txnStatus response
+
+                              Added:
+                                   - Fare Details in InitTxn
+
+                              Added:
+                                   - Heartbeat
+                                   - Process flow
+                                   - Signature Calculation and signed message
+                                   - Logging between Kiosk Controller and Reader
+                                   - Appendix B
+
+                              Correction:
+                                   - Updated 4.6 and 4.7 for cardScheme
+
+                              Added SCPI Tunnel command
+
+                              Added
+                                   - Set reader IP using TCPI tool
+
+                              Updated
+
+                                                                                                                         Page | 2
+C+ LprEcpi ­ Integration
+
+1.11  2025-03-03 SF Lee          - Process Flow
+
+1.12  2025-04-03 SF Lee     Added:
+                                 - Txn Query command
+1.13  2025-05-15 Justin Aw
+                            Added:
+1.14  2025-07-31 Justin Aw       - Delay Online mode in InitTerminal
+                                 - writeEntry and returnEntry in InitCard
+1.15  2025-08-11 Justin Aw
+                            Remove Delay Online mode in InitTerminal. Replaced
+1.16  2025-10-14 Justin Aw  with offlineApprove in initTerminal command
+                            Correction:
+1.17  2025-10-29 Justin Aw
+                                 - Scpi response type corrected to "response"
+
+                            Added SoundID in AbortTxn
+
+                            Corrected message and title to messageTXT and
+                            titleTXT in initTerminal and initCard command.
+
+                            Added Get IO Value, and Set IO Value
+
+                            Correction on Get IO Value, and Set IO Value
+                            Added: initCard, added all response data in message,
+                            and to return TNG entry information if returnEntry flag
+                            is set.
+
+                                                                                     Page | 3
+C+ LprEcpi ­ Integration
+
+Table of Contents
+
+1 Introduction............................................................................................................................. 5
+    1.1 Scope.......................................................................................................................................5
+    1.2 Abbreviations..........................................................................................................................5
+    1.3 References.............................................................................................................................. 5
+
+2 Overview, Connectivity & Setup..................................................................................................6
+    2.1 Overview.................................................................................................................................6
+    2.2 Connectivity & Setup.............................................................................................................. 7
+
+3 Message Format........................................................................................................................... 8
+    3.1 Request................................................................................................................................... 8
+    3.2 Response.................................................................................................................................9
+    3.3 Signature Calculation and Signed Message........................................................................10
+    3.4 Logging between Kiosk Controller and Reader................................................................... 11
+
+4 Commands & Responses.........................................................................................................12
+    4.1 Init Terminal.......................................................................................................................... 12
+    4.2 Get Status..............................................................................................................................14
+    4.3 Init Card............................................................................................................................... 17
+    4.4 Init Transaction..................................................................................................................... 20
+    4.5 Abort Txn.............................................................................................................................. 23
+    4.6 Card Read..............................................................................................................................25
+    4.7 Txn Status............................................................................................................................28
+    4.8 Txn Query............................................................................................................................ 32
+    4.9 Finish Transaction................................................................................................................. 34
+    4.10 Show Status.......................................................................................................................36
+    4.11 SCPI Tunnel.......................................................................................................................38
+    4.12 Set Reader Ip.....................................................................................................................40
+    4.13 Reboot............................................................................................................................... 42
+    4.14 Heartbeat........................................................................................................................... 44
+    4.15 Get Relay I/O Value........................................................................................................... 45
+    4.16 Set Relay I/O Value........................................................................................................... 47
+
+5 Process Flow...........................................................................................................................49
+    5.1 Initialization.......................................................................................................................... 50
+    5.2 Entry.................................................................................................................................... 51
+
+                                                                                                                                                                           Page | 4
+C+ LprEcpi ­ Integration
+
+    5.3 Exit.......................................................................................................................................52
+    5.4 Abort Transaction.................................................................................................................54
+Appendix A................................................................................................................................55
+    Error Code.................................................................................................................................................55
+    Reader State..............................................................................................................................................56
+    Mask Pan and Hash Pan........................................................................................................... 57
+    Set reader IP using TCPI tool.................................................................................................... 58
+
+1 Introduction
+
+1.1 Scope
+
+This document outlines the integration API between reader and LPR controller:
+
+     1. Overview, Connectivity & Setup
+     2. Message format
+     3. Commands & Responses
+     4. Process Flow
+
+1.2 Abbreviations  Europay, Mastercard, Visa
+                   CoherentPlus Contactless Reader
+ EMV               Offline Data Authentication
+ Jellies           License Plate Recognition
+ ODA
+ LPR
+
+1.3 References
+
+ NA
+
+                                                                               Page | 5
+C+ LprEcpi ­ Integration
+
+2 Overview, Connectivity & Setup
+
+2.1 Overview
+
+ECPI is a communication interface that facilitates payment functionality for LPR to accept EMV card, local electronics
+purse payment and E-Wallet on parking solution. LPR and Jellies readers are connected via LAN communication. This
+document describes the command to operate Jellies to accept payment.
+The commands are designed for simple integration, without being required to integrate the bank system. Jellies will
+handle the EMV, local electronics purse card reading, E-Wallet and bank host authorization process, and returning LPR
+a payment status with approval detail.
+
+
+                                                                                                                                                                           Page | 6
+C+ LprEcpi ­ Integration
+
+2.2 Connectivity & Setup
+
+     A. Socket (TCP via LAN)
+                a. Default socket is opened at Port 5000
+                b. Connect to this device IP with port number
+                c. One connection allowed per session. The second connection will be refused if the first connection
+                     is still alive.
+
+     B. Heartbeat
+                a. Heartbeat is required to send in every 30 seconds (within 30 seconds) if there is no
+                     communication in between.
+                b. Connection will be dropped by the reader if there is no heartbeat communicated within the
+                     heartbeat cutoff period. When the connection is dropped, the controller is required to recover the
+                     connection by reestablishing the connection and initialization process as per illustrated in Process
+                     Flow.
+                c. Heartbeat is a 2 bytes message carrying null bytes, 0x00 0x00.
+
+                                                                                                                                                                           Page | 7
+C+ LprEcpi ­ Integration
+
+3 Message Format
+
+This chapter describes the general format of requests and responses that communicate between reader and LPR. The
+supported message format for all the requests and responses is in JSON format.
+
+3.1 Request
+
+  Key Name        Max Length       Description
+  apiVersion      12               Api Version.
+  message         20               Command of this message.
+  type            10               Type of this message.
+                                   request - Request
+  timestamp       20               Date time of this message.
+                                   2023-05-30 11:06:02 - YY-MM-DD hh:mm:ss
+  messageTraceId 40                Trace Id for this message.
+                                   Body of the message.
+  body            n                SHA256 of the full message with secret key.
+                                   signature = secretkey + full message
+  signature       64
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "plazaID":"P01",
+
+              "laneID":"L01",
+
+              "operationMode":"1",
+
+              "laneType":"3"
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+                                                                                Page | 8
+C+ LprEcpi ­ Integration
+
+3.2 Response
+
+  Key Name        Max Length       Description
+  apiVersion      12
+  message         20               Api Version.
+  type            10
+                                   Command of this message.
+
+                                   Type of this message.
+
+                                   ack - Acknowledgement
+
+  timestamp       20               Date time of this message.
+
+                                   2023-05-30 11:06:02 - YY-MM-DD hh:mm:ss
+
+  messageTraceId 40                Trace Id for this message.
+
+  body            n                Body of the message.
+
+                                   errorCode[4]           Response status of command execution
+
+  signature       64               SHA256 of the full message with secret key.
+
+                                   signature = secretkey + full message
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                                                                Page | 9
+C+ LprEcpi ­ Integration
+
+3.3 Signature Calculation and Signed Message
+
+The flow diagram below illustrates the signature calculation and generating a signed message.
+
+                                                                                                                                                                          Page | 10
+C+ LprEcpi ­ Integration
+
+3.4 Logging between Kiosk Controller and Reader
+
+System integrators are required to log all communications between the controller and the reader. This should include
+timestamps, IP addresses, network connection activities, socket messages, and any exceptions that occur during
+message exchanges, as shown below:
+
+     A. A normal scenario:
+ 2024-05-23 10:05:10 [192.168.0.50] >> Connect Port 500
+ 2024-05-23 10:05:10 [192.168.0.50] << Connected Successfully
+ 2024-05-23 10:05:11 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:12 [192.168.0.50] << RCVD "{..................{"errorCode = 0000"}................"}
+ 2024-05-23 10:05:13 [192.168.0.50] << RCVD "{..................{"errorCode = 0000"}................"}
+ 2024-05-23 10:05:14 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << RCVD "{..................{"errorCode = 0000"}................"}
+ 2024-05-23 10:05:14 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << RCVD "{..................{"errorCode = 0000"}................"}
+ 2024-05-23 10:05:16 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:17 [192.168.0.50] << RCVD "{..................{"errorCode = 0000"}................"}
+ 2024-05-23 10:05:18 [192.168.0.50] >> Disconnect 500
+ 2024-05-23 10:05:19 [192.168.0.50] << Disconnected Successfully
+
+     B. Example logs of exception errors.
+ 2024-05-23 10:05:10 [192.168.0.50] >> Connect Port 500
+ 2024-05-23 10:05:10 [192.168.0.50] << ERROR: Failed to connect to port 500 (Conn refused)
+ 2024-05-23 10:05:11 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << ERROR: Failed to write on socket.
+ 2024-05-23 10:05:11 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << ERROR: Timeout. Unable to receive response.
+ 2024-05-23 10:09:16 [192.168.0.50] << ERROR: Connection terminated.
+ 2024-05-23 10:15:18 [192.168.0.50] << ERROR: Connection closed by remote device
+
+This log is crucial for debugging and issue analysis between the system integrator and CoherentPlus. In the event of
+exceptional cases during development or in a live environment, the log should be submitted to CoherentPlus for initial
+troubleshooting and resolution.
+It is mandatory to retain this log in the controller for at least 15 days, and doing so is highly advisable for effective
+issue tracking.
+
+                                                                                                                                                                          Page | 11
+C+ LprEcpi ­ Integration
+
+4 Commands & Responses
+
+This section outlines the command set and its response respectively. A valid command message shall be packed with
+message format as described in the previous chapter.
+
+4.1 Init Terminal
+
+The reader will always be in "not-in-use" mode after start up. This command activates the reader into "ready to use"
+state. LPR is required to pass in the plazaId, laneId, operationMode, laneType. The timestamp will be used to sync the
+date time to the reader.
+
+Request
+
+Key Name    Max Length    Value
+
+apiVersion  12            1.0
+
+message     20            initTerminal
+
+type        10            request
+
+timestamp   20            2023-05-30 11:06:02
+
+messageTraceID 40         112233445566
+
+body        n             plazaID[10]          P01
+
+                          laneID[10]           L01
+
+                          operationMode[2] 0 - Maintenance Mode
+                                                    1 - Live Mode
+                                                    2 - Not In Use
+
+                          laneType[2]          1 - Entry
+                                               2 - Exit
+                                               3 - Open
+                                               4 - Dual
+
+                          Optional Fields
+
+                          titleTXT[18]         Optional. Title text to display
+                                               (ecpi-lpr V6.10.2 above)
+
+                          messageTXT[40]       Optional. Message text to display
+                                               (ecpi-lpr V6.10.2 above)
+
+                          selectNext[2]        Optional. To allow unknown card to be processed by controller
+                                               on APDU level
+                                               0 - Unknown card will be alert with error message
+                                               1 - Unknown card will NOT be alerted with an error message,
+                                               but return invalid card error to the controller to process with
+                                               other card business rules on APDU level, and process the alert
+                                               on controller level.
+
+                          offlineApprove[2] Optional: To allow payment terminal to approve EMV
+                                                    transaction in offline condition below:
+
+                                                                                  Page | 12
+C+ LprEcpi ­ Integration
+
+  signature       64                                         0 - Always online. Connection/Timeout error will end with
+                                                             declined.
+                                                             1 - Auto Offline. If connection/Timeout detected, transaction
+                                                             will be stored in batch file for delay online approval.
+                                                             2- Always Offline. Always approved offline, transactions will be
+                                                             stored in batch files for delay online approval.
+
+                                                             Delay online authorization is scheduled and automated.
+
+                                                             This configuration supported from ECPI-LPR V6.9.3
+
+                                                             NOTE: Enable offlineApprove (Delay authorization) is on
+                                                             MERCHANT RISK. There is no guarantee that delayed
+                                                             authorization will be approved.
+
+                                   0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "plazaID":"P01",
+
+              "laneID":"L01",
+
+              "operationMode":"1",
+
+              "laneType":"4"
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12          1.0
+
+  message         20          initTerminal
+
+  type            10          ack
+
+  timestamp       20          2023-05-30 11:06:02
+
+  messageTraceID 40           aa11bb22cc33dd44
+
+  body            n           errorCode[4]         0000
+
+  signature       64          ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+                                                         Page | 13
+C+ LprEcpi ­ Integration
+}
+
+4.2 Get Status
+
+This function is to get the current reader status and the previous response. LPR is required to send this command to
+get the previous response if the current command is timeout.
+
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12             1.0
+
+  message     20             getStatus
+
+  type        10             request
+
+  timestamp   20             2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body        n              empty
+
+  signature   64             48E412867FA461765876EF0903233E857823D28BB52169E7DE1EC1C3CB3CFBCB
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"getStatus",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"48E412867FA461765876EF0903233E857823D28BB52169E7DE1EC1C3CB3CFBCB"
+
+}
+
+                                                  Page | 14
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         20         getStatus
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode                0000
+
+                             operationMode            0 - Maintenance Mode
+                                                      1 - Live Mode
+                                                      2 - Not In Use
+
+                             state                    01 - Idle
+                                                      02 - Scanning Card
+                                                      03 - Card Detecting
+                                                      04 - Card Detected
+                                                      05 - Host Authorizing
+                                                      03 - Transaction Completed
+                                                      99 - Not In Use
+
+                             lastCmd                  Full command from previous instruction
+
+                             lastResp                 Full response from previous instruction
+
+  signature       64         BE6C458580F8C6256E72D4FBE62C5F6A42BD37470D82273374285B541DDC124F
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"getStatus",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:11:21",
+
+        "messageTraceID":"112233445588",
+
+        "body":{
+
+              "errorCode":"0000",
+
+              "operationMode:0",
+
+              "state":"1",
+
+              "lastCmd":{
+
+                  "apiVersion":"1.0",
+
+                  "message":"initTerminal",
+
+                  "type":"request",
+
+                  "timestamp":"2023-05-30 11:06:02",
+
+                  "messageTraceID":"112233445566",
+
+                  "body":{
+
+                          "plazaID":"P01","laneID":"L01","operationMode":"1","laneType":"3"
+
+                  },
+
+                  "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+              },
+
+              "lastResp":{
+
+                  "apiVersion":"1.0",
+
+                  "message":"initTerminal",
+
+                  "type":"request",
+
+                  "timestamp":"2023-05-30 11:06:02",
+
+                  "messageTraceID":"112233445566",
+
+                  "body":{
+
+                          "errorCode":"0000"
+
+                  },
+
+                                                                                               Page | 15
+C+ LprEcpi ­ Integration
+
+          "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+       }
+
+   },
+
+   "signature":"BE6C458580F8C6256E72D4FBE62C5F6A42BD37470D82273374285B541DDC124F"
+
+}
+
+                          Page | 16
+C+ LprEcpi ­ Integration
+
+4.3 Init Card
+
+This function is to start the process of detecting and reading a card. If the card is found valid, it will send a Card Read
+command to LPR. LPR is required to send this command on every end of the transaction if retrigger is present and set
+to 1, otherwise the reader will go back to detecting and reading a card after Finish Txn. This function is optional.
+
+For entry, it is optional to send InitTxn if it is an offline entry with ODA process. LPR is required to send Finish Txn to
+complete the process without charging the card.
+
+For exit, it is required to send InitTxn if it is charging the card.
+
+Request
+
+  Key Name        Max Length      Value
+
+  apiVersion      12              1.0
+
+  message         20              initCard
+
+  type            10              request
+
+  timestamp       20              2023-05-30 11:06:02
+
+  messageTraceID 40               112233445566
+
+  body            n               fareClass[2]         This field to be defined by LPR
+                                  retrigger[1]
+                                                       0 - Do not required to send initCard. Reader will start scanning
+                                  writeEntry[1]        card after finTxn.
+                                                       1 - Required to send initCard to start scanning card.
+
+                                                       Optional. To write entry info for TNG card
+
+                                  returnEntry[1]       0 - Do not require to write entry info for TNG card.
+                                                       1 - Required to write entry info for TNG card
+
+                                                       Optional. To return entry info for TNG card
+
+                                                       0 - Do not require to return entry info for TNG card.
+                                                       1- Required to return entry info for TNG card.
+
+                                  titleTXT[18]         Optional. Title text to display
+                                                       (ecpi-lpr V6.10.2 above)
+
+                                  messageTXT[40]       Optional. Message text to display
+                                                       (ecpi-lpr V6.10.2 above)
+
+  signature       64              0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initCard",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "fareClass":"P01",
+
+              "retrigger":"1",
+
+                                                                                                             Page | 17
+C+ LprEcpi ­ Integration
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+Response
+
+  Key Name    Max Length Value
+
+  apiVersion  12          1.0
+
+  message     20          initCard
+
+  type        10          ack
+
+  timestamp   20          2023-05-30 11:06:02
+
+  messageTraceID 40       112233445566
+
+  body        n           errorCode[4]         0000
+
+                          txnID                Terminal transaction ID. Generated from terminal.
+
+                                               0A6CDF1690177983701
+
+                          txnDt[20]            2023-05-30 11:06:02
+
+                          maskPan[20]          Masked PAN. Only first 6 and last 4 will be returned in clear,
+                                               others will be masked with *. Please refer to Appendix B.
+
+                                               4935 31** **** 2683
+
+                          hashPan[40]          Hashed PAN. Hash with a full clear Card PAN.
+
+                                               649B28A9F095B9716AA9543067ED4F9A995E8F62
+
+                          cardScheme[2]        01 - MyDebit
+                                               02 - Mastercard
+                                               03 - Visa
+                                               11 - Tng
+                                               14 - TngAbt
+
+                          cardBalance[10]      The balance of TNG card (If cardScheme = Tng)
+
+                          The following additional TNG data returned if "returnEntry" in Request set to 1.
+
+                          entryDt[20]          Entry Date Time
+                                               2023-05-30 11:06:02
+
+                          entryOpId[2]         Entry TNG Operator ID
+
+                          entryLocId[3]        Entry TNG LocationID
+
+                                                                                                  Page | 18
+C+ LprEcpi ­ Integration
+
+                          entryLaneId[2]  Entry TNG LaneID
+
+  signature  64           ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+   "apiVersion":"1.0",
+
+   "message":"initCard",
+
+   "type":"ack",
+
+   "timestamp":"2023-05-30 11:06:02",
+
+   "messageTraceID":"112233445566",
+
+   "body":{
+
+             "errorCode":"0000"
+
+   },
+
+   "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                            Page | 19
+C+ LprEcpi ­ Integration
+
+4.4 Init Transaction
+
+This function is to start the process of card scanning for LPR exit. This function read card, validates internally (i.e
+blacklist, whitelist, expiry check). If the card is found valid and authorization to acquiring bank, it will send a Txn Status
+command to LPR. LPR is required to send this command on every end of the transaction if retrigger is present and set
+to 1, otherwise the reader will go back to card scanning after Finish Txn.
+
+Request
+
+Key Name    Max           Value
+            Length
+
+apiVersion  12            1.0
+                          initTxn
+message     20            request
+                          2023-05-30 11:06:02
+type        10            112233445566
+                          txnType[12]
+timestamp   20            fareAmount[12]
+                          fareClass[2]
+messageTraceID 40         retrigger[1]
+
+body        n             entryDt[20]          Optional. Transaction type of this transaction to differentiate
+                                               Entry or Exit.
+                          vehicleNo[10]        350
+                                               This field to be defined by LPR
+                          entryLane[10]        0 - Do not required to send initTxn. Reader will start scanning
+                                               card after finTxn.
+                          gstAmount            1 - Required to send initTxn to start scanning card.
+                                               Entry Date Time for exit transaction
+                          gstTaxAmount         2023-05-30 11:06:02
+                                               Vehicle Plate No
+                          sAmount              VMM1234
+                                               Entry Lane
+                                               E01
+                                               Gst Amount
+                                               0
+                                               Gst TaxAmount
+                                               0
+                                               Service Charge Amount
+                                               0
+
+                                               Page | 20
+C+ LprEcpi ­ Integration
+
+                          sTaxAmount           Server Charge Tax Amount
+
+                                               0
+
+                          pAmount              Parking Amount
+
+                                               350
+
+                          pTaxAmount           Parking Tax Amount
+
+                                               0
+
+                          discAmount           Discount Amount
+
+                                               0
+
+                          discTaxAmount        Discount Tax Amount
+
+                                               0
+
+                          title[18]            Optional. Title text to display
+
+                          message[40]          Optional. Message text to display
+
+  signature  64           1BE1581D1CA63EBD65D919DFFB7F575DDC396A5C4822CE6F395C1BEC34010E39
+
+{
+
+   "apiVersion":"1.0",
+
+   "message":"initTxn",
+
+   "type":"request",
+
+   "timestamp":"2023-05-30 11:06:02",
+
+   "messageTraceID":"112233445566",
+
+   "body":{
+
+             "fareAmount":"350",
+
+             "fareClass":"1",
+
+             "retrigger":"1",
+
+             "entryDt":"2023-05-30 11:06:02",
+
+             "vehicleNo":"VMM1234",
+
+             "entryLane":"E01",
+
+             "gstAmount":"0",
+
+             "gstTaxAmount":"0";
+
+             "sAmount":"0",
+
+             "sTaxAmount":"0",
+
+             "pAmount":"350",
+
+             "pTaxAmount":"0",
+
+             "discAmount":"0",
+
+             "discTaxAmount":"0",
+
+   },
+
+   "signature":"1BE1581D1CA63EBD65D919DFFB7F575DDC396A5C4822CE6F395C1BEC34010E39"
+
+}
+
+                                                                                  Page | 21
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max         Value
+                  Length
+
+  apiVersion      12          1.0
+
+  message         10          initTxn
+
+  type            10          ack
+
+  timestamp       20          2023-05-30 11:07:32
+
+  messageTraceID 40           112233445566
+
+  body            n           errorCode            0000
+
+  signature       64          29DD4219279A020368A102BBF57A2EBA958BC43D8EC7A4F8EB04E9C063A6D075
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTxn",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:07:32",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"29DD4219279A020368A102BBF57A2EBA958BC43D8EC7A4F8EB04E9C063A6D075"
+
+}
+
+                                                         Page | 22
+C+ LprEcpi ­ Integration
+
+4.5 Abort Txn
+
+This function is to abort the card scanning process and return to idle state.
+Request
+
+  Key Name    Max              Value
+              Length
+
+  apiVersion  12               1.0
+
+  message     20               abortTxn
+
+  type        10               request
+
+  timestamp   20               2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body        n                titleTXT[18]         Optional. Title text to display
+
+                               messageTXT[40]       Optional. Message text to display
+
+                               soundID[2]           (jvx-ecpi-lpr version 6.9.11 onward)
+                                                    Optional: Sound Id
+
+                                                         - 01 (Success beep)
+                                                         - 02 (Failed beep)
+                                                         - FF (No beep) - Default no beep
+
+  signature   64               4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"abortTxn",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1"
+
+}
+
+                                                                                           Page | 23
+C+ LprEcpi ­ Integration
+
+Response
+
+  Key Name        Max          Value
+                  Length
+
+  apiVersion      12           1.0
+
+  message         10           abortTxn
+
+  type            10           ack
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            errorCode            0000
+
+  signature       64           79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"abortTxn",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:22:54",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02"
+
+}
+
+                                                          Page | 24
+C+ LprEcpi ­ Integration
+
+4.6 Card Read
+
+This function is sent from the reader to LPR when card is detected and the status of the card for Init Card (i.e valid
+card, blacklisted, expired card).
+
+Request
+
+Key Name    Max           Value
+            Length
+
+apiVersion  12            1.0
+
+message     20            cardRead
+
+type        10            request
+
+timestamp   20            2023-05-30 11:06:02
+
+messageTraceID 40         112233445577
+
+body        n             errorCode[4]                  0000
+
+                          txnID                         Terminal transaction ID. Generated from terminal.
+
+                                                        0A6CDF1690177983701
+
+                          txnDt[20]                     2023-05-30 11:06:02
+
+                          maskPan[20]                   Masked PAN. Only first 6 and last 4 will be returned in clear,
+                                                        others will be masked with *. Please refer to Appendix B.
+
+                                                        4935 31** **** 2683
+
+                          hashPan[40]                   Hashed PAN. Hash with a full clear Card PAN.
+
+                                                        649B28A9F095B9716AA9543067ED4F9A995E8F62
+
+                          cardScheme[2]                 01 - MyDebit
+                                                        02 - Mastercard
+                                                        03 - Visa
+                                                        04 - Amex
+                                                        11 - Tng
+                                                        12 - Ezlink
+                                                        13 - Nets
+                                                        14 - TngAbt
+
+signature   64            5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+{
+            "apiVersion":"1.0",
+            "message":"cardRead",
+            "type":"request",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000",
+                        "txnDt":"2023-05-30 11:06:02",
+                        "maskPan":"493531******2683",
+
+                                                                                                           Page | 25
+C+ LprEcpi ­ Integration
+                        "hashPan":"649B28A9F095B9716AA9543067ED4F9A995E8F62",
+                        "cardScheme":"01"
+
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+}
+
+                                                                                                                                                                          Page | 26
+C+ LprEcpi ­ Integration
+Response
+
+Key Name    Max           Value
+            Length
+
+apiVersion  12            1.0
+                          cardRead
+message     10            ack
+                          2023-05-30 11:06:02
+type        10            112233445577
+                          errorCode
+timestamp   20
+
+messageTraceID 40
+
+body        n                                  0000
+
+signature   64
+
+{
+            "apiVersion":"1.0",
+            "message":"cardRead",
+            "type":"ack",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+
+                                                     Page | 27
+C+ LprEcpi ­ Integration
+
+4.7 Txn Status
+
+This function is sent from the reader to LPR on the status of the transaction for Init Txn (i.e approved, declined from
+the acquiring host).
+
+Request
+
+Key Name    Max           Value
+            Length
+
+apiVersion  12            1.0
+                          txnStatus
+message     20            request
+                          2023-05-30 11:06:02
+type        10            112233445577
+                          errorCode[4]
+timestamp   20            txnID
+
+messageTraceID 40         paymentMode
+
+body        n             txnDt[20]            0000
+                          maskPan[20]          Terminal transaction ID. Generated from terminal.
+                                               0A6CDF1690177983701
+                          hashPan[40]          Transaction Payment Mode.
+                                               online/offline
+                          cardScheme[2]        2023-05-30 11:06:02
+                                               Masked PAN. Only first 6 and last 4 will be returned in clear,
+                          EMV Card             others will be masked with *. Please refer to Appendix B.
+                          txID                 4935 31** **** 2683
+                                               Hashed PAN. Hash with a full clear Card PAN.
+                          mid[15]              649B28A9F095B9716AA9543067ED4F9A995E8F62
+                          tid[8]               01 - MyDebit
+                                               02 - Mastercard
+                                               03 - Visa
+                                               11 - Tng
+                                               14 - TngAbt
+
+                                               Transaction ID. Generated from back office
+                                               172665812756161008
+                                               Merchant ID from acquirer bank
+                                               Terminal ID from acquirer bank
+
+                                               Page | 28
+C+ LprEcpi ­ Integration
+
+                          stan[6]        System Trace Number. Sent from reader to acquiring host.
+                                         000001
+                          rrn[12]        Retrieval Reference Number. Returned from acquiring host.
+                                         000012300001
+                          apprCode[6]    Approval Code. Returned from acquiring host.
+                                         123456
+                          invNo[6]       Invoice Number. Sent from reader to acquiring host.
+                                         000001
+                          batchNo[6]     Batch No
+
+                          TNG Card       Card Balance
+                          cardBalance
+                          cardCsc        1667
+                          nrtPayload
+                                         Card Txn Counter
+
+                                         63885
+
+                                         Payload for NRT Server (*Controller is required to store this
+                                         payload in case the reader breaks down and is unable to
+                                         upload the batch)
+
+                          QR - B Scan C  E-Wallet ID
+                          walletId
+                                         S92 - TNGD
+                                         S93 - BOOST
+                                         S94 - GRABPAY
+                                         S95 - MAE
+                                         S96 - SPAY
+                                         S97 - ALIPAY
+                                         S98 - WECHATPAY
+
+                          fareAmount     Fare Amount.
+
+                                         100
+
+                          fareClass      Fare Class.
+
+                                         1
+
+signature  64             5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+                                                          Page | 29
+C+ LprEcpi ­ Integration
+{
+
+            "apiVersion":"1.0",
+            "message":"txnStatus",
+            "type":"request",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+
+                        "errorCode":"0000",
+                     "txnID":"0A6CDF1690177983701",
+                        "paymentMode":"online",
+                        "txnDt":"2023-05-30 11:06:02",
+                        "maskPan":"493531******2683",
+                        "hashPan":"649B28A9F095B9716AA9543067ED4F9A995E8F62",
+                        "cardScheme":"01",
+                        "txID":"172665812756161008",
+                        "mid":"12345678",
+                        "tid":"87654321",
+                        "stan":"000001",
+                        "rrn":"000012300001",
+                        "apprCode":"123456",
+                        "invNo":"000001",
+                        "batchNo":"654321";
+                        "fareAmount":"100",
+                        "fareClass":"1"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+}
+
+                                                                                                                                                                          Page | 30
+C+ LprEcpi ­ Integration
+Response
+
+Key Name    Max           Value
+            Length
+
+apiVersion  12            1.0
+                          txnStatus
+message     10            ack
+                          2023-05-30 11:06:02
+type        10            112233445577
+                          errorCode
+timestamp   20
+
+messageTraceID 40
+
+body        n                                  0000
+
+signature   64
+
+{
+            "apiVersion":"1.0",
+            "message":"txnStatus",
+            "type":"ack",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+
+                                                     Page | 31
+C+ LprEcpi ­ Integration
+
+4.8 Txn Query
+
+This function is to query the offline transaction posting status. Only valid offline transactions in the batch will be
+returned.
+Request
+
+  Key Name        Max Length Value
+
+  apiVersion      12           1.0
+
+  message         20           txnQuery
+
+  type            10           request
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            txnID[18]            Terminal transaction ID. Return from txnStatus.
+
+  signature       64           4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"txnQuery",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "txnID":"0A6CDF1690177983701"
+
+        },
+
+        "signature":"4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1"
+
+}
+
+                                                                                                     Page | 32
+C+ LprEcpi ­ Integration
+
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         txnQuery
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+                             txnID                Terminal transaction ID. Send from kiosk
+
+                             txnStatus            Transaction Status
+
+                                                  Transaction approved - approved
+                                                  Transaction rejected - rejected
+                                                  Transaction pending upload - pending
+                                                  Transaction not found - none
+
+  signature       64         79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"txnQuery",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:22:54",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000",
+
+              "txnID":"173349912994442012",
+
+              "txnStatus":"approved"
+
+        },
+
+        "signature":"79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02"
+
+}
+
+                                                                                            Page | 33
+C+ LprEcpi ­ Integration
+
+4.9 Finish Transaction
+
+This function is to complete the transaction. TCS sends this command after the barrier is opened and the reader will
+refresh the screen. If this command is not received by the reader, the reader screen will remain at the Transaction
+Completed screen for operation to support.
+
+Request
+
+  Key Name    Max            Value
+              Length         1.0
+                             finTxn
+  apiVersion  12             request
+                             2023-05-30 11:06:02
+  message     20             112233445566
+
+  type        10             9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+  timestamp   20
+
+  messageTraceID 40
+
+  body        n
+
+  signature   64
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"finTxn",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442"
+
+}
+
+                                            Page | 34
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         10         finTxn
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"finTxn",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:04",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD"
+
+}
+
+                                                        Page | 35
+C+ LprEcpi ­ Integration
+
+4.10Show Status
+
+This function is to show status to the reader. LPR sends this command when the validate on exit is completed without
+charge and the reader will refresh the screen and reset the state.
+
+Request
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         20         showStatus
+
+  type            10         request
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          titleTXT[18]         Title text to display
+
+                             messageTXT[40]       Message text to display
+
+                             soundId[2]           Sound Id
+                                                       - 01 (Success beep)
+                                                       - 02 (Failed beep)
+                                                       - FF (No beep)
+
+                             imageId[2]           Image Id
+                                                       - 04 (Success image)
+                                                       - 08 (Failed image)
+
+  signature       64         9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"showStatus",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "titleTXT":"Completed",
+
+              "messageTXT":"FOC",
+
+              "soundID":"01",
+
+              "imageID":"04"
+
+              },
+
+        "signature":"9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442"
+
+}
+
+                                                                             Page | 36
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         showStatus
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"showStatus",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:04",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD"
+
+}
+
+                                                        Page | 37
+C+ LprEcpi ­ Integration
+
+4.11SCPI Tunnel
+
+This function is used to access readers on hardware component level for example NFC PCD, SAM, Buzzer, and etc.
+Please refer to the SCPI specification to the command list. (Platform and environment functions as well as some
+functions from SCPI specification may not be supported on this tunnel).
+Request
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         20         scpi
+
+  type            10         request
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          sCha[2]              Channel Byte as per SCPI specification
+
+                             sIns[2]              Instruction Byte as per SCPI specification
+
+                             sData[n]             Data Byte(s) as per SCPI specification
+
+  signature       64         9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"scpi",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "sCha":"02",
+
+              "sIns":"12",
+
+              "sData":"010203040506"
+
+              },
+
+        "signature":"9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442"
+
+}
+
+                                                                                              Page | 38
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max          Value
+                  Length
+
+  apiVersion      12           1.0
+
+  message         10           scpi
+
+  type            10           response
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            errorCode            0000
+
+                               sStatus[2]           STATUS byte from SCPI response as per SCPI specification
+
+                               sRespData[n]         Response DATA as per SCPI specification
+
+  signature       64           228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"scpi",
+
+        "type":"response",
+
+        "timestamp":"2023-05-30 11:06:04",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000",
+
+              "sStatus":"00",
+
+              "sRespData":"010203040506"
+
+        },
+
+        "signature":"228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD"
+
+}
+
+                                                                                             Page | 39
+C+ LprEcpi ­ Integration
+
+4.12Set Reader Ip
+
+This function is to configure the reader ip.
+Request
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         20         setReaderIp
+
+  type            10         request
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          ip                   192.168.1.199
+
+                             netmask              255.255.255.0
+
+                             gateway              192.168.1.1
+
+                             dhcp                 0
+
+  signature       64         9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setReaderIp",
+
+        "type":"request",
+
+        "timestamp":"2023-06-26 11:30:30",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "ip":"192.168.1.199",
+
+              "netmask":"255.255.255.0",
+
+              "gateway":"192.168.1.1",
+
+              "dhcp":"0"
+
+        },
+
+        "signature":"E58129F980A7957A85CC238D58A0A357D9FD6FCA1D7A8D713CBFAB4237708543"
+
+}
+
+                                                                 Page | 40
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         10         setReaderIp
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setReaderIp",
+
+        "type":"ack",
+
+        "timestamp":"2023-06-26 11:32:01",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"69A9CB53658F8ECB9F07C3ECED4EA33F7413B0ED0E1E9657317C89A14DA3A9BF"
+
+}
+
+                                                        Page | 41
+C+ LprEcpi ­ Integration
+
+4.13 Reboot
+
+This function is to reboot the reader.
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12             1.0
+
+  message     20             reboot
+
+  type        10             request
+
+  timestamp   20             2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body        n              empty
+
+  signature   64             9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"reboot",
+
+        "type":"request",
+
+        "timestamp":"2023-06-26 11:30:30",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"5EE94E3BD613AAD3AA9355DAC44704F4654841F453BBF2F00BD969D27E54FE95"
+
+}
+
+                                                  Page | 42
+C+ LprEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         10         reboot
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"reboot",
+
+        "type":"ack",
+
+        "timestamp":"2023-06-26 11:30:32",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"B1491B7B2D1557EB03AE8F85A147163E0A033E16EA7AAC7D2C54DFC49B1041ED"
+
+}
+
+                                                        Page | 43
+C+ LprEcpi ­ Integration
+
+4.14 Heartbeat
+
+This function is an alternative way to maintain the heartbeat status.
+Request
+
+  Key Name    Max Length Value
+  apiVersion
+  message     12          1.0
+  type
+              20          ping
+
+              10          inform
+
+{
+
+   "apiVersion":"1.0",
+
+   "message":"ping",
+
+   "type":"inform"
+
+}
+
+Response
+
+  Key Name    Max Length Value
+  apiVersion
+  message     12          1.0
+  type
+              10          ping
+
+              10          ack
+
+{
+
+   "apiVersion":"1.0",
+
+   "message":"ping",
+
+   "type":"ack"
+
+}
+
+                                                                       Page | 44
+C+ LprEcpi ­ Integration
+
+4.15Get Relay I/O Value
+
+To obtain the I/O status from the I/O board connected to Jellies Reader.
+Supported by ECPI-LPR firmware Version 6.13 and above (Beta release date 2025-OCT-29).
+Request
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         20         rioGet
+
+  type            10         request
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          port                 0, 1, 2 or 3 which define the port number of I/O
+
+  signature       64         9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"rioGet",
+
+        "type":"request",
+
+        "timestamp":"2023-06-26 11:30:30",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "port":"0"
+
+        },
+
+        "signature":"E58129F980A7957A85CC238D58A0A357D9FD6FCA1D7A8D713CBFAB4237708543"
+
+}
+
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         10         rioGet
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          rioResp              0 - IO in open status
+                                                  1 - IO in close status
+                             errorCode            -1 - Invalid response from IO controller
+                                                  -2 - timeout from IO controller
+
+                                                  0000 - Successful
+                                                  OTHER - Failed, Refer ERROR code table
+
+                                                                                                    Page | 45
+C+ LprEcpi ­ Integration
+
+  signature  64             228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+   "apiVersion":"1.0",
+
+   "message":"rioGet",
+
+   "type":"ack",
+
+   "timestamp":"2023-06-26 11:32:01",
+
+   "messageTraceID":"112233445566",
+
+   "body":{
+
+             "errorCode":"0000"
+
+             "rioResp":"1"
+
+   },
+
+   "signature":"69A9CB53658F8ECB9F07C3ECED4EA33F7413B0ED0E1E9657317C89A14DA3A9BF"
+
+}
+
+                                       Page | 46
+C+ LprEcpi ­ Integration
+
+4.16Set Relay I/O Value
+
+To set the I/O to OPEN/CLOSE to the I/O board connected to Jellies Reader.
+Supported by ECPI-LPR firmware Version 6.13 and above (Beta release date 2025-OCT-29)
+Request
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         20         rioSet
+
+  type            10         request
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          port                 0, 1, 2 or 3 which define the port number of I/O
+
+                             ins                  Instruction
+
+                                                  - 0 - Open
+
+                                                  - 1 - Close
+
+  signature       64         9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"rioSet",
+
+        "type":"request",
+
+        "timestamp":"2023-06-26 11:30:30",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "port":"0",
+
+              "ins":"1"
+
+        },
+
+        "signature":"E58129F980A7957A85CC238D58A0A357D9FD6FCA1D7A8D713CBFAB4237708543"
+
+}
+
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         10         rioSet
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          rioResp              0 - IO OPEN/CLOSE successfully
+                                                  -1 - Invalid response from IO controller
+
+                                                                                                    Page | 47
+C+ LprEcpi ­ Integration
+
+                            errorCode  -2 - timeout from IO controller
+
+                                       0000 - Successful
+                                       OTHER - Failed, Refer ERROR code table
+
+  signature  64             228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+   "apiVersion":"1.0",
+
+   "message":"rioGet",
+
+   "type":"ack",
+
+   "timestamp":"2023-06-26 11:32:01",
+
+   "messageTraceID":"112233445566",
+
+   "body":{
+
+             "errorCode":"0000"
+
+             "rioResp":"0"
+
+   },
+
+   "signature":"69A9CB53658F8ECB9F07C3ECED4EA33F7413B0ED0E1E9657317C89A14DA3A9BF"
+
+}
+
+                                                                               Page | 48
+C+ LprEcpi ­ Integration
+
+5 Process Flow
+
+                                                                                                                                                                          Page | 49
+C+ LprEcpi ­ Integration
+
+5.1 Initialization
+
+                                                                                                                                                                          Page | 50
+C+ LprEcpi ­ Integration
+
+5.2 Entry
+
+                                                                                                                                                                          Page | 51
+C+ LprEcpi ­ Integration
+
+5.3 Exit
+
+Exit with card enter
+
+                                                                                                                                                                          Page | 52
+C+ LprEcpi ­ Integration
+Exit with LPR enter
+
+                                                                                                                                                                          Page | 53
+C+ LprEcpi ­ Integration
+
+5.4 Abort Transaction
+
+Car present to the loop and leave the loop without tapping card or payment successful
+
+                                                                                                                                                                          Page | 54
+C+ LprEcpi ­ Integration
+
+Appendix A
+
+Error Code
+
+Error Code                Description
+   0000                   Successful - Command executed successfully / Transaction Completed
+   10XX                   Failed - Transaction Declined by Bank Host
+                          XX - Response Code from bank host
+   1101                   1005 - Do not honor
+   1102                   1051 - Insufficient Fund
+   1199                   Failed - Transaction Failed
+   2001                   Failed - Transaction Error
+   3001                   Failed - Generic Error
+   3002                   Failed - Invalid Data
+   3003                   Failed - Card Invalid
+   3004                   Failed - Card Blacklisted
+   3005                   Failed - Card Not Allow
+   3006                   Failed - Card Rejected
+   3007                   Failed - Multiple Card
+   3101                   Failed - Card Expired
+   3102                   Failed - Insufficient Fund
+   3201                   Failed - Bank Connect Error
+   9001                   Failed - Bank Timeout
+   9101                   Failed - Aborted by Kiosk
+                          Failed - Terminal Busy
+   9102                   Failed - Terminal Not Active
+   9999                   Controller has to resend initTerminal in order to activate the reader
+                          Failed - Terminal Active
+                          Failed - General Error
+
+                                                                                                 Page | 55
+C+ LprEcpi ­ Integration
+
+Reader State
+
+  State                   Description
+    1                     Idle
+    2                     Card Scanning
+    3                     Card Detected
+    4                     Host Authorizing
+    5                     Completion
+
+
+
+                                            Page | 56
+C+ LprEcpi ­ Integration
+
+Appendix B
+
+Mask Pan and Hash Pan
+
+Example            Mask PAN          Hash PAN (20bytes, 40chars)
+ Clear PAN         400012******9010  25229f771a4db7a419ab7173e9
+ 4000123456789010                    6daad8ff4a8eb704ce543a44a1
+                                     4ec5e8b2bda0
+4000127654329010   400012******9010
+                                     3521122e5308163881cd1d31dff
+                                     6be11f6b8dbc9fee8083d93a523
+                                     6761f85e62
+
+Use Mask PAN for report ­ Human Recognizable.
+Use Hash PAN for system matching. Prevent duplicable Mask PAN.
+
+                                                                  Page | 57
+C+ LprEcpi ­ Integration
+
+Appendix C
+
+Set reader IP using TCPI tool
+
+     1. Ensure to configure an additional IP at IPV4 of same subnet with the reader 192.168.1.x. (Eg: 192.168.1.52)
+          and ping to test the connection with reader.
+
+     2. Open TCPI tool
+     3. Launch TCPI
+
+                                                                                                                                                                          Page | 58
+C+ LprEcpi ­ Integration
+     4. Enter the current reader's IP address, and click "connect". Once connected, change the operator mode to "2"
+          (offline mode) and click "Req".
+
+     5. Select "perso" tab and type in new reader IP and "save changes".
+
+                                                                                                                                                                          Page | 59
+C+ LprEcpi ­ Integration
+     6. Go to "Util" tab and click "reboot".
+     7. Init terminal in operation mode "1" (Live mode).
+                                                          <END OF DOCUMENT>
+
+                                                                                                                                                                          Page | 60
+

@@ -1,0 +1,2926 @@
+C+ KioskEcpi ­ Integration
+
+DOCUMENT TYPE:
+
+TECHNICAL DOCUMENTATION
+
+DOCUMENT TITLE:
+
+C+ KioskEcpi ­ Integration
+
+TARGET AUDIENCE:
+Project management team, software and hardware development team. Limited to technology partners and internal
+use only (PRIVATE AND CONFIDENTIAL)
+
+2024
+
+This document was created by CoherentPlus Sdn. Bhd. Document's contents may be changed without prior notice.
+External links are provided for information only. CoherentPlus Sdn. Bhd. does not claim liability for access to and
+correctness of the referenced content.
+
+COPYRIGHT
+
+All information contained in this document is intended for the person or entity to which it is addressed and contains
+confidential and/or privileged material. Any review or dissemination in reliance upon this information by persons or
+entities other than the intended recipient is prohibited.
+
+                          
+Copyright © 2024 CoherentPlus Sdn. Bhd. All rights reserved
+
+Created at: Jan 19, 2024 Version.
+
+                                                             Page | 1
+C+ KioskEcpi ­ Integration
+
+Document Version
+
+Version  Date               By  Description
+3.0
+3.1      2024-01-19 SF Lee      Initial Release
+
+         2024-03-22 SF Lee      Added:
+                                     - Init Entry / Init Entry Status / Proceed Entry
+3.2      2024-04-02 SF Lee           - Init Exit / Init Exit Status / Proceed Exit
+
+3.3      2024-05-03 SF Lee      Added:
+                                     - Txn Query
+3.4      2024-05-16 SF Lee           - status for Init Entry Status / Init Exit Status
+
+3.5      2024-07-12 SF Lee      Added:
+                                     - Error code for parking
+3.6      2024-07-26 SF Lee
+                                Added:
+3.7      2024-10-08 Justin Aw        - To support TNG card (Init Entry / Init Entry
+                                          Status / Proceed Entry / Init Exit / Init Exit
+3.8      2024-10-24 Justin Aw             Status / Proceed Exit)
+                                     - Proceed Exit Status
+3.9      2024-11-26 Seow Yen         - SetBlacklist
+
+                                Added:
+                                     - Process Flow for Parking Entry and Exit
+                                     - payFlag for parking
+
+                                Updated:
+                                     - Process Flow
+
+                                Fixed:
+                                     - Listening port 5000
+
+                                Added:
+                                     - The recommended logging from kiosk.
+                                     - Process Flow State Diagram.
+                                     - Signature calculation and Signed Message.
+
+                                Added:
+                                     - setAutoReloadFlag for TNG
+
+                                Added
+                                     - Set reader IP using TCPI tool
+
+                                Updated
+                                     - Process Flow
+
+                                                                                          Page | 2
+C+ KioskEcpi ­ Integration
+
+Table of Contents
+
+1 Introduction............................................................................................................................. 4
+    1.1 Scope.......................................................................................................................................4
+    1.2 Abbreviations..........................................................................................................................4
+    1.3 References.............................................................................................................................. 4
+
+2 Overview, Connectivity & Setup..................................................................................................5
+    2.1 Overview.................................................................................................................................5
+    2.2 Connectivity & Setup.............................................................................................................. 6
+
+3 Message Format........................................................................................................................... 7
+    3.1 Request................................................................................................................................... 7
+    3.2 Response.................................................................................................................................8
+    3.3 Signature Calculation and Signed Message..........................................................................9
+    3.4 Logging between Kiosk Controller and Reader................................................................... 10
+
+4 Commands & Responses.........................................................................................................11
+    4.1 Init Terminal.......................................................................................................................... 11
+    4.2 Get Status..............................................................................................................................13
+    4.3 Init Card............................................................................................................................... 16
+    4.4 Init Entry...............................................................................................................................18
+    4.5 Init Entry Status................................................................................................................... 20
+    4.6 Proceed Entry...................................................................................................................... 24
+    4.7 Init Exit................................................................................................................................. 29
+    4.8 Init Exit Status......................................................................................................................31
+    4.9 Proceed Exit........................................................................................................................ 35
+    4.10 Proceed Exit Status........................................................................................................... 37
+    4.11 Start Transaction................................................................................................................41
+    4.12 Abort Txn............................................................................................................................ 43
+    4.13 Txn Status..........................................................................................................................45
+    4.14 Txn Query.......................................................................................................................... 48
+    4.15 Finish Transaction............................................................................................................... 50
+    4.16 Set Blacklist (TNG)............................................................................................................ 52
+    4.17 Set AutoReloadFlag (TNG)................................................................................................54
+    4.18 Set Reader Ip.....................................................................................................................56
+    4.19 Reboot............................................................................................................................... 58
+
+5 Process Flow...........................................................................................................................60
+    5.1 Initialization.......................................................................................................................... 61
+    5.2 Sale Transaction.................................................................................................................. 62
+    5.3 Parking Entry....................................................................................................................... 63
+    5.4 Parking Exit..........................................................................................................................64
+    5.5 Abort Transaction.................................................................................................................65
+
+Appendix A................................................................................................................................66
+    Error Code.................................................................................................................................................66
+    Reader State..............................................................................................................................................67
+    Scheme List............................................................................................................................... 68
+
+Appendix B................................................................................................................................69
+
+                                                                                                                                                                           Page | 3
+C+ KioskEcpi ­ Integration
+
+    Mask Pan and Hash Pan........................................................................................................................... 69
+Appendix C................................................................................................................................70
+
+    Set reader IP using TCPI tool.................................................................................................................... 70
+
+                                                                                                                                                                           Page | 4
+C+ KioskEcpi ­ Integration
+
+1 Introduction
+
+1.1 Scope
+
+This document outlines the integration API between reader and controller:
+
+     1. Overview, Connectivity & Setup
+     2. Message format
+     3. Commands & Responses
+     4. Process Flow
+
+1.2 Abbreviations           Europay, Mastercard, Visa
+                            CoherentPlus Contactless Reader
+ EMV                        Offline Data Authentication
+ Jellies                    Kiosk Controller
+ ODA                        Lane Unattended Server
+ Kiosk                      Touch N Go
+ LUS
+ TNG
+
+1.3 References
+
+ NA
+
+                                                                           Page | 5
+C+ KioskEcpi ­ Integration
+
+2 Overview, Connectivity & Setup
+
+2.1 Overview
+
+ECPI is a communication interface that facilitates payment functionality for kiosks to accept EMV card, local electronics
+purse payment and E-Wallet. Kiosk and Jellies reader are connected via LAN communication. Jellies reader and LUS are
+connected via the internet. This document describes the command to operate Jellies to accept payment.
+The commands are designed for simple integration, without being required to integrate the bank system. Jellies will
+handle the EMV, local electronics purse card reading, E-Wallet and bank host authorization process, and returning
+kiosk controller a payment status with approval detail.
+
+
+                                                                                                                                                                           Page | 6
+C+ KioskEcpi ­ Integration
+
+2.2 Connectivity & Setup
+
+     A. Socket (TCP via LAN)
+                a. Default socket is opened at Port 5000
+                b. Connect to this device IP with port number
+                c. One connection allowed per session. Second connection will be refused if the first connection is
+                     still alive.
+
+     B. Heartbeat
+                a. Heartbeat is required to send in every 30 seconds (within 30 seconds) if there is no
+                     communication in between.
+                b. Connection will be dropped by the reader if there is no heartbeat communicated within the
+                     heartbeat cutoff period. When the connection is dropped, the controller is required to recover the
+                     connection by reestablishing the connection and initialization process as per illustrated in Process
+                     Flow.
+                c. Heartbeat is a 2 bytes message carrying null bytes, 0x00 0x00.
+
+                                                                                                                                                                           Page | 7
+C+ KioskEcpi ­ Integration
+
+3 Message Format
+
+This chapter describes the general format of requests and responses that communicate between reader and kiosk.
+The supported message format for all the requests and responses is in JSON format.
+
+3.1 Request
+
+  Key Name        Max Length       Description
+  apiVersion      12               Api Version.
+  message         20               Command of this message.
+  type            10               Type of this message.
+                                   request - Request
+  timestamp       20               Date time of this message.
+                                   2023-05-30 11:06:02 - YY-MM-DD hh:mm:ss
+  messageTraceID 40                Trace Id for this message.
+                                   Body of the message.
+  body            n                SHA256 of the full message with a secret key.
+                                   signature = secretkey + full message
+  signature       64
+
+Example:
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "plazaID":"P01",
+
+              "laneID":"L01",
+
+              "operationMode":"1",
+
+              "laneType":"3"
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+                                                                                  Page | 8
+C+ KioskEcpi ­ Integration
+
+3.2 Response
+
+  Key Name        Max Length       Description
+  apiVersion      12
+  message         20               Api Version.
+  type            10
+                                   Command of this message.
+
+                                   Type of this message.
+
+                                   ack - Acknowledgement
+
+  timestamp       20               Date time of this message.
+
+                                   2023-05-30 11:06:02 - YY-MM-DD hh:mm:ss
+
+  messageTraceID 40                Trace Id for this message.
+
+  body            n                Body of the message.
+
+                                   errorCode[4]           Response status of command execution
+
+  signature       64               SHA256 of the full message with a secret key.
+
+                                   signature = secretkey + full message
+                                   Please refer to section Signature Calculation and Signed Message
+
+Example:
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                                                                     Page | 9
+C+ KioskEcpi ­ Integration
+
+3.3 Signature Calculation and Signed Message
+
+The flow diagram below illustrates the signature calculation and generating a signed message.
+
+                                                                                                                                                                          Page | 10
+C+ KioskEcpi ­ Integration
+
+3.4 Logging between Kiosk Controller and Reader
+
+System integrators are required to log all communications between the controller and the reader. This should include
+timestamps, IP addresses, network connection activities, socket messages, and any exceptions that occur during
+message exchanges, as shown below:
+
+     A. A normal scenario:
+ 2024-05-23 10:05:10 [192.168.0.50] >> Connect Port 500
+ 2024-05-23 10:05:10 [192.168.0.50] << Connected Successfully
+ 2024-05-23 10:05:11 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:12 [192.168.0.50] << RCVD "{abcdefg......................"}
+ 2024-05-23 10:05:13 [192.168.0.50] << RCVD "{abcdefg......................"}
+ 2024-05-23 10:05:14 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << RCVD "{abcdefg......................"}
+ 2024-05-23 10:05:16 [192.168.0.50] >> Disconnect 500
+ 2024-05-23 10:05:16 [192.168.0.50] << Disconnected Successfully
+
+     B. Example logs of exception errors.
+ 2024-05-23 10:05:10 [192.168.0.50] >> Connect Port 500
+ 2024-05-23 10:05:10 [192.168.0.50] << ERROR: Failed to connect to port 500 (Conn refused)
+ 2024-05-23 10:05:11 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << ERROR: Failed to write on socket.
+ 2024-05-23 10:05:11 [192.168.0.50] >> SENT "{abcdefg......................"}
+ 2024-05-23 10:05:15 [192.168.0.50] << ERROR: Timeout. Unable to receive response.
+ 2024-05-23 10:09:16 [192.168.0.50] << ERROR: Connection terminated.
+ 2024-05-23 10:15:18 [192.168.0.50] << ERROR: Connection closed by remote device
+
+This log is crucial for debugging and issue analysis between the system integrator and CoherentPlus. In the event of
+exceptional cases during development or in a live environment, the log should be submitted to CoherentPlus for initial
+troubleshooting and resolution.
+It is mandatory to retain this log in the controller for at least 15 days, and doing so is highly advisable for effective
+issue tracking.
+
+                                                                                                                                                                          Page | 11
+C+ KioskEcpi ­ Integration
+
+4 Commands & Responses
+
+This section outlines the command set and its response respectively. A valid command message shall be packed with
+message format as described in the previous chapter.
+
+4.1 Init Terminal
+
+The reader will always be in "not-in-use" mode after start up. This command activates the reader into "ready to use"
+state. Kiosk is required to pass in the plazaId, laneId, operationMode, laneType. The timestamp will be used to sync
+the date time to the reader.
+
+Request
+
+Key Name    Max Length      Value
+
+apiVersion  12              1.0
+
+message     20              initTerminal
+
+type        10              request
+
+timestamp   20              2023-05-30 11:06:02
+
+messageTraceID 40           112233445566
+
+body        n               plazaID[10]          P01
+
+                            laneID[10]           L01
+
+                            operationMode[2] 0 - Maintenance Mode
+                                                      1 - Live Mode
+                                                      2 - Not In Use
+
+                            laneType[2]          1 - Entry
+                                                 2 - Exit
+                            Optional Fields      3 - Open
+                                                 4 - Dual
+                            title[18]
+                                                 Optional. Title text to display
+
+                            message[40]          Optional. Message text to display
+
+                            selectNext[2]        Optional. To allow unknown card to be processed by controller
+                                                 on APDU level
+                                                 0 - Unknown card will be alert with error message
+                                                 1 - Unknown card will NOT be alerted with an error message,
+                                                 but return invalid card error to the controller to process with
+                                                 other card business rules on APDU level, and process the alert
+                                                 on controller level.
+
+                            offlineApprove[2]    Optional: To allow payment terminal to approve EMV
+                                                 transaction in offline condition below:
+                                                 0 - Always online. Connection/Timeout error will end with
+                                                 declined.
+
+                                                                                    Page | 12
+C+ KioskEcpi ­ Integration
+
+  signature       64                                         1 - Auto Offline. If connection/Timeout detected, transaction
+                                                             will be stored in batch file for delay online approval.
+                                                             2- Always Offline. Always approved offline, transactions will be
+                                                             stored in batch files for delay online approval.
+
+                                                             Delay online authorization is scheduled and automated.
+
+                                                             NOTE: Enable offlineApprove (Delay authorization) is on
+                                                             MERCHANT RISK. There is no guarantee that delayed
+                                                             authorization will be approved.
+
+                                   0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "plazaID":"P01",
+
+              "laneID":"L01",
+
+              "operationMode":"1",
+
+              "laneType":"3"
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+Response
+
+  Key Name        Max         Value
+                  Length
+
+  apiVersion      12          1.0
+
+  message         20          initTerminal
+
+  type            10          ack
+
+  timestamp       20          2023-05-30 11:06:02
+
+  messageTraceID 40           aa11bb22cc33dd44
+
+  body            n           errorCode[4]         0000
+
+  signature       64          ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initTerminal",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                         Page | 13
+C+ KioskEcpi ­ Integration
+
+4.2 Get Status
+
+This function is to get the current reader status and the previous response. Kiosk is required to send this command to
+get the previous response if the current command is timeout.
+
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12                1.0
+
+  message     20                getStatus
+
+  type        10                request
+
+  timestamp   20                2023-05-30 11:06:02
+
+  messageTraceID 40             112233445566
+
+  body        n                 empty
+
+  signature   64                48E412867FA461765876EF0903233E857823D28BB52169E7DE1EC1C3CB3CFBCB
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"getStatus",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"48E412867FA461765876EF0903233E857823D28BB52169E7DE1EC1C3CB3CFBCB"
+
+}
+
+                                                     Page | 14
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         20         getStatus
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode                0000
+
+                             operationMode            0 - Maintenance Mode
+                                                      1 - Live Mode
+                                                      2 - Not In Use
+
+                             state                    01 - Idle
+                                                      02 - Scanning Card
+                                                      03 - Card Detecting
+                                                      04 - Card Detected
+                                                      05 - Host Authorizing
+                                                      03 - Transaction Completed
+                                                      99 - Not In Use
+
+                             lastCmd                  Full command from previous instruction
+
+                             lastResp                 Full response from previous instruction
+
+  signature       64         BE6C458580F8C6256E72D4FBE62C5F6A42BD37470D82273374285B541DDC124F
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"getStatus",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:11:21",
+
+        "messageTraceID":"112233445588",
+
+        "body":{
+
+              "errorCode":"0000",
+
+              "operationMode":"1",
+
+              "state":"1",
+
+              "lastCmd":{
+
+                  "apiVersion":"1.0",
+
+                  "message":"initTerminal",
+
+                  "type":"request",
+
+                  "timestamp":"2023-05-30 11:06:02",
+
+                  "messageTraceID":"112233445566",
+
+                  "body":{
+
+                            "plazaID":"P01","laneID":"L01","operationMode":"1","laneType":"3"
+
+                  },
+
+                  "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+              },
+
+              "lastResp":{
+
+                  "apiVersion":"1.0",
+
+                  "message":"initTerminal",
+
+                  "type":"request",
+
+                  "timestamp":"2023-05-30 11:06:02",
+
+                  "messageTraceID":"112233445566",
+
+                  "body":{
+
+                                                                                               Page | 15
+C+ KioskEcpi ­ Integration
+
+                            "errorCode":"0000"
+
+          },
+
+          "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+       }
+
+   },
+
+   "signature":"BE6C458580F8C6256E72D4FBE62C5F6A42BD37470D82273374285B541DDC124F"
+
+}
+
+                                                Page | 16
+C+ KioskEcpi ­ Integration
+
+4.3 Init Card
+
+This function is to start the process of detecting and reading a card. If the card is found valid, it will send an
+acknowledgement to the kiosk. Kiosk is required to send this command on every end of the transaction if retrigger set
+to 1, otherwise the reader will go back to detecting and reading a card after Finish Txn. This function is optional.
+
+Request
+
+  Key Name        Max Length    Value
+
+  apiVersion      12            1.0
+
+  message         20            initCard
+
+  type            10            request
+
+  timestamp       20            2023-05-30 11:06:02
+
+  messageTraceID 40             112233445566
+
+  body            n             fareClass[2]         This field to be defined by kiosk
+
+                                retrigger[1]         0 - Do not required to send initCard. Reader will start scanning
+                                                     card after finTxn.
+                                                     1 - Required to send initCard to start scanning card.
+
+                                title[18]            Optional. Title text to display
+
+                                message[40]          Optional. Message text to display
+
+  signature       64            0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initCard",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "fareClass":"1",
+
+              "retrigger":"1",
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+                                                                                        Page | 17
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12           1.0
+
+  message         20           initCard
+
+  type            10           ack
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            aa11bb22cc33dd44
+
+  body            n            errorCode[4]         0000
+
+  signature       64           ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initCard",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                          Page | 18
+C+ KioskEcpi ­ Integration
+
+4.4 Init Entry
+
+This function is to start the process of detecting and reading a card for entry. If the card is found valid, it will send an
+Init Entry Status to the kiosk. Kiosk is required to send the Proceed Entry command to complete the entry process.
+
+Request
+
+  Key Name        Max Length    Value
+
+  apiVersion      12            1.0
+
+  message         20            initEntry
+
+  type            10            request
+
+  timestamp       20            2023-05-30 11:06:02
+
+  messageTraceID 40             112233445566
+
+  body            n             mode[1]              0 - Pre-authorization
+                                                     1 - Sale Reversal
+                                                     2 - Card Validate
+
+                                fareAmount[12] 350(equal to RM3.50)
+
+                                fareClass[2]         This field to be defined by kiosk
+
+                                title[18]            Optional. Title text to display
+
+                                message[40]          Optional. Message text to display
+
+  signature       64            0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initEntry",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "mode":"1",
+
+              "fareAmount":"350",
+
+              "fareClass":"1"
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+                                                                                        Page | 19
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12            1.0
+
+  message         20            initEntry
+
+  type            10            ack
+
+  timestamp       20            2023-05-30 11:06:02
+
+  messageTraceID 40             aa11bb22cc33dd44
+
+  body            n             errorCode[4]         0000
+
+  signature       64            ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initEntry",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"aa11bb22cc33dd44",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                           Page | 20
+C+ KioskEcpi ­ Integration
+
+4.5 Init Entry Status
+
+This function is sent from reader to kiosk when card is detected and the status of the card (i.e valid card, blacklisted,
+entry record found/not found).
+
+Request
+
+Key Name    Max Length Value
+
+apiVersion  12              1.0
+
+message     20              initEntryStatus
+
+type        10              request
+
+timestamp   20              2023-05-30 11:06:02
+
+messageTraceID 40           aa11bb22cc33dd44
+
+body        n               errorCode[4]         0000
+
+                            entryDt[20]          2023-05-30 11:06:02
+
+                            maskPan[20]          Masked PAN. Only first 6 and last 4 will be returned in clear,
+                                                 others will be masked with *.
+
+                                                 4935 31** **** 2683
+
+                                                 Non EMV will be returned in clear.
+
+                                                 1000140007140828
+
+                            hashPan[40]          Hashed PAN. Hash with a full clear Card PAN.
+
+                                                 649B28A9F095B9716AA9543067ED4F9A995E8F62
+
+                            cardScheme[2]        01 - VISA
+                                                 02 - MasterCard
+                                                 03 - MyDebit
+
+                            status[2]            Entry Status
+
+                                                 01 - Entry found in system
+                                                 02 - Entry not found in system
+
+                            cardBal[12]          Card Balance. TNG Card Only
+
+                                                 39979 - $399.79
+
+                            mfgNo[]              Mfg No. TNG Card Only
+
+                                                 0286144655
+
+                            cardTxnNo[]          Card Txn No. TNG Card Only
+
+                                                 62979
+
+                                                                                               Page | 21
+C+ KioskEcpi ­ Integration
+
+                            purseFlag[]    Purse Flag. TNG Card Only
+
+                                           P - Purse
+                                           E - E-wallet
+
+                            machineCode    Machine Code. TNG Card Only
+
+                                           41424344
+
+                            cardNo         Card No. TNG Card Only
+
+                                           601464000788007155
+
+                            corporateFlag  Corporate Flag. TNG Card Only
+
+                                           N
+
+                            userCat        User Cat. TNG Card Only
+
+                                           N
+
+                            cscType        Csc Type. TNG Card Only
+
+                                           R
+
+                            chipData       Parking Chip Data. TNG Card Only
+
+                                           0001000102030405060708090A0B0C0D0E0F000200C44EBA0
+                                           00402177E400004B2674B05050000000000000000000000000
+                                           00000000005010000000000000000000000000000000007000
+                                           000000000000000000000000030000007010001F603012B9C0
+                                           000624044AF0001A00702A082E044AF000102000000000000
+                                           00000D00414243445000330000000000000000000D0132310
+                                           3B69C5BBAEDF04902003530F99C0E00000000000000000000
+                                           00000000000000
+
+                                           Decode:
+
+                                           Sector - 00
+                                           Block - 01
+                                           Value - 000102030405060708090A0B0C0D0E0F
+
+signature  64               5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+EMV  "apiVersion":"1.0",
+{    "message":"initEntryStatus",
+     "type":"request",
+}    "timestamp":"2023-05-30 11:06:02",
+     "messageTraceID":"112233445577",
+     "body":{
+
+                 "errorCode":"0000",
+                 "entryDt":"2023-05-30 11:06:02",
+                 "maskPan":"493531******2683",
+                 "hashPan":"649B28A9F095B9716AA9543067ED4F9A995E8F62",
+                 "cardScheme":"01"
+                 "Status":"01",
+     },
+     "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+                                                                                     Page | 22
+C+ KioskEcpi ­ Integration
+
+TNG
+{
+
+            "apiVersion":"1.0",
+            "message":"initEntryStatus",
+            "Type":"request",
+            "timestamp":"2024-05-15 16:25:23",
+            "messageTraceID":"20240515162523",
+            "body":{
+
+                        "errorCode":"0000",
+                        "entryDt":"2024-05-15 16:25:23",
+                        "maskPan":"0286144655",
+                        "hashPan":"DD63CD9B718FFCA9AFA8B3B07BEBE1478AA4BCE7",
+                        "cardScheme":"11",
+                        "status":"02",
+                        "cardBal":"39979",
+                        "mfgNo":"0286144655",
+                        "cardTxnNo":"62979",
+                        "purseFlag":"P",
+                        "machineCode":"41424344",
+                        "cardNo":"601464000788007155",
+                        "coperateFlag":"N",
+                        "userCat":"N",
+                        "cscType":"R",
+                        "chipData":"0001000102030405060708090A0B0C0D0E0F000200C44EBA000402177E40
+            0004B2674B0505000000000000000000000000000000000005010000000000000000000000000
+            000000007000000000000000000000000000030000007010001F603012B9C0000624044AF0001
+            A00702A082E044AF00010200000000000000000D00414243445000330000000000000000000D0
+            1323103B69C5BBAEDF04902003530F99C0E0000000000000000000000000000000000"
+            },
+            "signature":"53CB3AAB65D84321B1E7E729013F6C371F204C42F84163512E22849F8F3C8D7E"
+}
+
+                                                                                                                                                                          Page | 23
+C+ KioskEcpi ­ Integration
+Response
+
+Key Name    Max             Value
+            Length
+
+apiVersion  12              1.0
+                            initEntryStatus
+message     10              ack
+                            2023-05-30 11:06:02
+type        10              112233445577
+                            errorCode
+timestamp   20
+
+messageTraceID 40
+
+body        n                                    0000
+
+signature   64
+
+{
+            "apiVersion":"1.0",
+            "message":"initEntryStatus",
+            "type":"ack",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+
+                                                       Page | 24
+C+ KioskEcpi ­ Integration
+
+4.6 Proceed Entry
+
+This function is to authorize the transaction with the host to complete the entry transaction. Transaction response will
+be returned to the kiosk.
+
+Request
+
+Key Name    Max Length Value
+
+apiVersion  12              1.0
+
+message     20              proceedEntry
+
+type        10              request
+
+timestamp   20              2023-05-30 11:06:02
+
+messageTraceID 40           112233445577
+
+body        n               payFlag              Payment Flag. This field is optional.
+
+                                                 Eg:
+                                                 0 - Tng Purse
+                                                 1 - Tng E-Wallet
+
+signature   64              5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+{
+            "apiVersion":"1.0",
+            "message":"proceedEntry",
+            "type":"request",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{},
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+
+                                                                                        Page | 25
+C+ KioskEcpi ­ Integration
+Response
+
+Key Name    Max             Value
+            Length
+
+apiVersion  12              1.0
+                            proceedEntry
+message     10              ack
+                            2023-05-30 11:06:02
+type        10              112233445577
+                            errorCode
+timestamp   20              txnID
+                            paymentMode
+messageTraceID 40           entryDt[20]
+                            maskPan[20]
+body        n                                    0000
+                            hashPan[40]          Terminal transaction ID. Generated from terminal.
+                            cardScheme[2]        0A6CDF1690177983701
+                                                 Transaction Payment Mode.
+                            stan[6]              online/offline
+                            rrn[12]              2023-05-30 11:06:02
+                            apprCode[6]          Masked PAN.
+                                                 EMV only first 6 and last 4 will be returned in clear, others will
+                                                 be masked with *.
+                                                 4935 31** **** 2683
+                                                 Non EMV will be returned in clear.
+                                                 1000140007140828
+                                                 Hashed PAN. Hash with a full clear Card PAN.
+                                                 649B28A9F095B9716AA9543067ED4F9A995E8F62
+                                                 01 - VISA
+                                                 02 - MasterCard
+                                                 03 - MyDebit
+                                                 11 - TNG
+                                                 System Trace Number. Sent from reader to acquiring host.
+                                                 000001
+                                                 Retrieval Reference Number. Returned from acquiring host.
+                                                 000012300001
+                                                 Approval Code. Returned from acquiring host.
+                                                 123456
+
+                                                 Page | 26
+C+ KioskEcpi ­ Integration
+
+                            invNo[6]       Invoice Number. Sent from reader to acquiring host.
+                                           000001
+                            fareAmount     Fare Amount.
+                                           100 (equal to RM1.00)
+                            fareClass      Fare Class.
+                                           1
+                            cardBal[12]    Card Balance. TNG Card Only
+                                           39979 - $399.79
+                            mfgNo[]        Mfg No. TNG Card Only
+                                           0286144655
+                            cardTxnNo[]    Card Txn No. TNG Card Only
+                                           62979
+                            purseFlag[]    Purse Flag. TNG Card Only
+                                           P - Purse
+                            machineCode    E - E-wallet
+                            cardNo         Machine Code. TNG Card Only
+                            corporateFlag  41424344
+                            userCat        Card No. TNG Card Only
+                            cscType        601464000788007155
+                            chipData       Corporate Flag. TNG Card Only
+                                           N
+                                           User Cat. TNG Card Only
+                                           N
+                                           Csc Type. TNG Card Only
+                                           R
+                                           Parking Chip Data. TNG Card Only
+                                           0001000102030405060708090A0B0C0D0E0F000200C44EBA0
+                                           00402177E400004B2674B05050000000000000000000000000
+                                           00000000005010000000000000000000000000000000007000
+                                           000000000000000000000000030000007010001F603012B9C0
+                                           000624044AF0001A00702A082E044AF000102000000000000
+                                           00000D00414243445000330000000000000000000D0132310
+                                           3B69C5BBAEDF04902003530F99C0E00000000000000000000
+                                           00000000000000
+
+                                                                                                                        Page | 27
+C+ KioskEcpi ­ Integration
+
+                            Decode:
+
+                            Sector - 00
+                            Block - 01
+                            Value - 000102030405060708090A0B0C0D0E0F
+
+signature  64
+
+EMV  "apiVersion":"1.0",
+{    "message":"proceedEntry",
+     "type":"ack",
+}    "timestamp":"2023-05-30 11:06:02",
+     "messageTraceID":"112233445577",
+     "body":{
+
+                 "errorCode":"0000",
+                 "txnId":"0A6CDF1690177983701"
+                 "paymentMode":"online"
+                 "entryDt":"2023-05-30 11:06:02",
+                 "maskPan":"493531******2683",
+                 "hashPan":"649B28A9F095B9716AA9543067ED4F9A995E8F62",
+                 "cardScheme":"01",
+                 "stan":"000001",
+                 "rrn":"000012300001",
+                 "apprCode":"123456",
+                 "invNo":"000001",
+                 "fareAmount":"100",
+                 "fareClass":"1",
+     },
+     "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+TNG
+{
+
+            "apiVersion":"1.0",
+            "message":"proceedEntry",
+            "type":"ack",
+            "timestamp":"2024-05-15 17:10:08",
+            "messageTraceID":"20240515171009",
+            "body":{
+
+                        "errorCode":"0000",
+                        "txnID":"DD00001715764207982",
+                        "paymentMode":"offline",
+                        "entryDt":"2024-05-15 17:10:08",
+                        "maskPan":"0286144655",
+                        "hashPan":"DD63CD9B718FFCA9AFA8B3B07BEBE1478AA4BCE7",
+                        "cardScheme":"11",
+                        "fareAmount":"1",
+                        "fareClass":"1",
+                        "cardBal":"39979",
+                        "mfgNo":"0286144655",
+                        "cardTxnNo":"62979",
+                        "purseFlag":"P",
+                        "machineCode":"41424344",
+                        "cardNo":"601464000788007155",
+                        "coperateFlag":"N",
+                        "userCat":"N",
+                        "cscType":"R",
+                        "chipData":"0001000102030405060708090A0B0C0D0E0F000200C44EBA000402177E40
+            0004B2674B0505000000000000000000000000000000000005010000000000000000000000000
+            000000007000000000000000000000000000030000007010001F603012B9C0000624044AF0001
+            A00702A0894044AF00010200000000000000000D00414243445000330000000000000000000D0
+            1323103B69C5BBAEDF04902003530F99C0E0000000000000000000000000000000000"
+            },
+
+                                                                      Page | 28
+C+ KioskEcpi ­ Integration
+            "signature":"01F7E8F70F9148BA8D3474CCB764CA0233230902719C06ADF5238ECA475465CF"
+
+}
+
+                                                                                                                                                                          Page | 29
+C+ KioskEcpi ­ Integration
+
+4.7 Init Exit
+
+This function is to start the process of detecting and reading a card for exit. Mode must be the same as the entry
+mode. If the card is found valid and entry record is found, it will send an Init Exit Status to the kiosk. Kiosk is required
+to send the Proceed Exit command with fare to complete the exit process.
+
+Request
+
+  Key Name        Max Length   Value
+
+  apiVersion      12           1.0
+
+  message         20           initExit
+
+  type            10           request
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            mode[1]              0 - Pre-authorization
+                                                    1 - Sale Reversal
+                                                    2 - Card Validate
+
+                               title[18]            Optional. Title text to display
+
+                               message[40]          Optional. Message text to display
+
+  signature       64           0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initExit",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "mode":"1"
+
+        },
+
+        "signature":"0E5962DAC59DA96552E00BF7FD0333FA7E49C9011EE465948AD92C35BE80A706"
+
+}
+
+                                                                                       Page | 30
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12            1.0
+
+  message         20            initExit
+
+  type            10            ack
+
+  timestamp       20            2023-05-30 11:06:02
+
+  messageTraceID 40             aa11bb22cc33dd44
+
+  body            n             errorCode[4]         0000
+
+  signature       64            ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"initEntry",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                           Page | 31
+C+ KioskEcpi ­ Integration
+
+4.8 Init Exit Status
+
+This function is sent from reader to kiosk when card is detected and the status of the card (i.e valid card, blacklisted,
+entry record found/not found).
+
+Request
+
+Key Name    Max Length Value
+
+apiVersion  12              1.0
+
+message     20              initExitStatus
+
+type        10              request
+
+timestamp   20              2023-05-30 11:06:02
+
+messageTraceID 40           aa11bb22cc33dd44
+
+body        n               errorCode[4]         0000
+
+                            entryDt[20]          2023-05-30 11:06:02
+
+                            exitDt[20]           2023-05-30 11:06:02
+
+                            maskPan[20]          Masked PAN. Only first 6 and last 4 will be returned in clear,
+                                                 others will be masked with *.
+
+                                                 4935 31** **** 2683
+
+                                                 Non EMV will be returned in clear.
+
+                                                 1000140007140828
+
+                            hashPan[40]          Hashed PAN. Hash with a full clear Card PAN.
+
+                                                 649B28A9F095B9716AA9543067ED4F9A995E8F62
+
+                            cardScheme[2]        01 - VISA
+                            status[2]            02 - MasterCard
+                                                 03 - MyDebit
+
+                                                 Entry Status
+
+                            cardBal[12]          01 - Entry found in system
+                                                 02 - Entry not found in system
+
+                                                 Card Balance. TNG Card Only
+
+                            mfgNo[]              39979 - $399.79
+                                                 Mfg No. TNG Card Only
+
+                            cardTxnNo[]          0286144655
+                                                 Card Txn No. TNG Card Only
+
+                                                                                               Page | 32
+C+ KioskEcpi ­ Integration
+
+                                           62979
+
+                            purseFlag[]    Purse Flag. TNG Card Only
+
+                                           P - Purse
+                                           E - E-wallet
+
+                            machineCode    Machine Code. TNG Card Only
+
+                                           41424344
+
+                            cardNo         Card No. TNG Card Only
+
+                                           601464000788007155
+
+                            corporateFlag  Corporate Flag. TNG Card Only
+
+                                           N
+
+                            userCat        User Cat. TNG Card Only
+
+                                           N
+
+                            cscType        Csc Type. TNG Card Only
+
+                                           R
+
+                            chipData       Parking Chip Data. TNG Card Only
+
+                                           0001000102030405060708090A0B0C0D0E0F000200C44EBA0
+                                           00402177E400004B2674B05050000000000000000000000000
+                                           00000000005010000000000000000000000000000000007000
+                                           000000000000000000000000030000007010001F603012B9C0
+                                           000624044AF0001A00702A082E044AF000102000000000000
+                                           00000D00414243445000330000000000000000000D0132310
+                                           3B69C5BBAEDF04902003530F99C0E00000000000000000000
+                                           00000000000000
+
+                                           Decode:
+
+                                           Sector - 00
+                                           Block - 01
+                                           Value - 000102030405060708090A0B0C0D0E0F
+
+signature  64               5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+EMV
+{
+
+     "apiVersion":"1.0",
+     "message":"initExitStatus",
+     "type":"request",
+     "timestamp":"2023-05-30 11:06:02",
+     "messageTraceID":"112233445577",
+     "body":{
+
+                 "errorCode":"0000",
+
+                 "entryDt":"2023-05-30 11:06:02",
+                 "exitDt":"2023-05-30 11:06:02",
+                 "maskPan":"493531******2683",
+                 "hashPan":"649B28A9F095B9716AA9543067ED4F9A995E8F62",
+                 "cardScheme":"01"
+                 "status":"01",
+
+                                                                                     Page | 33
+C+ KioskEcpi ­ Integration
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+TNG
+{
+
+            "apiVersion":"1.0",
+            "message":"initExitStatus",
+            "type":"request",
+            "timestamp":"2024-05-16 12:16:00",
+            "messageTraceID":"20240516121600",
+            "body":{
+
+                        "errorCode":"0000",
+                        "entryDt":"2024-05-16 12:15:00",
+                        "exitDt":"2024-05-16 12:16:00",
+                        "maskPan":"0286144655",
+                        "hashPan":"DD63CD9B718FFCA9AFA8B3B07BEBE1478AA4BCE7",
+                        "cardScheme":"11",
+                        "status":"FF",
+                        "cardBal":"39892",
+                        "mfgNo":"0286144655",
+                        "cardTxnNo":"62955",
+                        "purseFlag":"P",
+                        "machineCode":"41424344",
+                        "cardNo":"601464000788007155",
+                        "coperateFlag":"N",
+                        "userCat":"N",
+                        "cscType":"R",
+                        "chipData":"0001000102030405060708090A0B0C0D0E0F000200C44EBA000402177E40
+            0004B2674B0505000000000000000000000000000000000005010000000000000000000000000
+            000000007000000000000000000000000000030000007010001F5EB01D49B000061E044B00001
+            A00702A061E044B000010200000000000000000D00414243445000330000000000000000000D
+            01323103B69C5BBAEDF04902003530F99C0E0000000000000000000000000000000000"
+            },
+            "signature":"894A7DF9C1C370B98AC9A094DF624A1BEB3BEF2EA6297665669B42D113449B95"
+}
+
+                                                                                                                                                                          Page | 34
+C+ KioskEcpi ­ Integration
+Response
+
+Key Name    Max             Value
+            Length
+
+apiVersion  12              1.0
+                            initExitStatus
+message     10              ack
+                            2023-05-30 11:06:02
+type        10              112233445577
+                            errorCode
+timestamp   20
+
+messageTraceID 40
+
+body        n                                    0000
+
+signature   64
+
+{
+            "apiVersion":"1.0",
+            "message":"initExitStatus",
+            "type":"ack",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+
+                                                       Page | 35
+C+ KioskEcpi ­ Integration
+
+4.9 Proceed Exit
+
+This function is to authorize the transaction with the host to complete the exit transaction. Transaction response will
+be returned to the kiosk.
+
+Request
+
+Key Name    Max Length Value
+
+apiVersion  12              1.0
+
+message     20              proceedExit
+
+type        10              request
+
+timestamp   20              2023-05-30 11:06:02
+
+messageTraceID 40           112233445577
+
+body        n               fareAmount[12]       350 (equal to RM 3.50)
+
+                            fareClass[2]         This field to be defined by kiosk
+
+                            fallTimeout[3]       Fallback Timeout. This will start counting when exit
+                                                 transaction is failed. Transaction status will be send in Proceed
+                                                 Exit Status.
+
+                                                 0 - Disable fallback
+                                                 60 - Accept fallback card within 60 seconds
+
+                            entryDt[20]          Entry Date Time.
+
+                                                 2024-07-12 16:24
+
+                            payFlag              Payment Flag. This field is optional.
+
+                                                 Eg:
+                                                 0 - Tng Purse
+                                                 1 - Tng E-Wallet
+
+signature   64              5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+{
+            "apiVersion":"1.0",
+            "message":"proceedExit",
+            "type":"request",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "fareAmount":"100",
+                        "fareClass":"1",
+                        "fallTimeout":"0",
+                     "entryDt":"2024-07-12 16:24"
+            },
+
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+}
+
+                                                                                              Page | 36
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         20         initExit
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          aa11bb22cc33dd44
+
+  body            n          errorCode[4]         0000
+
+  signature       64         ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"proceedExit",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"ADE4FC34CEBCB47B9493ED1277F038E90A7DC7EC4ADB3125D2BA38314ACE60FA"
+
+}
+
+                                                        Page | 37
+C+ KioskEcpi ­ Integration
+
+4.10Proceed Exit Status
+
+This function is sent from reader to kiosk on the status of the transaction with the host to complete the exit
+transaction.
+Request
+
+Key Name    Max Length Value
+
+apiVersion  12     1.0
+
+message     20     proceedExitStatus
+
+type        10     request
+
+timestamp   20     2023-05-30 11:06:02
+
+messageTraceID 40  aa11bb22cc33dd44
+
+body        n      errorCode[4]         0000
+
+                   entryDt[20]          2023-05-30 11:06:02
+
+                   exitDt[20]           2023-05-30 11:06:02
+
+                   maskPan[20]          Masked PAN. Only first 6 and last 4 will be returned in clear,
+                                        others will be masked with *.
+
+                                        4935 31** **** 2683
+
+                                        Non EMV will be returned in clear.
+
+                                        1000140007140828
+
+                   hashPan[40]          Hashed PAN. Hash with a full clear Card PAN.
+
+                                        649B28A9F095B9716AA9543067ED4F9A995E8F62
+
+                   cardScheme[2]        01 - VISA
+                                        02 - MasterCard
+                                        03 - MyDebit
+
+                   status[2]            Entry Status
+
+                                        01 - Entry found in system
+                                        02 - Entry not found in system
+
+                   cardBal[12]          Card Balance. TNG Card Only
+
+                                        39979 - $399.79
+
+                   mfgNo[]              Mfg No. TNG Card Only
+
+                                        0286144655
+
+                   cardTxnNo[]          Card Txn No. TNG Card Only
+
+                                                                                      Page | 38
+C+ KioskEcpi ­ Integration
+
+                                           62979
+
+                            purseFlag[]    Purse Flag. TNG Card Only
+
+                                           P - Purse
+                                           E - E-wallet
+
+                            machineCode    Machine Code. TNG Card Only
+
+                                           41424344
+
+                            cardNo         Card No. TNG Card Only
+
+                                           601464000788007155
+
+                            corporateFlag  Corporate Flag. TNG Card Only
+
+                                           N
+
+                            userCat        User Cat. TNG Card Only
+
+                                           N
+
+                            cscType        Csc Type. TNG Card Only
+
+                                           R
+
+                            chipData       Parking Chip Data. TNG Card Only
+
+                                           0001000102030405060708090A0B0C0D0E0F000200C44EBA0
+                                           00402177E400004B2674B05050000000000000000000000000
+                                           00000000005010000000000000000000000000000000007000
+                                           000000000000000000000000030000007010001F603012B9C0
+                                           000624044AF0001A00702A082E044AF000102000000000000
+                                           00000D00414243445000330000000000000000000D0132310
+                                           3B69C5BBAEDF04902003530F99C0E00000000000000000000
+                                           00000000000000
+
+                                           Decode:
+
+                                           Sector - 00
+                                           Block - 01
+                                           Value - 000102030405060708090A0B0C0D0E0F
+
+signature  64               5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+EMV
+{
+
+     "apiVersion":"1.0",
+     "message":"proceedExitStatus",
+     "type":"request",
+     "timestamp":"2024-05-16 16:34:15",
+     "messageTraceID":"20240516163415",
+     "body":{
+
+                 "errorCode":"0000",
+                 "entryDt":"2024-05-16 16:34:05",
+                 "exitDt":"2024-05-16 16:34:15",
+                 "maskPan":"438668******3107",
+                 "hashPan":"9E014D2E52CEF32996C9599972DC0D1C91B12370",
+                 "cardScheme":"03",
+                 "status":"01",
+
+                                                                                     Page | 39
+C+ KioskEcpi ­ Integration
+                        "txnID":"171584845511561014",
+                        "paymentMode":"online",
+
+                        "stan":"001164",
+                        "rrn":"586443539589",
+                        "apprCode":"341522",
+                        "invNo":"001144",
+                        "fareAmount":"0.10",
+                        "fareClass":"1"
+            },
+            "signature":"09D64F30A5C29FF83262FF9F5BBC307FBDF604E625B0D36CF6CC6F952251989B"
+}
+
+TNG
+{
+
+            "apiVersion":"1.0",
+            "message":"proceedExitStatus",
+            "type":"request",
+            "timestamp":"2024-05-16 16:31:52",
+            "messageTraceID":"20240516163152",
+            "body":{
+
+                        "errorCode":"0000",
+                        "entryDt":"2024-05-16 16:31:00",
+                        "exitDt":"2024-05-16 16:31:52",
+                        "maskPan":"0286144655",
+                        "hashPan":"DD63CD9B718FFCA9AFA8B3B07BEBE1478AA4BCE7",
+                        "cardScheme":"11",
+                        "Status":"01",
+                        "cardBal":"39979",
+                        "mfgNo":"0286144655",
+                        "cardTxnNo""62979",
+                        "purseFlag":"E",
+                        "machineCode":"41424344",
+                     "cardNo":"601464000788007155",
+                     "userCat":"N",
+                     "cscType":"R",
+                        "txnID":"DD00001715848312260",
+                        "paymentMode":"offline",
+                        "fareAmount":"1",
+                        "fareClass":"1",
+                        "chipData":"0001000102030405060708090A0B0C0D0E0F000200C44EBA000402177E40
+            0004B2674B0505000000000000000000000000000000000005010000000000000000000000000
+            000000007000000000000000000000000000030000007010001F5E001C99B000083E044B00001
+            A007020000000000000000A083E044B00001020D00414243445000330000000000000000000D
+            01323103B69C5BBAEDF04902003530F99C0E0000000000000000000000000000000000","mfgN
+            o":"0286144655","cardTxnNo":"62944","purseFlag":"P","machineCode":"41424344","cardNo":"6
+            01464000788007155","coperateFlag":"N","userCat":"N","cscType":"R"
+                        },
+            "signature":"4458946610100A85776FE09130F36A107E8A8DB8739EBAB1A5C93A723B2FF90E"
+}
+
+                                                                                                                                                                          Page | 40
+C+ KioskEcpi ­ Integration
+Response
+
+Key Name    Max             Value
+            Length
+
+apiVersion  12              1.0
+                            proceedExitStatus
+message     10              ack
+                            2023-05-30 11:06:02
+type        10              112233445577
+                            errorCode
+timestamp   20
+
+messageTraceID 40
+
+body        n                                    0000
+
+signature   64
+
+{
+            "apiVersion":"1.0",
+            "message":"proceedExitStatus",
+            "type":"ack",
+
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+
+                        "errorCode":"0000"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+}
+
+                                                       Page | 41
+C+ KioskEcpi ­ Integration
+
+4.11Start Transaction
+
+This function read card, validates internally (i.e blacklist, whitelist, expiry check). If the card is found valid, it will
+authorize acquiring or deducting the card purse balance. TxnStatus will be sent from the reader to kiosk on the status
+of the transaction.
+
+Request
+
+  Key Name        Max Length Value
+
+  apiVersion      12            1.0
+
+  message         20            startTxn
+
+  type            10            request
+
+  timestamp       20            2023-05-30 11:06:02
+
+  messageTraceID 40             112233445566
+
+  body            n             txnType[12]          Transaction type of this transaction.
+
+                                                     1. Entry
+
+                                                     2. Exit
+
+                                                     3. Dual
+
+                                                     4. Single
+
+                                fareAmount[12]       350 (equal to RM 3.50)
+
+                                fareClass[2]         This field to be defined by kiosk
+
+                                title[18]            Optional. Title text to display
+
+                                message[40]          Optional. Message text to display
+
+  signature       64            1BE1581D1CA63EBD65D919DFFB7F575DDC396A5C4822CE6F395C1BEC34010E39
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"startTxn",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "Body":{
+
+              "txnType":"single",
+
+              "fareAmount":"350",
+
+              "fareClass":"1",
+
+        },
+
+        "signature":"1BE1581D1CA63EBD65D919DFFB7F575DDC396A5C4822CE6F395C1BEC34010E39"
+
+}
+
+                                                                                            Page | 42
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max          Value
+                  Length
+
+  apiVersion      12           1.0
+
+  message         10           startTxn
+
+  type            10           ack
+
+  timestamp       20           2023-05-30 11:07:32
+
+  messageTraceID 40            112233445566
+
+  body            n            errorCode            0000
+
+  signature       64           29DD4219279A020368A102BBF57A2EBA958BC43D8EC7A4F8EB04E9C063A6D075
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"startTxn",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:07:32",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"29DD4219279A020368A102BBF57A2EBA958BC43D8EC7A4F8EB04E9C063A6D075"
+
+}
+
+                                                          Page | 43
+C+ KioskEcpi ­ Integration
+
+4.12Abort Txn
+
+This function is to abort the card scanning process and terminate the transaction and return to idle state.
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12               1.0
+
+  message     20               abortTxn
+
+  type        10               request
+
+  timestamp   20               2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body        n                title[18]            Optional. Title text to display
+
+                               message[40]          Optional. Message text to display
+
+  signature   64               4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"abortTxn",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1"
+
+}
+
+                                                                                                             Page | 44
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max          Value
+                  Length
+
+  apiVersion      12           1.0
+
+  message         10           abortTxn
+
+  type            10           ack
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            errorCode            0000
+
+  signature       64           79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"abortTxn",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:22:54",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02"
+
+}
+
+                                                          Page | 45
+C+ KioskEcpi ­ Integration
+
+4.13Txn Status
+
+This function is sent from the reader to kiosk on the status of the transaction for Start Txn (i.e approved, declined from
+the acquiring host).
+
+Request
+
+Key Name    Max Length Value
+
+apiVersion  12              1.0
+
+message     20              txnStatus
+
+type        10              request
+
+timestamp   20              2023-05-30 11:06:02
+
+messageTraceID 40           112233445577
+
+body        n               errorCode[4]         0000
+
+                            txnID                Terminal transaction ID. Generated from terminal.
+
+                                                 0A6CDF1690177983701
+
+                            txnDt[20]            2023-05-30 11:06:02
+
+                            maskPan[20]          Masked PAN.
+
+                                                 EMV only first 6 and last 4 will be returned in clear, others will
+                                                 be masked with *.
+
+                                                 4935 31** **** 2683
+
+                                                 Non EMV will be returned in clear.
+
+                                                 1000140007140828
+
+                            hashPan[40]          Hashed PAN. Hash with a full clear Card PAN.
+
+                                                 649B28A9F095B9716AA9543067ED4F9A995E8F62
+
+                            cardScheme[2]        01 - VISA
+                                                 02 - MasterCard
+                                                 03 - MyDebit
+                                                 11 - Tng
+                                                 12 - Ezlink
+                                                 13 - Nets
+
+                            stan[6]              System Trace Number. Sent from reader to acquiring host.
+
+                                                 000001
+
+                            rrn[12]              Retrieval Reference Number. Returned from acquiring host.
+
+                                                 000012300001
+
+                                                                                                    Page | 46
+C+ KioskEcpi ­ Integration
+
+                            apprCode[6]  Approval Code. Returned from acquiring host.
+
+                                         123456
+
+                            invNo[6]     Invoice Number. Sent from reader to acquiring host.
+
+                                         000001
+
+                            fareAmount   Fare Amount.
+
+                                         100 (equal to RM1.00)
+
+                            fareClass    Fare Class.
+
+                                         1
+
+                            cardBal      Card Balance. Only for non emv card.
+
+                                         10321
+
+signature  64               5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97
+
+{
+            "apiVersion":"1.0",
+            "message":"txnStatus",
+            "type":"request",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000",
+                     "txnID":"0A6CDF1690177983701",
+                        "txnDt":"2023-05-30 11:06:02",
+                        "maskPan":"493531******2683",
+                        "hashPan":"649B28A9F095B9716AA9543067ED4F9A995E8F62",
+                        "cardScheme":"01",
+                        "stan":"000001",
+                        "rrn":"000012300001",
+                        "apprCode":"123456",
+                        "invNo":"000001",
+                        "fareAmount":"100",
+                        "fareClass":"1",
+                        "cardBal":"10321"
+            },
+
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+}
+
+                                                                                       Page | 47
+C+ KioskEcpi ­ Integration
+Response
+
+Key Name    Max             Value
+            Length
+
+apiVersion  12              1.0
+                            txnStatus
+message     10              ack
+                            2023-05-30 11:06:02
+type        10              112233445577
+                            errorCode
+timestamp   20
+
+messageTraceID 40
+
+body        n                                    0000
+
+signature   64
+
+{
+            "apiVersion":"1.0",
+            "message":"txnStatus",
+            "type":"ack",
+            "timestamp":"2023-05-30 11:06:02",
+            "messageTraceID":"112233445577",
+            "body":{
+                        "errorCode":"0000"
+            },
+            "signature":"5FFF82589F9FF7C6A861FED738A069628EBB8F24DDE56A9AFA8BEFB990CFED97"
+
+}
+
+                                                       Page | 48
+C+ KioskEcpi ­ Integration
+
+4.14Txn Query
+
+This function is to query the offline transaction posting status. Only valid offline transactions in the batch will be
+returned.
+
+Request
+
+  Key Name        Max Length Value
+
+  apiVersion      12           1.0
+
+  message         20           txnQuery
+
+  type            10           request
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            txnID[18]            Terminal transaction ID. Return from txnStatus.
+
+  signature       64           4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"txnQuery",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "txnID":"0A6CDF1690177983701"
+
+        },
+
+        "signature":"4083E507079483AB35B37794D366E0EFE6BFC1647E10FA9FCA1CBE3C8E200DD1"
+
+}
+
+                                                                                                     Page | 49
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         txnQuery
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+                             txnID                Terminal transaction ID. Send from kiosk
+
+                             txnStatus            Transaction Status
+
+                                                  Transaction approved - approved
+                                                  Transaction rejected - rejected
+                                                  Transaction pending upload - pending
+
+  signature       64         79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"txnQuery",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:22:54",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000",
+
+              "txnID":"173349912994442012",
+
+              "txnStatus":"approved"
+
+        },
+
+        "signature":"79C591841928BC2010E247729C6873C30206BA2B50F26261C4588E300F71DF02"
+
+}
+
+                                                                                            Page | 50
+C+ KioskEcpi ­ Integration
+
+4.15Finish Transaction
+
+This function is to complete the transaction. Kiosk sends this command after the transaction is completed / barrier is
+opened and the reader will refresh the screen. If this command is not received by the reader, the reader screen will
+remain at the Transaction Completed screen for operation to support.
+
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12             1.0
+
+  message     20             finTxn
+
+  type        10             request
+
+  timestamp   20             2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body        n              empty
+
+  signature   64             9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"finTxn",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442"
+
+}
+
+                                                  Page | 51
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         10         finTxn
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"finTxn",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:04",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD"
+
+}
+
+                                                        Page | 52
+C+ KioskEcpi ­ Integration
+
+4.16Set Blacklist (TNG)
+
+This function is to set the blacklist flag for TNG card.
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12             1.0
+
+  message     20             setBlacklist
+
+  type        10             request
+
+  timestamp   20             2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body        n              empty
+
+  signature   64             9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setBlacklist",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442"
+
+}
+
+                                                          Page | 53
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         setBlacklist
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setBlacklist",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:04",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD"
+
+}
+
+                                                        Page | 54
+C+ KioskEcpi ­ Integration
+
+4.17Set AutoReloadFlag (TNG)
+
+This function is to set the AutoReload flag for TNG card.
+Request
+
+  Key Name        Max Length Value
+
+  apiVersion      12           1.0
+
+  message         20           setAutoReloadFlag
+
+  type            10           request
+
+  timestamp       20           2023-05-30 11:06:02
+
+  messageTraceID 40            112233445566
+
+  body            n            flagValue                   0 or 1
+
+  signature       64           9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setAutoReloadFlag",
+
+        "type":"request",
+
+        "timestamp":"2023-05-30 11:06:02",
+
+        "messageTraceID":"112233445566",
+
+        "Body":{
+
+              "flagValue":"0"
+
+        },
+
+        "signature":"9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442"
+
+}
+
+                                                                   Page | 55
+C+ KioskEcpi ­ Integration
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         setAutoReloadFlag
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setAutoReloadFlag",
+
+        "type":"ack",
+
+        "timestamp":"2023-05-30 11:06:04",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD"
+
+}
+
+                                                        Page | 56
+C+ KioskEcpi ­ Integration
+
+4.18Set Reader Ip
+
+This function is to configure the reader ip.
+Request
+
+  Key Name        Max Length Value
+
+  apiVersion      12         1.0
+
+  message         20         setReaderIp
+
+  type            10         request
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          ip                   192.168.1.199
+
+                             netmask              255.255.255.0
+
+                             gateway              192.168.1.1
+
+                             dhcp                 0
+
+  signature       64         9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setReaderIp",
+
+        "type":"request",
+
+        "timestamp":"2023-06-26 11:30:30",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "ip":"192.168.1.199",
+
+              "netmask":"255.255.255.0",
+
+              "gateway":"192.168.1.1",
+
+              "dhcp":"0"
+
+        },
+
+        "signature":"E58129F980A7957A85CC238D58A0A357D9FD6FCA1D7A8D713CBFAB4237708543"
+
+}
+
+                                                                 Page | 57
+C+ KioskEcpi ­ Integration
+
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         setReaderIp
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"setReaderIp",
+
+        "type":"ack",
+
+        "timestamp":"2023-06-26 11:32:01",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"69A9CB53658F8ECB9F07C3ECED4EA33F7413B0ED0E1E9657317C89A14DA3A9BF"
+
+}
+
+                                                        Page | 58
+C+ KioskEcpi ­ Integration
+
+4.19Reboot
+
+This function is to reboot the reader. To reboot the reader, operation mode must be in "Not In Use".
+Request
+
+  Key Name    Max Length Value
+
+  apiVersion  12             1.0
+
+  message     20             reboot
+
+  type        10             request
+
+  timestamp   20             2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body        n              empty
+
+  signature   64             9B21B4060695E406A9BAA5D07FA75DE20338F9C6BB310627EEFF7AB37E143442
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"reboot",
+
+        "type":"request",
+
+        "timestamp":"2023-06-26 11:30:30",
+
+        "messageTraceID":"112233445566",
+
+        "body":{},
+
+        "signature":"5EE94E3BD613AAD3AA9355DAC44704F4654841F453BBF2F00BD969D27E54FE95"
+
+}
+
+                                                                                                      Page | 59
+C+ KioskEcpi ­ Integration
+
+Response
+
+  Key Name        Max        Value
+                  Length
+
+  apiVersion      12         1.0
+
+  message         10         reboot
+
+  type            10         ack
+
+  timestamp       20         2023-05-30 11:06:02
+
+  messageTraceID 40          112233445566
+
+  body            n          errorCode            0000
+
+  signature       64         228B6582D373135EA7BB53CA073EB4528C05A35DB38F5DB476F0059910EAFEAD
+
+{
+
+        "apiVersion":"1.0",
+
+        "message":"reboot",
+
+        "type":"ack",
+
+        "timestamp":"2023-06-26 11:30:32",
+
+        "messageTraceID":"112233445566",
+
+        "body":{
+
+              "errorCode":"0000"
+
+        },
+
+        "signature":"B1491B7B2D1557EB03AE8F85A147163E0A033E16EA7AAC7D2C54DFC49B1041ED"
+
+}
+
+                                                        Page | 60
+C+ KioskEcpi ­ Integration
+
+5 Process Flow
+
+General process flow of controller is demonstrated below:
+
+                                                                                                                                                                          Page | 61
+C+ KioskEcpi ­ Integration
+
+5.1 Initialization
+
+                                                                                                                                                                          Page | 62
+C+ KioskEcpi ­ Integration
+
+5.2 Sale Transaction
+
+                                                                                                                                                                          Page | 63
+C+ KioskEcpi ­ Integration
+
+5.3 Parking Entry
+
+                                                                                                                                                                          Page | 64
+C+ KioskEcpi ­ Integration
+
+5.4 Parking Exit
+
+                                                                                                                                                                          Page | 65
+C+ KioskEcpi ­ Integration
+
+5.5 Abort Transaction
+
+This flow is applicable to the "Cancel" scenario for example: 1) customer cancels buying from vending machine, 2)
+customer removes the car from loop sensor.
+
+                                                                                                                                                                          Page | 66
+C+ KioskEcpi ­ Integration
+
+Appendix A
+
+Error Code
+
+Error Code                  Description
+   0000                     Successful - Command executed successfully / Transaction Completed
+   10XX                     Failed - Transaction Declined by Bank Host
+                            XX - Response Code from bank host
+   1101                     1005 - Do not honor
+   1102                     1051 - Insufficient Fund
+   1199                     Failed - Transaction Failed
+   2001                     Failed - Transaction Error
+   2003                     Failed - Generic Error
+   3001                     Failed - Invalid Data
+   3002                     Failed - Invalid Condition
+   3003                     Failed - Card Invalid
+   3004                     Failed - Card Blacklisted
+   3005                     Failed - Card Not Allow
+   3006                     Failed - Card Rejected by host
+   3007                     Failed - Multiple Card
+   3008                     Failed - Card Expired
+   3009                     Failed - Insufficient Fund
+   3101                     Failed - Entry Not Clear
+   3102                     Failed - Entry Not Found
+   3201                     Failed - Bank Connect Error
+   9001                     Failed - Bank Timeout
+   9101                     Failed - Aborted by Kiosk
+                            Failed - Terminal Busy
+   9102                     Failed - Terminal Not Active
+   9103                     Controller has to resend initTerminal in order to activate the reader.
+   9999                     Failed - Terminal Active
+                            Failed - LUS Disconnected
+                            Failed - General Error
+
+                                                                                                    Page | 67
+C+ KioskEcpi ­ Integration
+
+Reader State
+
+State                       Description
+ 10                         Idle
+ 20                         Card Scanning
+ 22                         Card Detected
+ 23                         Card Scanning Error
+ 30                         Host Authorizing
+ 31                         Host Authorizing Failed
+ 32                         Host Authorizing Connect Failed
+ 33                         Host Authorizing Timeout
+ 40                         Completion
+ 36                         Card Scanning - Parking Entry Check
+ 37                         Card Verification- Parking Entry Check
+ 38                         Card Detected - Parking Entry Check
+ 39                         Card Scanning - Parking Exit
+ 3A                         Card Authorizing - Parking Exit
+ 3B                         Card Detected - Parking Exit
+ 3C                         Completion - Parking Enxit
+ 41                         Card Scanning - Parking Entry
+ 42                         Card Authorizing - Parking Entry
+ 43                         Card Detected - Parking Entry
+ 44                         Completion - Parking Entry
+ 60                         Finish Txn
+ F0                         Rebooting
+
+                                                                    Page | 68
+C+ KioskEcpi ­ Integration
+
+Scheme List
+
+State                       Description
+ 01                         VISA
+ 02                         MasterCard
+ 03                         MyDebit
+ 11                         Tng
+ 12                         Tng Abt
+ 13                         Ezlink
+ 14                         Ezlink Abt
+ 15                         Nets
+
+                                         Page | 69
+C+ KioskEcpi ­ Integration
+
+Appendix B
+
+Mask Pan and Hash Pan
+
+Example            Mask PAN          Hash PAN (20bytes, 40chars)
+ Clear PAN         400012******9010  25229f771a4db7a419ab7173e9
+ 4000123456789010                    6daad8ff4a8eb704ce543a44a1
+                                     4ec5e8b2bda0
+4000127654329010   400012******9010
+                                     3521122e5308163881cd1d31dff
+                                     6be11f6b8dbc9fee8083d93a523
+                                     6761f85e62
+
+Use Mask PAN for report ­ Human Recognizable.
+Use Hash PAN for system matching. Prevent duplicable Mask PAN.
+
+                                                                  Page | 70
+C+ KioskEcpi ­ Integration
+
+Appendix C
+
+Set reader IP using TCPI tool
+
+     1. Ensure to configure an additional IP at IPV4 of same subnet with the reader 192.168.1.x. (Eg: 192.168.1.52)
+          and ping to test the connection with reader.
+
+     2. Open TCPI tool
+     3. Launch TCPI
+
+                                                                                                                                                                          Page | 71
+C+ KioskEcpi ­ Integration
+
+     4. Enter the current reader's IP address, and click "connect". Once connected, change the operator mode to "2"
+          (offline mode) and click "Req".
+
+5. Select "perso" tab and type in new reader IP and "save changes".
+
+6. Go to "Util" tab and click "reboot".
+
+                                                                     Page | 72
+C+ KioskEcpi ­ Integration
+     7. Init terminal in operation mode "1" (Live mode).
+                                                          <END OF DOCUMENT>
+
+                                                                                                                                                                          Page | 73
+

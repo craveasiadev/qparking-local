@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    // rootDir = src/ so shared/ siblings of main/ are emittable.
+    // outDir = dist/ — produces dist/main/index.js + dist/shared/types.js.
+    // Setting outDir = dist/main would have created dist/main/main/index.js
+    // because tsc preserves directory structure relative to rootDir.
+    "outDir": "../../dist",
+    "rootDir": "..",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "declaration": false,
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "baseUrl": "..",
+    "paths": {
+      "@shared/*": ["shared/*"]
+    }
+  },
+  "include": ["./**/*.ts", "../shared/**/*.ts"]
+}
