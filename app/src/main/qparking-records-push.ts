@@ -50,7 +50,7 @@ export async function pushEntry(session: ParkingSession): Promise<PushResult> {
   });
 }
 
-/** Send the exit event to qparking. Includes fee + duration. */
+/** Send the exit event to qparking. Includes fee + duration + payment outcome. */
 export async function pushExit(session: ParkingSession): Promise<PushResult> {
   const lane = session.exitLaneId ? getLane(session.exitLaneId) : (session.entryLaneId ? getLane(session.entryLaneId) : null);
   if (!lane?.scopeId) {
@@ -63,5 +63,9 @@ export async function pushExit(session: ParkingSession): Promise<PushResult> {
     exit_time: session.exitAt,
     fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
     duration_minutes: session.durationMinutes ?? 0,
+    payment_status: session.paymentStatus,
+    payment_method: session.cardScheme ?? null,
+    terminal_txn_id: session.terminalTxnId ?? null,
+    payment_timestamp: session.paymentTimestamp ?? null,
   });
 }

@@ -317,7 +317,10 @@ export class EcpiTerminal extends EventEmitter {
 
   finTxn(): void {
     this.send('finTxn', {});
-    this.clearTxnTimeout();
+    // Clear BOTH timers — finTxn completes both initCard (if pending) and
+    // any in-flight txn. Leaving the init timer running was causing a
+    // 120-second-later abortTxn to ghost-abort the next driver's prompt.
+    this.clearAllTxnTimers();
   }
 
   /**
@@ -536,6 +539,10 @@ export class EcpiTerminal extends EventEmitter {
           return;
         case 'cardRead':
           this.ack(message, traceID);
+          // cardRead fulfills the initCard's purpose — clear its safety-net
+          // timer so the 120-second auto-abortTxn('silent') doesn't fire
+          // later and confuse the next transaction.
+          this.clearInitTimeout();
           this.emit('cardRead', parsed.body ?? {});
           return;
         case 'txnResult': {
@@ -572,8 +579,11 @@ export class EcpiTerminal extends EventEmitter {
   private armTxnTimeout() {
     this.clearTxnTimeout();
     this.txnTimer = setTimeout(() => {
-      this.log('error', 'txn timeout — aborting');
-      this.abortTxn('failed');
+      this.log('error', 'txn timeout — silent abort');
+      // 'silent' instead of 'failed' so the reader LCD doesn't flash
+      // "PAYMENT CANCELLED" when this safety-net timer fires. The higher
+      // layer (parking-flow) already handles its own timeout messaging.
+      this.abortTxn('silent');
     }, TXN_TIMEOUT_MS);
   }
   private clearTxnTimeout() { if (this.txnTimer) clearTimeout(this.txnTimer); this.txnTimer = null; }
@@ -581,11 +591,20 @@ export class EcpiTerminal extends EventEmitter {
   private armInitTimeout() {
     this.clearInitTimeout();
     this.initTimer = setTimeout(() => {
-      this.log('error', 'init timeout — aborting');
-      this.abortTxn('failed');
+      this.log('error', 'init timeout — silent abort');
+      // 'silent' — see armTxnTimeout comment above.
+      this.abortTxn('silent');
     }, INIT_TIMEOUT_MS);
   }
   private clearInitTimeout() { if (this.initTimer) clearTimeout(this.initTimer); this.initTimer = null; }
+
+  /** Cancel any pending safety-net timers. Called whenever the transaction
+   *  is provably resolved (cardRead arrived, finTxn sent, abortTxn sent)
+   *  so a stale timer doesn't fire and ghost-abort the NEXT transaction. */
+  private clearAllTxnTimers() {
+    this.clearInitTimeout();
+    this.clearTxnTimeout();
+  }
 
   scheduleFinishAfterDelay() {
     if (this.finishDelayTimer) clearTimeout(this.finishDelayTimer);

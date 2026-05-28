@@ -84,6 +84,20 @@ export function enqueueEntry(session: ParkingSession): void {
   scheduleDrain();
 }
 
+/**
+ * Common payment-detail block we send to qparking on every exit/update.
+ * Keeps the payload shape consistent so a declined-then-paid retry
+ * overwrites cleanly instead of leaving stale fields behind.
+ */
+function paymentFields(session: ParkingSession) {
+  return {
+    payment_status: session.paymentStatus,
+    payment_method: session.cardScheme ?? null,
+    terminal_txn_id: session.terminalTxnId ?? null,
+    payment_timestamp: session.paymentTimestamp ?? null,
+  };
+}
+
 export function enqueueExit(session: ParkingSession): void {
   const lane = session.exitLaneId ? getLane(session.exitLaneId)
     : (session.entryLaneId ? getLane(session.entryLaneId) : null);
@@ -95,6 +109,7 @@ export function enqueueExit(session: ParkingSession): void {
     exit_time: session.exitAt,
     fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
     duration_minutes: session.durationMinutes ?? 0,
+    ...paymentFields(session),
   });
   scheduleDrain();
 }
@@ -115,6 +130,7 @@ export function enqueueUpdate(session: ParkingSession): void {
       exit_time: session.exitAt,
       fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
       duration_minutes: session.durationMinutes ?? 0,
+      ...paymentFields(session),
     });
   } else {
     enqueueSync('session.update', {

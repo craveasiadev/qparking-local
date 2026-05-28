@@ -5,7 +5,7 @@
  * stopping the parking flow. Re-opening the window just reconnects to the
  * already-running services.
  */
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } from 'electron';
 import path from 'node:path';
 import {
   getDb, getSettings, saveSettings,
@@ -222,9 +222,14 @@ function wireRendererEvents() {
     }
   });
   parkingEvents.on('exit-completed', (p: any) => {
+    const session = p?.sessionId ? getSessionById(p.sessionId) : null;
+    // Always mirror the exit to qparking SaaS — even on decline — so Finance
+    // can show decline rates and operators can audit stuck transactions.
+    // The gate-open + face-turnstile actions remain gated on a successful
+    // outcome because a declined card MUST NOT raise the barrier.
+    if (session) enqueueExit(session);
     const allowed = ['paid','free','manual_release'].includes(p?.outcome);
     if (!allowed) return;
-    const session = p?.sessionId ? getSessionById(p.sessionId) : null;
     const laneName = session?.exitLaneId ? getLane(session.exitLaneId)?.name : undefined;
     sendGateEvent({
       state: 'open',
@@ -240,12 +245,15 @@ function wireRendererEvents() {
     openFaceGate({ plate: session?.plate ?? undefined, reason: `qparking-exit-${p?.outcome}` })
       .then((r) => sendToRenderer('log', { terminalId: 0, direction: r.ok ? 'info' : 'error', message: 'face-gate open', payload: r }))
       .catch(() => null);
-    // Mirror exit (fee + duration) via the persistent sync queue.
-    if (session) enqueueExit(session);
   });
 
   // Sync status → renderer for the Dashboard panel.
   syncEvents.on('status', (status) => sendToRenderer('sync-status', status));
+
+  // Live parking-flow debug log → renderer. Lets the operator see exactly
+  // which guard fired (or didn't) without needing to open DevTools — shown
+  // in a sticky strip at the bottom of the app.
+  parkingEvents.on('debug-log', (p: any) => sendToRenderer('parking-flow-log', p));
 }
 
 function sendToRenderer(channel: string, payload: unknown) {
@@ -435,6 +443,46 @@ ipcMain.handle('scopes:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;
 }) => pushScopeRate(input));
+
+// Build version — used by the renderer sidebar to confirm the live build.
+// Reads from package.json baked at build time via electron's app.getVersion().
+ipcMain.handle('app:version', () => ({
+  version: app.getVersion(),
+  isPackaged: app.isPackaged,
+  builtAt: process.env.BUILD_TIMESTAMP || 'unknown',
+}));
+
+/**
+ * Operator-facing "Clear cache" action. Wipes everything Electron caches in
+ * its session — HTTP responses, service workers, IndexedDB, localStorage,
+ * cookies. Useful when the renderer is showing stale data after a version
+ * bump (e.g. old API responses cached, or sticky settings from a previous
+ * build).
+ *
+ * Does NOT touch the SQLite app DB — sessions, terminals, cameras, lanes,
+ * scopes, sync queue, settings all survive. That's intentional: a clear-
+ * cache must never destroy operational data, only browser-layer state.
+ *
+ * After clearing, the window auto-reloads so the operator sees a fresh
+ * fetch of everything.
+ */
+ipcMain.handle('app:clear-cache', async () => {
+  const startedAt = Date.now();
+  const ses = session.defaultSession;
+  await ses.clearCache();
+  await ses.clearStorageData({
+    storages: ['cookies', 'filesystem', 'indexdb', 'localstorage', 'shadercache', 'serviceworkers', 'cachestorage'],
+  });
+  // Reload the renderer so the freshly-emptied cache shows immediately.
+  for (const w of BrowserWindow.getAllWindows()) {
+    try { w.webContents.reloadIgnoringCache(); } catch { /* ignore */ }
+  }
+  return {
+    ok: true,
+    elapsedMs: Date.now() - startedAt,
+    clearedAt: new Date().toISOString(),
+  };
+});
 
 ipcMain.handle('settings:get', () => getSettings());
 ipcMain.handle('settings:save', (_e, patch) => {

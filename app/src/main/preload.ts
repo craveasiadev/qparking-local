@@ -84,6 +84,12 @@ const api = {
   clearFailedSync: () => ipcRenderer.invoke('sync:clear-failed'),
   backfillSessions: () => ipcRenderer.invoke('sync:backfill-sessions'),
 
+  // app metadata — used by the sidebar to surface the running build version
+  getAppVersion: () => ipcRenderer.invoke('app:version'),
+  /** Wipe Electron's session cache + storage and reload the window. Safe —
+   *  does NOT touch the SQLite app DB (sessions, terminals, settings persist). */
+  clearAppCache: () => ipcRenderer.invoke('app:clear-cache'),
+
   // settings + diagnostics
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (s: unknown) => ipcRenderer.invoke('settings:save', s),

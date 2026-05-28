@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Save, Check, AlertCircle, Zap, Activity, Loader2 } from 'lucide-react';
+import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2 } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -25,6 +25,14 @@ export function Settings() {
     setFaceGateTest('Pinging…');
     const r = await window.bridge.pingFaceGate();
     setFaceGateTest(r.ok ? `✓ Reachable (status ${r.status})` : `✗ ${r.error ?? `status ${r.status}`}`);
+  });
+
+  const [runClearCache, clearingCache] = useAsyncAction(async () => {
+    if (!confirm('Clear browser cache and reload?\n\nThis wipes Electron-side cached responses, localStorage, IndexedDB, and cookies, then reloads the window. Your parking data (sessions, terminals, settings) is NOT affected.')) return;
+    const r = await window.bridge.clearAppCache();
+    // The reload happens server-side before this resolves, but show feedback
+    // just in case the renderer is still alive momentarily.
+    console.log(`[settings] cache cleared in ${r.elapsedMs}ms`);
   });
 
   const [runTestOpen, testOpenBusy] = useAsyncAction(async () => {
@@ -152,6 +160,22 @@ export function Settings() {
           <input type="number" className="input" value={s.exitGracePeriodSeconds} onChange={(e) => setS({ ...s, exitGracePeriodSeconds: Number(e.target.value) })} />
           <p className="text-[11px] text-gray-500 mt-1">If payment terminal doesn't complete within this window, the operator gets a manual-release prompt.</p>
         </Field>
+      </section>
+
+      <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-3">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Maintenance</h2>
+        <p className="text-[11px] text-gray-500">
+          Wipes Electron-side browser caches (HTTP responses, localStorage,
+          IndexedDB, service workers, cookies) and reloads the window.
+          Useful after an app update when the UI shows stale data. <strong>Does NOT
+          delete parking sessions, terminals, cameras, lanes, scopes, or settings</strong> —
+          those live in the SQLite database and survive a cache clear.
+        </p>
+        <button onClick={() => runClearCache()} disabled={clearingCache}
+          className="inline-flex items-center gap-2 h-10 px-4 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+          {clearingCache ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+          {clearingCache ? 'Clearing & reloading…' : 'Clear cache & reload'}
+        </button>
       </section>
 
       <div className="mt-5 flex items-center gap-2">

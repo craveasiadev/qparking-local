@@ -120,6 +120,10 @@ export interface ParkingSession {
   paymentStatus: 'pending' | 'paid' | 'declined' | 'cancelled' | 'free' | 'manual_release';
   /** ECPI txnID from the terminal once paid. */
   terminalTxnId: string | null;
+  /** Card scheme from cardRead body.cardScheme (TNG | VISA | MASTERCARD | ...). Null for free / declined / manual release. */
+  cardScheme: string | null;
+  /** txnDt from the reader — the exact moment the card tapped. Differs from exitAt (gate-rise time). */
+  paymentTimestamp: string | null;
   /** Optional notes (manual release reason, etc). */
   notes: string | null;
   createdAt: string;
@@ -294,6 +298,12 @@ export interface BridgeApi {
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;
   }): Promise<{ ok: boolean; fetched: number; error?: string }>;
 
+  // App build metadata — operator-visible version stamp.
+  getAppVersion(): Promise<{ version: string; isPackaged: boolean; builtAt: string }>;
+  /** Wipe Electron's session cache + storage and reload the renderer. Does
+   *  NOT touch the SQLite app DB. */
+  clearAppCache(): Promise<{ ok: boolean; elapsedMs: number; clearedAt: string }>;
+
   // Outbound sync to qparking SaaS (entry/exit/update/delete with retry).
   getSyncStatus(): Promise<SyncStatus>;
   syncDrainNow(): Promise<SyncStatus>;
@@ -317,5 +327,5 @@ export interface BridgeApi {
   openFaceGate(opts?: { plate?: string; reason?: string }): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
 
   // Stream events to renderer (returns an unsubscribe fn)
-  onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status', cb: (payload: unknown) => void): () => void;
+  onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log', cb: (payload: unknown) => void): () => void;
 }

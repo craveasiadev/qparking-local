@@ -144,6 +144,11 @@ function applySchema(d: Database.Database) {
   for (const col of ['host TEXT', 'snapshot_url TEXT']) {
     try { d.exec(`ALTER TABLE cameras ADD COLUMN ${col}`); } catch { /* already there */ }
   }
+  // Same pattern for sessions — older installs predate card_scheme /
+  // payment_timestamp. Both feed the new finance columns on the cloud.
+  for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT']) {
+    try { d.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
+  }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -317,7 +322,10 @@ function rowToSession(r: any): ParkingSession {
     entryAt: r.entry_at, entryLaneId: r.entry_lane_id, entryCameraId: r.entry_camera_id, entryImagePath: r.entry_image_path,
     exitAt: r.exit_at, exitLaneId: r.exit_lane_id, exitCameraId: r.exit_camera_id, exitImagePath: r.exit_image_path,
     durationMinutes: r.duration_minutes, feeCents: r.fee_cents,
-    paymentStatus: r.payment_status, terminalTxnId: r.terminal_txn_id, notes: r.notes,
+    paymentStatus: r.payment_status, terminalTxnId: r.terminal_txn_id,
+    cardScheme: r.card_scheme ?? null,
+    paymentTimestamp: r.payment_timestamp ?? null,
+    notes: r.notes,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -350,9 +358,16 @@ export function recordExit(sessionId: number, patch: {
   feeCents: number;
   paymentStatus: ParkingSession['paymentStatus'];
   terminalTxnId: string | null;
+  cardScheme?: string | null;
+  paymentTimestamp?: string | null;
 }): ParkingSession | null {
-  getDb().prepare(`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, payment_status=?, terminal_txn_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .run(patch.exitAt, patch.exitLaneId, patch.exitCameraId, patch.exitImagePath, patch.durationMinutes, patch.feeCents, patch.paymentStatus, patch.terminalTxnId, sessionId);
+  getDb().prepare(`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    .run(
+      patch.exitAt, patch.exitLaneId, patch.exitCameraId, patch.exitImagePath,
+      patch.durationMinutes, patch.feeCents, patch.paymentStatus, patch.terminalTxnId,
+      patch.cardScheme ?? null, patch.paymentTimestamp ?? null,
+      sessionId,
+    );
   return getSessionById(sessionId);
 }
 
