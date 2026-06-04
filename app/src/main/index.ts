@@ -36,6 +36,7 @@ import {
 } from './db';
 import { fetchSnapshot, pingCamera, startSnapshotUploader } from './camera-snapshots';
 import { pushCamera, pushAllCameras } from './camera-push';
+import { pushTerminal, pushLane, pushAllDevices } from './device-push';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -60,6 +61,7 @@ app.whenReady().then(async () => {
   // First-time camera registry mirror — fire and forget so a slow WAN
   // doesn't block boot. Subsequent updates push on every save.
   pushAllCameras().catch(() => null);
+  pushAllDevices().catch(() => null);
 
   // Stream parking + lpr events to renderer.
   wireRendererEvents();
@@ -265,7 +267,12 @@ function sendToRenderer(channel: string, payload: unknown) {
 // ─── IPC handlers (the bridge surface) ─────────────────────────────────────
 
 ipcMain.handle('terminals:list', () => listTerminals());
-ipcMain.handle('terminals:save', (_e, input) => upsertTerminal(input));
+ipcMain.handle('terminals:save', (_e, input) => {
+  const saved = upsertTerminal(input);
+  // Best-effort cloud mirror — doesn't block the local save if WAN is offline.
+  pushTerminal(saved.id).catch(() => null);
+  return saved;
+});
 ipcMain.handle('terminals:delete', (_e, id: number) => { shutdownTerminal(id); deleteTerminal(id); });
 ipcMain.handle('terminals:status', (_e, id: number) => {
   const row = getTerminal(id);
@@ -329,7 +336,14 @@ ipcMain.handle('cameras:snapshot', (_e, cameraId: number) => fetchSnapshot(camer
 ipcMain.handle('cameras:ping', (_e, cameraId: number) => pingCamera(cameraId));
 
 ipcMain.handle('lanes:list', () => listLanes());
-ipcMain.handle('lanes:save', (_e, input) => upsertLane(input));
+ipcMain.handle('lanes:save', (_e, input) => {
+  const saved = upsertLane(input);
+  pushLane(saved.id).catch(() => null);
+  // Lanes are how terminals get attributed to a cloud site (the lane's
+  // scopeId), so re-push the terminal too whenever the lane changes.
+  if (saved.terminalId) pushTerminal(saved.terminalId).catch(() => null);
+  return saved;
+});
 ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));
 
 ipcMain.handle('sessions:open', () => listOpenSessions());
@@ -414,7 +428,7 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
       scopeId = lane?.scopeId ?? null;
     }
     const scope = scopeId ? getScope(scopeId) : null;
-    const feeCents = computeFee(durationMinutes, scope);
+    const feeCents = computeFee(durationMinutes, scope, working.entryAt);
 
     working = updateSessionFields(id, { durationMinutes, feeCents });
   }

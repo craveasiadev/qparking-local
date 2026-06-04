@@ -9,7 +9,8 @@ import path from 'node:path';
 import { app } from 'electron';
 import Database from 'better-sqlite3';
 import type {
-  AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate,
+  ActivePass,
+  AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
 } from '../shared/types';
 
 let db: Database.Database | null = null;
@@ -100,8 +101,60 @@ function applySchema(d: Database.Database) {
       block_minutes INTEGER NOT NULL DEFAULT 60,
       daily_cap_cents INTEGER NOT NULL DEFAULT 0,
       currency TEXT NOT NULL DEFAULT 'MYR',
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      -- Policy-level extras from qparking SaaS RatePolicy (added 2026-06).
+      policy_id TEXT,
+      policy_name TEXT,
+      grace_exceeded_behavior TEXT,
+      cutoff_enabled INTEGER NOT NULL DEFAULT 0,
+      cutoff_time TEXT,
+      cutoff_behavior TEXT
+    );
+
+    -- Full active rule schedule per scope. Each row is one time-windowed
+    -- TariffRule from qparking SaaS. The fee calculator picks the row
+    -- matching the SESSION moment, not the moment we polled the cloud.
+    CREATE TABLE IF NOT EXISTS tariff_rules (
+      rule_id TEXT PRIMARY KEY,
+      scope_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      vehicle_type TEXT,
+      days_of_week TEXT,                -- JSON array of ints, NULL = all days
+      time_from TEXT NOT NULL DEFAULT '00:00:00',
+      time_to TEXT NOT NULL DEFAULT '23:59:59',
+      valid_from TEXT,                  -- yyyy-MM-dd, NULL = no lower bound
+      valid_to TEXT,
+      rule_type TEXT NOT NULL DEFAULT 'block_hourly',
+      flat_amount_cents INTEGER NOT NULL DEFAULT 0,
+      first_block_amount_cents INTEGER NOT NULL DEFAULT 0,
+      first_block_minutes INTEGER NOT NULL DEFAULT 60,
+      subsequent_block_amount_cents INTEGER NOT NULL DEFAULT 0,
+      subsequent_block_minutes INTEGER NOT NULL DEFAULT 60,
+      daily_cap_cents INTEGER NOT NULL DEFAULT 0,
+      is_overnight INTEGER NOT NULL DEFAULT 0,
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE INDEX IF NOT EXISTS idx_tariff_rules_scope ON tariff_rules (scope_id);
+
+    -- Active season/visitor/free-access passes pulled down from qparking SaaS.
+    -- Indexed by (scope_id, plate_number) for the gate's "is this plate
+    -- already paid?" check at exit time. The same plate can have multiple
+    -- rows (e.g. visitor + corporate); the gate uses the lowest-cost match.
+    CREATE TABLE IF NOT EXISTS active_passes (
+      pass_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      plate_number TEXT NOT NULL,
+      pass_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      start_date TEXT,
+      end_date TEXT,
+      is_free INTEGER NOT NULL DEFAULT 0,
+      space_number TEXT,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (pass_id, plate_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_passes_lookup ON active_passes (scope_id, plate_number);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -148,6 +201,18 @@ function applySchema(d: Database.Database) {
   // payment_timestamp. Both feed the new finance columns on the cloud.
   for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT']) {
     try { d.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
+  }
+  // Idempotent ALTERs for scopes — installs predating the 2026-06 schedule
+  // expansion lack the policy + cutoff columns.
+  for (const col of [
+    'policy_id TEXT',
+    'policy_name TEXT',
+    'grace_exceeded_behavior TEXT',
+    'cutoff_enabled INTEGER NOT NULL DEFAULT 0',
+    'cutoff_time TEXT',
+    'cutoff_behavior TEXT',
+  ]) {
+    try { d.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
 }
 
@@ -547,36 +612,181 @@ export function deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recen
 
 // ─── scopes ────────────────────────────────────────────────────────────────
 
-function rowToScope(r: any): ScopeRate {
+function rowToScope(r: any, rules: TariffRule[] = []): ScopeRate {
   return {
     scopeId: r.scope_id, scopeName: r.scope_name, freeMinutes: r.free_minutes,
     firstBlockCents: r.first_block_cents, perBlockCents: r.per_block_cents,
     blockMinutes: r.block_minutes, dailyCapCents: r.daily_cap_cents,
     currency: r.currency, fetchedAt: r.fetched_at,
+    policyId: r.policy_id ?? null,
+    policyName: r.policy_name ?? null,
+    graceExceededBehavior: (r.grace_exceeded_behavior ?? null) as any,
+    cutoffEnabled: !!r.cutoff_enabled,
+    cutoffTime: r.cutoff_time ?? null,
+    cutoffBehavior: r.cutoff_behavior ?? null,
+    rules,
   };
 }
 
+function rowToTariffRule(r: any): TariffRule {
+  return {
+    ruleId: r.rule_id, name: r.name,
+    priority: r.priority,
+    vehicleType: r.vehicle_type ?? null,
+    daysOfWeek: r.days_of_week ? JSON.parse(r.days_of_week) : null,
+    timeFrom: r.time_from, timeTo: r.time_to,
+    validFrom: r.valid_from ?? null, validTo: r.valid_to ?? null,
+    ruleType: r.rule_type as 'flat_rate' | 'block_hourly',
+    flatAmountCents: r.flat_amount_cents,
+    firstBlockAmountCents: r.first_block_amount_cents,
+    firstBlockMinutes: r.first_block_minutes,
+    subsequentBlockAmountCents: r.subsequent_block_amount_cents,
+    subsequentBlockMinutes: r.subsequent_block_minutes,
+    dailyCapCents: r.daily_cap_cents,
+    isOvernight: !!r.is_overnight,
+  };
+}
+
+function listTariffRulesForScope(scopeId: string): TariffRule[] {
+  return (getDb().prepare('SELECT * FROM tariff_rules WHERE scope_id = ? ORDER BY priority DESC, rule_id ASC').all(scopeId) as any[]).map(rowToTariffRule);
+}
+
 export function listScopes(): ScopeRate[] {
-  return (getDb().prepare('SELECT * FROM scopes ORDER BY scope_name').all() as any[]).map(rowToScope);
+  const rows = getDb().prepare('SELECT * FROM scopes ORDER BY scope_name').all() as any[];
+  return rows.map((r) => rowToScope(r, listTariffRulesForScope(r.scope_id)));
 }
 
 export function getScope(id: string): ScopeRate | null {
   const r = getDb().prepare('SELECT * FROM scopes WHERE scope_id = ?').get(id) as any;
-  return r ? rowToScope(r) : null;
+  if (!r) return null;
+  return rowToScope(r, listTariffRulesForScope(id));
 }
 
+/**
+ * Idempotent upsert. Replaces the full rule set for this scope on every
+ * call — the SaaS is the source of truth, so a rule removed in the cloud
+ * UI should disappear locally on the very next poll.
+ */
 export function upsertScope(s: ScopeRate): ScopeRate {
-  getDb().prepare(`INSERT INTO scopes (scope_id, scope_name, free_minutes, first_block_cents, per_block_cents, block_minutes, daily_cap_cents, currency, fetched_at)
-    VALUES (?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(scope_id) DO UPDATE SET
-      scope_name=excluded.scope_name,
-      free_minutes=excluded.free_minutes,
-      first_block_cents=excluded.first_block_cents,
-      per_block_cents=excluded.per_block_cents,
-      block_minutes=excluded.block_minutes,
-      daily_cap_cents=excluded.daily_cap_cents,
-      currency=excluded.currency,
-      fetched_at=excluded.fetched_at`)
-    .run(s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents, s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt);
+  const d = getDb();
+  const tx = d.transaction(() => {
+    d.prepare(`INSERT INTO scopes (
+        scope_id, scope_name, free_minutes, first_block_cents, per_block_cents,
+        block_minutes, daily_cap_cents, currency, fetched_at,
+        policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(scope_id) DO UPDATE SET
+        scope_name=excluded.scope_name,
+        free_minutes=excluded.free_minutes,
+        first_block_cents=excluded.first_block_cents,
+        per_block_cents=excluded.per_block_cents,
+        block_minutes=excluded.block_minutes,
+        daily_cap_cents=excluded.daily_cap_cents,
+        currency=excluded.currency,
+        fetched_at=excluded.fetched_at,
+        policy_id=excluded.policy_id,
+        policy_name=excluded.policy_name,
+        grace_exceeded_behavior=excluded.grace_exceeded_behavior,
+        cutoff_enabled=excluded.cutoff_enabled,
+        cutoff_time=excluded.cutoff_time,
+        cutoff_behavior=excluded.cutoff_behavior`)
+      .run(
+        s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents,
+        s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt,
+        s.policyId ?? null, s.policyName ?? null, s.graceExceededBehavior ?? null,
+        s.cutoffEnabled ? 1 : 0, s.cutoffTime ?? null, s.cutoffBehavior ?? null,
+      );
+
+    d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(s.scopeId);
+    const insertRule = d.prepare(`INSERT INTO tariff_rules (
+        rule_id, scope_id, name, priority, vehicle_type, days_of_week,
+        time_from, time_to, valid_from, valid_to, rule_type,
+        flat_amount_cents, first_block_amount_cents, first_block_minutes,
+        subsequent_block_amount_cents, subsequent_block_minutes,
+        daily_cap_cents, is_overnight, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    for (const r of s.rules ?? []) {
+      insertRule.run(
+        r.ruleId, s.scopeId, r.name, r.priority,
+        r.vehicleType ?? null,
+        r.daysOfWeek ? JSON.stringify(r.daysOfWeek) : null,
+        r.timeFrom, r.timeTo,
+        r.validFrom ?? null, r.validTo ?? null,
+        r.ruleType,
+        r.flatAmountCents, r.firstBlockAmountCents, r.firstBlockMinutes,
+        r.subsequentBlockAmountCents, r.subsequentBlockMinutes,
+        r.dailyCapCents,
+        r.isOvernight ? 1 : 0,
+      );
+    }
+  });
+  tx();
   return getScope(s.scopeId)!;
+}
+
+// ─── active passes ─────────────────────────────────────────────────────────
+// Plate-keyed cache of active season/visitor/free-access passes. Refreshed
+// from qparking SaaS on the same cadence as scopes. The gate looks up the
+// inbound plate here BEFORE driving the terminal — a match means "already
+// paid, just open the gate".
+
+function rowToActivePass(r: any): ActivePass {
+  return {
+    passId: r.pass_id, scopeId: r.scope_id, plateNumber: r.plate_number,
+    passType: r.pass_type, status: r.status,
+    startDate: r.start_date ?? null, endDate: r.end_date ?? null,
+    isFree: !!r.is_free, spaceNumber: r.space_number ?? null,
+    fetchedAt: r.fetched_at,
+  };
+}
+
+/** Find an active pass for the given plate at the given scope (cloud site
+ *  uuid). Returns the longest-coverage pass first so a plate with a
+ *  free_access + corporate match prefers the broader entitlement. */
+export function findActivePassByPlate(scopeId: string, plate: string): ActivePass | null {
+  const normalised = plate.toUpperCase().replace(/\s+/g, '');
+  const r = getDb().prepare(`
+    SELECT * FROM active_passes
+    WHERE scope_id = ? AND plate_number = ? AND status = 'active'
+    ORDER BY is_free DESC, end_date DESC
+    LIMIT 1
+  `).get(scopeId, normalised) as any;
+  return r ? rowToActivePass(r) : null;
+}
+
+export function listActivePasses(scopeId?: string): ActivePass[] {
+  const sql = scopeId
+    ? 'SELECT * FROM active_passes WHERE scope_id = ? ORDER BY plate_number'
+    : 'SELECT * FROM active_passes ORDER BY scope_id, plate_number';
+  const rows = (scopeId
+    ? getDb().prepare(sql).all(scopeId)
+    : getDb().prepare(sql).all()) as any[];
+  return rows.map(rowToActivePass);
+}
+
+/**
+ * Replace the entire cached pass set for a given scope. The SaaS is the
+ * source of truth — a pass that disappeared from the cloud (revoked,
+ * expired, holder unenrolled) must vanish from the local cache on the
+ * very next sync.
+ */
+export function replaceActivePassesForScope(scopeId: string, passes: ActivePass[]): void {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    d.prepare('DELETE FROM active_passes WHERE scope_id = ?').run(scopeId);
+    const insert = d.prepare(`INSERT INTO active_passes (
+        pass_id, scope_id, plate_number, pass_type, status,
+        start_date, end_date, is_free, space_number, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    for (const p of passes) {
+      insert.run(
+        p.passId, p.scopeId, p.plateNumber.toUpperCase().replace(/\s+/g, ''),
+        p.passType, p.status,
+        p.startDate, p.endDate,
+        p.isFree ? 1 : 0,
+        p.spaceNumber,
+      );
+    }
+  });
+  tx();
 }

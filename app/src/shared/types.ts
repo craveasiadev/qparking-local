@@ -130,23 +130,72 @@ export interface ParkingSession {
   updatedAt: string;
 }
 
+/** A single time-windowed tariff rule from qparking SaaS. Multiple of these
+ *  per scope describe the full schedule (weekday/weekend, daytime/night,
+ *  24-hour, etc). qparking-local picks the rule matching the SESSION moment,
+ *  not the moment the cloud was polled. */
+export interface TariffRule {
+  ruleId: string;
+  name: string;
+  priority: number;
+  vehicleType: string | null;
+  /** Days of week ints (0=Sun ... 6=Sat). null = every day. */
+  daysOfWeek: number[] | null;
+  /** 'HH:mm:ss' string. If timeTo <= timeFrom the window wraps past midnight. */
+  timeFrom: string;
+  timeTo: string;
+  /** Date range yyyy-mm-dd. null = always valid. */
+  validFrom: string | null;
+  validTo: string | null;
+  ruleType: 'flat_rate' | 'block_hourly';
+  flatAmountCents: number;
+  firstBlockAmountCents: number;
+  firstBlockMinutes: number;
+  subsequentBlockAmountCents: number;
+  subsequentBlockMinutes: number;
+  /** Per-rule daily cap. 0 = inherit policy-level cap. */
+  dailyCapCents: number;
+  isOvernight: boolean;
+}
+
 /** Cached qparking scope/rate row. Refreshed periodically from the SaaS. */
 export interface ScopeRate {
   scopeId: string;
   scopeName: string;
   /** Free duration in minutes at start of session. */
   freeMinutes: number;
-  /** Flat fee in cents charged after free period — first block. */
+  /** Legacy flat fields — kept as fallback when `rules` is empty. */
   firstBlockCents: number;
-  /** After the first block, charge this per block. */
   perBlockCents: number;
-  /** Block size in minutes (e.g. 60 = hourly). */
   blockMinutes: number;
-  /** Maximum daily charge in cents. 0 = no cap. */
+  /** Policy-level daily cap (cents). 0 = no cap. */
   dailyCapCents: number;
-  /** Currency code, e.g. MYR. Display only — the terminal always charges cents. */
   currency: string;
-  /** Last fetched ISO timestamp. */
+  fetchedAt: string;
+  /** Full active rule set from qparking SaaS. When non-empty, the time-aware
+   *  computeFee picks the rule matching the session moment and IGNORES the
+   *  flat firstBlockCents/perBlockCents/blockMinutes above. */
+  rules: TariffRule[];
+  graceExceededBehavior: 'charge_from_entry' | 'charge_from_grace' | null;
+  cutoffEnabled: boolean;
+  cutoffTime: string | null;
+  cutoffBehavior: string | null;
+  policyId: string | null;
+  policyName: string | null;
+}
+
+/** A plate-keyed pass cached from qparking SaaS so the gate can decide
+ *  "skip charging this car, it's already paid" without a WAN round-trip. */
+export interface ActivePass {
+  passId: string;
+  scopeId: string;
+  plateNumber: string;
+  passType: string;
+  status: string;
+  startDate: string | null;
+  endDate: string | null;
+  isFree: boolean;
+  spaceNumber: string | null;
   fetchedAt: string;
 }
 

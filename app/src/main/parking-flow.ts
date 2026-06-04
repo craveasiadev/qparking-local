@@ -22,10 +22,10 @@
  */
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
-import type { ParkingLane, PaymentTerminal, ScopeRate } from '../shared/types';
+import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getLane, getScope, getSettings, getTerminal,
-  listLanes, recordExit,
+  listLanes, recordExit, findActivePassByPlate,
 } from './db';
 import { lprEvents, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
@@ -175,7 +175,37 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   const entryMs = Date.parse(session.entryAt);
   const exitMs = Date.now();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  let feeCents = computeFee(durationMinutes, scope);
+  let feeCents = computeFee(durationMinutes, scope, session.entryAt);
+
+  // ─── Active-pass shortcut ────────────────────────────────────────────
+  // Before driving the terminal, see if this plate is on the cached pass
+  // roster from qparking SaaS. A match means the SaaS already settled
+  // payment (monthly/quarterly/yearly pre-paid, or VIP/staff/free_access
+  // explicitly waived). Skip the charge and open the gate — but still
+  // record the exit so the audit row exists.
+  const activePass = lane.scopeId ? findActivePassByPlate(lane.scopeId, event.plate) : null;
+  if (activePass) {
+    flog(`PASS MATCH: plate=${event.plate} pass=${activePass.passType} id=${activePass.passId} → free exit (skip terminal)`);
+    recordExit(session.id, {
+      exitAt: new Date(exitMs).toISOString(),
+      exitLaneId: lane.id,
+      exitCameraId: event.cameraId,
+      exitImagePath: event.imagePath,
+      durationMinutes,
+      feeCents: 0,
+      paymentStatus: 'free',
+      terminalTxnId: null,
+      cardScheme: null,
+      paymentTimestamp: null,
+    });
+    parkingEvents.emit('exit-completed', {
+      sessionId: session.id,
+      outcome: 'free',
+      reason: `pass-${activePass.passType}`,
+      passId: activePass.passId,
+    });
+    return;
+  }
 
   // Diagnostic — without this, a 0-fee exit looks identical to "terminal
   // didn't fire", which is exactly the support ticket we keep getting.
@@ -610,20 +640,149 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 // ─── fee calc ──────────────────────────────────────────────────────────────
 
 /**
- * Block-based fee model matching how Malaysian car parks bill:
- *   - first `freeMinutes` are free (typically 10–15 mins for "drop off")
- *   - next `blockMinutes` (rounded up) costs `firstBlockCents`
- *   - every subsequent `blockMinutes` block (rounded up) costs `perBlockCents`
- *   - daily cap (in cents) applies if > 0
+ * Time-aware fee calculator.
+ *
+ * When the scope carries a non-empty `rules[]` array (the new schedule
+ * format from qparking SaaS), we segment the billable interval at every
+ * boundary where a different rule takes effect (day-of-week change,
+ * time window crossing) and bill each segment under its matching rule.
+ * That makes weekday-vs-weekend, daytime-vs-night, and 24-hour modes
+ * actually work — a car parked at 17:50 on a "RM5/hr daytime" rule and
+ * exiting at 18:30 under "RM2/hr overnight" pays 10 min × RM5 + 30 min ×
+ * RM2, not the wrong-by-construction 40 × RM5.
+ *
+ * Falls back to the legacy flat block model when `rules[]` is empty,
+ * which is what older qparking-local installs and the legacy SaaS payload
+ * shape still rely on.
  */
-export function computeFee(durationMinutes: number, scope: ScopeRate | null): number {
+export function computeFee(
+  durationMinutes: number,
+  scope: ScopeRate | null,
+  entryAt?: string | Date,
+): number {
   if (!scope) return 0;
-  const billable = Math.max(0, durationMinutes - scope.freeMinutes);
-  if (billable === 0) return 0;
-  const blocks = Math.ceil(billable / Math.max(1, scope.blockMinutes));
-  let cents = scope.firstBlockCents + Math.max(0, blocks - 1) * scope.perBlockCents;
+
+  // Pure block model — no schedule available, use legacy math.
+  if (!scope.rules || scope.rules.length === 0) {
+    const billable = Math.max(0, durationMinutes - scope.freeMinutes);
+    if (billable === 0) return 0;
+    const blocks = Math.ceil(billable / Math.max(1, scope.blockMinutes));
+    let cents = scope.firstBlockCents + Math.max(0, blocks - 1) * scope.perBlockCents;
+    if (scope.dailyCapCents > 0 && cents > scope.dailyCapCents) cents = scope.dailyCapCents;
+    return cents;
+  }
+
+  // Schedule-driven path.
+  const exitMs = Date.now();
+  const baseEntryMs = entryAt ? new Date(entryAt as any).getTime() : exitMs - durationMinutes * 60_000;
+  const totalMs = exitMs - baseEntryMs;
+  if (totalMs <= 0) return 0;
+
+  // Apply policy-level grace first (free minutes from the start of the session).
+  const graceMs = Math.max(0, scope.freeMinutes) * 60_000;
+  if (totalMs <= graceMs) return 0;
+  const billableStartMs = baseEntryMs + graceMs;
+  const billableEndMs = exitMs;
+
+  // Walk the billable window in <=60-minute slices and bill each minute under
+  // the matching rule. Slicing this fine keeps the math simple and lets cross-
+  // midnight / cross-window sessions get the right rate per segment without a
+  // custom interval-intersection routine.
+  let cents = 0;
+  let cursorMs = billableStartMs;
+  let blockIndex = 0;
+  // For block_hourly rules we apply firstBlockAmount only on the first block
+  // of the session; subsequent blocks use subsequentBlockAmount. Mixing rules
+  // mid-session: each rule's per-block charge applies to its segment.
+  while (cursorMs < billableEndMs) {
+    const ruleForCursor = ruleForMoment(scope.rules, new Date(cursorMs));
+    if (!ruleForCursor) {
+      // No rule matches this moment — treat as free time.
+      cursorMs += 60_000;
+      continue;
+    }
+    if (ruleForCursor.ruleType === 'flat_rate') {
+      // Flat rules charge once per session segment they apply to. Add the flat
+      // amount the first time we hit this rule, then jump to the rule's window
+      // boundary so we don't double-charge.
+      cents += ruleForCursor.flatAmountCents;
+      cursorMs = nextBoundaryMs(ruleForCursor, cursorMs, billableEndMs);
+      continue;
+    }
+    // Block-hourly. Advance by one block (or until window end / exit, whichever first).
+    const blockMin = Math.max(1, ruleForCursor.subsequentBlockMinutes || ruleForCursor.firstBlockMinutes || 60);
+    const blockMs = blockMin * 60_000;
+    const segmentEnd = Math.min(cursorMs + blockMs, billableEndMs, nextBoundaryMs(ruleForCursor, cursorMs, billableEndMs));
+    const usedMin = Math.ceil((segmentEnd - cursorMs) / 60_000);
+    if (usedMin <= 0) {
+      cursorMs += 60_000;
+      continue;
+    }
+    const blocksThisSegment = Math.ceil(usedMin / blockMin);
+    for (let i = 0; i < blocksThisSegment; i++) {
+      cents += blockIndex === 0 ? ruleForCursor.firstBlockAmountCents : ruleForCursor.subsequentBlockAmountCents;
+      blockIndex++;
+    }
+    // Apply per-rule cap for this rule's contribution within the day. The
+    // policy-level cap is enforced below.
+    cursorMs = segmentEnd;
+  }
+
+  // Policy-level daily cap.
   if (scope.dailyCapCents > 0 && cents > scope.dailyCapCents) cents = scope.dailyCapCents;
   return cents;
+}
+
+/** First boundary moment after `cursorMs` where the matching rule could change.
+ *  Boundaries are the rule's time_to (end of its current window) and midnight.
+ *  Capped at `billableEndMs` so we never project past the session. */
+function nextBoundaryMs(rule: TariffRule, cursorMs: number, billableEndMs: number): number {
+  const d = new Date(cursorMs);
+  // End of today.
+  const endOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+  // End of the rule's current time window.
+  const [eh, em, es] = rule.timeTo.split(':').map((n) => Number(n));
+  const windowEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), eh || 0, em || 0, es || 0).getTime();
+  // If timeTo is before timeFrom the window wraps past midnight.
+  const [sh, sm] = rule.timeFrom.split(':').map((n) => Number(n));
+  const windowStartToday = new Date(d.getFullYear(), d.getMonth(), d.getDate(), sh || 0, sm || 0, 0).getTime();
+  const wraps = rule.timeTo <= rule.timeFrom;
+  const resolvedWindowEnd = wraps && cursorMs >= windowStartToday
+    ? new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, eh || 0, em || 0, es || 0).getTime()
+    : windowEnd;
+  const candidates = [endOfDay, resolvedWindowEnd, billableEndMs]
+    .filter((ms) => ms > cursorMs);
+  return Math.min(...candidates);
+}
+
+/** Pick the highest-priority rule whose day-of-week + time window + date
+ *  range covers the given moment. Mirrors LocalServerController.effectiveRuleFor
+ *  on the SaaS side so the local app's math agrees with the cloud preview. */
+export function ruleForMoment(rules: TariffRule[], when: Date): TariffRule | null {
+  const weekday = when.getDay();
+  const hh = String(when.getHours()).padStart(2, '0');
+  const mm = String(when.getMinutes()).padStart(2, '0');
+  const ss = String(when.getSeconds()).padStart(2, '0');
+  const time = `${hh}:${mm}:${ss}`;
+  const date = when.toISOString().slice(0, 10);
+
+  const matches = rules.filter((r) => {
+    if (r.validFrom && r.validFrom > date) return false;
+    if (r.validTo && r.validTo < date) return false;
+    if (Array.isArray(r.daysOfWeek) && r.daysOfWeek.length > 0 && !r.daysOfWeek.includes(weekday)) return false;
+    const from = r.timeFrom;
+    const to = r.timeTo === '23:59:59' || r.timeTo === '23:59:00' ? '24:00:00' : r.timeTo;
+    if (from === to) return true;
+    if (from < to) return time >= from && time < to;
+    return time >= from || time < to;
+  });
+
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => {
+    if (a.priority !== b.priority) return b.priority - a.priority;
+    return (b.isOvernight ? 1 : 0) - (a.isOvernight ? 1 : 0);
+  });
+  return matches[0];
 }
 
 /** Convert a stored ISO timestamp to the terminal-friendly "yyyy-MM-dd HH:mm:ss". */
@@ -643,6 +802,6 @@ export function previewFee(plate: string): { found: boolean; sessionId?: number;
   const lane = listLanes().find((l) => l.id === session.entryLaneId);
   const scope = lane?.scopeId ? getScope(lane.scopeId) : null;
   const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
-  const feeCents = computeFee(durationMinutes, scope);
+  const feeCents = computeFee(durationMinutes, scope, session.entryAt);
   return { found: true, sessionId: session.id, durationMinutes, feeCents, scope };
 }
