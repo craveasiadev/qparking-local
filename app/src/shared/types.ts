@@ -262,6 +262,31 @@ export interface AppSettings {
    *  to wait for duration > freeMinutes, OR for sites with a flat minimum
    *  charge regardless of how briefly the car was parked. */
   minimumChargeCents: number;
+
+  // ─── Touch'n'Go W4G IO-controller integration ─────────────────────────
+  /** Master switch. When ON, every paid exit ALSO fires a PayRequest at the
+   *  W4G IO controller — Touch'n'Go card / e-wallet / Visa / Master / MCCS
+   *  taps go through this device in parallel with the ECPI terminal. The
+   *  first device to confirm payment wins; the other is cancelled. Sessions
+   *  paid via W4G are recorded with cardScheme=TNG_CARD / TNG_EWALLET /
+   *  VISA_W4G / MASTER_W4G / MCCS_W4G so the cloud Finance report can
+   *  distinguish them from the ECPI terminal's normal Visa/Master flow. */
+  tngEnabled: boolean;
+  /** W4G IO controller LAN IP — the box that exposes /w4g/PayRequest. */
+  tngHost: string;
+  /** HTTP port the W4G IO controller listens on. Default 80 — vendor docs
+   *  don't specify, but the 192.168.1.105 test rig responds on the standard
+   *  HTTP port. Change here if your device serves on 8080 / a custom port. */
+  tngPort: number;
+  /** Local HTTP port WE listen on for the W4G PayResult callback. The W4G
+   *  device POSTs back to http://<our-lan-ip>:<tngCallbackPort>/w4g/PayResult
+   *  once it has settled (or failed) the card deduction. */
+  tngCallbackPort: number;
+  /** Per-transaction wait budget. The W4G PayResult callback should arrive
+   *  within a few seconds, but cards left on the reader can stretch it out.
+   *  After this timeout we PayCancel the order and continue with the ECPI
+   *  terminal alone (or mark the session declined if that also timed out). */
+  tngTimeoutSeconds: number;
 }
 
 /** Wire-level message envelope used by the ECPI terminal protocol. */
@@ -374,6 +399,37 @@ export interface BridgeApi {
   // Face-auth turnstile bridge (faceapp_main /api/external/*)
   pingFaceGate(): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
   openFaceGate(opts?: { plate?: string; reason?: string }): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
+
+  // Touch'n'Go W4G IO-controller bridge
+  /** Probe the W4G device: TCP-connect on the configured host:port. Doesn't
+   *  send PayRequest — just verifies reachability for the Settings page. */
+  tngPing(): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+  /** Fire a one-shot PayRequest and wait for the PayResult callback. Used
+   *  by the Settings "Test" trigger to exercise the full round-trip without
+   *  opening a real parking session. Defaults: 100c, no discount, now. */
+  tngTestPayRequest(opts?: {
+    payAmount?: number;
+    discountAmount?: number;
+    enterTime?: number;
+    payTime?: number;
+    orderId?: string;
+  }): Promise<{ ok: boolean; orderId: string; deviceState?: number; resultState?: string; payType?: number; cardNo?: string; balance?: number; stan?: string; apprCode?: string; error?: string }>;
+  /** Fire PayCancel against an order. The device only honours cancel after
+   *  the current deduction times out (~6s per vendor doc). */
+  tngTestPayCancel(orderId: string): Promise<{ ok: boolean; deviceState?: number; error?: string }>;
+  /** Current state of the W4G integration — running, pending orders, last
+   *  callback at, last error. Used by the Settings page status panel. */
+  tngStatus(): Promise<{
+    enabled: boolean;
+    listening: boolean;
+    listenPort: number;
+    listenAddresses: string[];
+    host: string;
+    port: number;
+    pending: { orderId: string; payAmount: number; startedAt: string }[];
+    lastResult?: { orderId: string; status: string; payType?: number; at: string };
+    lastError?: string;
+  }>;
 
   // Stream events to renderer (returns an unsubscribe fn)
   onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log', cb: (payload: unknown) => void): () => void;

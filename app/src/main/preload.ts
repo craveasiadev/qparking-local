@@ -103,6 +103,14 @@ const api = {
   pingFaceGate: () => ipcRenderer.invoke('faceGate:ping'),
   openFaceGate: (opts?: { plate?: string; reason?: string }) => ipcRenderer.invoke('faceGate:open', opts ?? {}),
 
+  // Touch'n'Go W4G IO-controller bridge (test triggers + live status)
+  tngPing: () => ipcRenderer.invoke('tng:ping'),
+  tngStatus: () => ipcRenderer.invoke('tng:status'),
+  tngTestPayRequest: (opts?: {
+    payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;
+  }) => ipcRenderer.invoke('tng:test-pay-request', opts),
+  tngTestPayCancel: (orderId: string) => ipcRenderer.invoke('tng:test-pay-cancel', orderId),
+
   // pubsub — return an unsubscribe fn so React effects can clean up.
   onEvent: (channel: 'terminal-status'|'session'|'log'|'plate-detected'|'gate-state', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);

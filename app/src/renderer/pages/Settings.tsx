@@ -1,14 +1,76 @@
 import { useEffect, useState } from 'react';
-import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2 } from 'lucide-react';
+import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+
+interface TngTestLine {
+  ts: string;
+  kind: 'send' | 'recv' | 'error' | 'info';
+  text: string;
+}
+
+interface TngStatus {
+  enabled: boolean;
+  listening: boolean;
+  listenPort: number;
+  listenAddresses: string[];
+  host: string;
+  port: number;
+  pending: { orderId: string; payAmount: number; startedAt: string }[];
+  lastResult?: { orderId: string; status: string; payType?: number; at: string };
+  lastError?: string;
+}
+
+const PAY_TYPE_LABEL: Record<number, string> = {
+  0: 'TNG card',
+  1: 'Visa',
+  2: 'Mastercard',
+  3: 'MCCS',
+  4: 'TNG e-wallet',
+};
 
 export function Settings() {
   const [s, setS] = useState<AppSettings | null>(null);
   const [saved, setSaved] = useState(false);
   const [faceGateTest, setFaceGateTest] = useState<string | null>(null);
+  const [tngStatus, setTngStatus] = useState<TngStatus | null>(null);
+  const [tngLog, setTngLog] = useState<TngTestLine[]>([]);
+  const [tngTestAmount, setTngTestAmount] = useState<number>(100);
+  const [tngLastOrderId, setTngLastOrderId] = useState<string>('');
 
   useEffect(() => { window.bridge.getSettings().then(setS); }, []);
+
+  // Live status poll — refreshes every 2s so the operator sees pending
+  // orders and the last callback as soon as the device responds.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const st = await window.bridge.tngStatus();
+        if (!cancelled) setTngStatus(st);
+      } catch { /* ignore */ }
+    };
+    tick();
+    const handle = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, []);
+
+  // Stream W4G activity into the test panel. Comes through the generic 'log'
+  // channel; we filter by source==='w4g' so other terminal logs don't leak in.
+  useEffect(() => {
+    const off = window.bridge.onEvent('log' as any, (payload: any) => {
+      if (payload?.source !== 'w4g') return;
+      setTngLog((prev) => [
+        { ts: new Date().toLocaleTimeString(), kind: payload.direction, text: payload.message },
+        ...prev,
+      ].slice(0, 30));
+    });
+    return () => { try { off(); } catch { /* ignore */ } };
+  }, []);
+
+  const pushLog = (kind: TngTestLine['kind'], text: string) => {
+    setTngLog((prev) => [{ ts: new Date().toLocaleTimeString(), kind, text }, ...prev].slice(0, 30));
+  };
 
   const [save, saving] = useAsyncAction(async () => {
     if (!s) return;
@@ -25,6 +87,46 @@ export function Settings() {
     setFaceGateTest('Pinging…');
     const r = await window.bridge.pingFaceGate();
     setFaceGateTest(r.ok ? `✓ Reachable (status ${r.status})` : `✗ ${r.error ?? `status ${r.status}`}`);
+  });
+
+  const [runTngPing, tngPinging] = useAsyncAction(async () => {
+    if (!s) return;
+    await window.bridge.saveSettings(s);
+    pushLog('info', `Ping ${s.tngHost}:${s.tngPort}…`);
+    const r = await window.bridge.tngPing();
+    if (r.ok) pushLog('recv', `✓ Reachable (${r.latencyMs}ms)`);
+    else pushLog('error', `✗ ${r.error ?? 'unreachable'}`);
+  });
+
+  const [runTngPayRequest, tngPayBusy] = useAsyncAction(async () => {
+    if (!s) return;
+    if (!s.tngEnabled) {
+      pushLog('error', 'Enable TNG first and Save settings');
+      return;
+    }
+    await window.bridge.saveSettings(s);
+    pushLog('send', `PayRequest amount=${tngTestAmount}c`);
+    const r = await window.bridge.tngTestPayRequest({ payAmount: tngTestAmount });
+    setTngLastOrderId(r.orderId);
+    if (r.ok) {
+      const scheme = r.payType != null ? (PAY_TYPE_LABEL[r.payType] ?? `code ${r.payType}`) : '?';
+      pushLog('recv', `✓ APPROVED · ${scheme} · card=${r.cardNo ?? '-'} · appr=${r.apprCode ?? '-'}`);
+    } else if (r.resultState) {
+      pushLog('error', `✗ DECLINED state=${r.resultState}`);
+    } else {
+      pushLog('error', `✗ ${r.error ?? 'failed'}`);
+    }
+  });
+
+  const [runTngPayCancel, tngCancelBusy] = useAsyncAction(async () => {
+    if (!tngLastOrderId) {
+      pushLog('error', 'No orderId yet — fire PayRequest first');
+      return;
+    }
+    pushLog('send', `PayCancel orderId=${tngLastOrderId}`);
+    const r = await window.bridge.tngTestPayCancel(tngLastOrderId);
+    if (r.ok) pushLog('recv', `✓ Cancel accepted (state=${r.deviceState})`);
+    else pushLog('error', `✗ ${r.error ?? `state=${r.deviceState}`}`);
   });
 
   const [runClearCache, clearingCache] = useAsyncAction(async () => {
@@ -152,6 +254,106 @@ export function Settings() {
             </div>
           </div>
         </label>
+      </section>
+
+      <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Touch'n'Go W4G IO controller</h2>
+        <p className="text-[11px] text-gray-500">
+          Multi-acquirer payment: a W4G IO controller box on the LAN accepts
+          Touch'n'Go card / e-wallet / Visa / Master / MCCS taps and settles
+          through its own bank rail. When enabled, every paid exit fires a
+          <code className="font-mono"> PayRequest </code>
+          to this device IN PARALLEL with the ECPI terminal — whichever
+          device the driver taps on first wins. Sessions paid via W4G are
+          tagged <code className="font-mono">TNG_CARD</code> / <code className="font-mono">TNG_EWALLET</code> /
+          <code className="font-mono">VISA_W4G</code> etc. so Finance reports
+          can split TNG taps from the normal Visa/Master terminal flow.
+        </p>
+        <label className="flex items-start gap-3 p-3 rounded-lg border border-gray-900 bg-gray-50 hover:border-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            className="mt-0.5 w-4 h-4 accent-gray-900"
+            checked={s.tngEnabled}
+            onChange={(e) => setS({ ...s, tngEnabled: e.target.checked })}
+          />
+          <div>
+            <div className="text-sm font-semibold">Enable Touch'n'Go W4G acquirer</div>
+            <div className="text-[11px] text-gray-500 mt-0.5">
+              ON = every paid exit fires PayRequest at the W4G box alongside the ECPI tap prompt. OFF = no W4G calls, parking continues on ECPI only.
+            </div>
+          </div>
+        </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Field label="W4G device IP">
+            <input className="input font-mono" value={s.tngHost} onChange={(e) => setS({ ...s, tngHost: e.target.value })} placeholder="192.168.1.105" />
+          </Field>
+          <Field label="W4G HTTP port">
+            <input type="number" className="input" value={s.tngPort} onChange={(e) => setS({ ...s, tngPort: Number(e.target.value) })} />
+          </Field>
+          <Field label="Our callback port (PayResult)">
+            <input type="number" className="input" value={s.tngCallbackPort} onChange={(e) => setS({ ...s, tngCallbackPort: Number(e.target.value) })} />
+            <p className="text-[11px] text-gray-500 mt-1">
+              The W4G device POSTs results to <code className="font-mono">http://&lt;our-lan-ip&gt;:{s.tngCallbackPort}/w4g/PayResult</code>. Make sure this port is open on the host firewall.
+            </p>
+          </Field>
+          <Field label="Per-transaction timeout (seconds)">
+            <input type="number" className="input" value={s.tngTimeoutSeconds} onChange={(e) => setS({ ...s, tngTimeoutSeconds: Number(e.target.value) })} />
+          </Field>
+        </div>
+        {tngStatus && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className={`inline-block w-2 h-2 rounded-full ${tngStatus.listening ? 'bg-emerald-500' : 'bg-gray-400'}`} />
+              {tngStatus.listening
+                ? <span>Listener UP on :{tngStatus.listenPort} — device callback URL: <strong>http://&lt;{tngStatus.listenAddresses[0] ?? 'this-host'}&gt;:{tngStatus.listenPort}/w4g/PayResult</strong></span>
+                : <span>Listener DOWN — flip ON and save to start</span>}
+            </div>
+            {tngStatus.pending.length > 0 && (
+              <div>Pending orders: {tngStatus.pending.map((p) => `${p.orderId.slice(0, 8)}…(${p.payAmount}c)`).join(', ')}</div>
+            )}
+            {tngStatus.lastResult && (
+              <div>Last result: orderId={tngStatus.lastResult.orderId.slice(0, 8)}… status={tngStatus.lastResult.status} payType={tngStatus.lastResult.payType ?? '-'} at {new Date(tngStatus.lastResult.at).toLocaleTimeString()}</div>
+            )}
+            {tngStatus.lastError && (
+              <div className="text-red-700">Last error: {tngStatus.lastError}</div>
+            )}
+          </div>
+        )}
+        <div className="flex flex-wrap items-end gap-2 pt-1">
+          <div>
+            <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">Test amount (cents)</label>
+            <input type="number" min="1" className="input w-32" value={tngTestAmount} onChange={(e) => setTngTestAmount(Math.max(1, Number(e.target.value) || 1))} />
+          </div>
+          <button onClick={() => runTngPing()} disabled={tngPinging || tngPayBusy || tngCancelBusy}
+            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+            {tngPinging ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
+            {tngPinging ? 'Pinging…' : 'Ping device'}
+          </button>
+          <button onClick={() => runTngPayRequest()} disabled={tngPinging || tngPayBusy || tngCancelBusy}
+            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            {tngPayBusy ? <Loader2 size={13} className="animate-spin" /> : <CreditCard size={13} />}
+            {tngPayBusy ? 'Awaiting tap…' : 'Test PayRequest'}
+          </button>
+          <button onClick={() => runTngPayCancel()} disabled={tngPinging || tngPayBusy || tngCancelBusy || !tngLastOrderId}
+            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            {tngCancelBusy ? <Loader2 size={13} className="animate-spin" /> : <XCircle size={13} />}
+            {tngCancelBusy ? 'Cancelling…' : 'Test PayCancel'}
+          </button>
+        </div>
+        {tngLog.length > 0 && (
+          <div className="rounded-lg border border-gray-200 bg-black/95 text-gray-100 px-3 py-2 max-h-56 overflow-auto text-[11px] font-mono space-y-0.5">
+            {tngLog.map((line, idx) => (
+              <div key={idx} className={
+                line.kind === 'error' ? 'text-red-400'
+                : line.kind === 'send' ? 'text-sky-300'
+                : line.kind === 'recv' ? 'text-emerald-300'
+                : 'text-gray-400'
+              }>
+                <span className="text-gray-500">{line.ts}</span> <span className="uppercase">{line.kind}</span> {line.text}
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">

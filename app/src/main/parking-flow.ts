@@ -29,6 +29,7 @@ import {
 } from './db';
 import { lprEvents, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
+import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId } from './w4g-tng';
 
 // Stamped into every parking-flow log line so the operator can verify they're
 // running the build that has the latest fix — vs an older cached installer.
@@ -523,17 +524,69 @@ async function startExitCharge(
     return;
   }
 
+  // ─── Step 3b: TNG W4G race ───────────────────────────────────────────
+  // If TNG is enabled, fire a PayRequest at the W4G IO controller in parallel
+  // with the ECPI initCard. The driver can tap on either device — whichever
+  // settles first wins, the other gets cancelled. This is how multi-acquirer
+  // exits work in real Malaysian parks: ECPI for Visa/Master/credit and W4G
+  // for TNG card / e-wallet sharing the same fare prompt.
+  const settings = getSettings();
+  const tngEnabled = settings.tngEnabled && !!settings.tngHost;
+  const tngOrderId = tngEnabled ? newTngOrderId() : '';
+  let tngWinner: { resolved: boolean; body?: any } = { resolved: false };
+  let tngPromise: Promise<any> | null = null;
+  if (tngEnabled) {
+    flog(`STEP 3b: PayRequest → TNG W4G @ ${settings.tngHost}:${settings.tngPort} orderId=${tngOrderId} fare=${feeCents}c`);
+    tngPromise = tngPayRequest({
+      orderId: tngOrderId,
+      payAmount: feeCents,
+      discountAmount: 0,
+      enterTime: Math.floor(Date.parse(entryAt) / 1000) || Math.floor(Date.now() / 1000),
+      payTime: Math.floor(Date.now() / 1000),
+      timeoutMs: Math.max(15_000, (settings.tngTimeoutSeconds ?? 30) * 1000),
+    }).then((body) => {
+      tngWinner = { resolved: true, body };
+      // If the ECPI side hasn't resolved yet, this wins the race — release
+      // the awaiter so we can record the TNG outcome.
+      if (!resolved) {
+        resolved = true;
+        resolvePush({ __tng: body });
+      }
+      return body;
+    }).catch((e) => {
+      flog(`TNG PayRequest rejected: ${e?.message ?? e}`);
+      return null;
+    });
+  }
+
   // ─── Step 4: wait for the chain to complete (or timeout) ─────────────
   const push = await pushed;
   clearTimeout(timeoutHandle);
   term.off('frame', onFrame);
   term.off('frame', onAckLog);
 
-  // Translate cardRead into our { approved } shape. cardRead errorCode=0000
-  // means the reader successfully read AND debited the card. Any non-zero
-  // code means the tap failed (declined, timeout, blacklisted, etc).
-  let result: { approved: boolean; status: string; maskPan?: string; cardScheme?: string } | null = null;
-  if (push) {
+  // If TNG won the race, cancel any pending ECPI tap and translate the W4G
+  // PayResult into our { approved } shape. State="0" = success per spec.
+  let result: { approved: boolean; status: string; maskPan?: string; cardScheme?: string; via?: 'ecpi'|'tng'; tngPayTime?: number } | null = null;
+  if (push && (push as any).__tng) {
+    const tngBody = (push as any).__tng as { state: string; payType: number; cardNo: string; apprCode: string; payTime: number };
+    try { term.abortTxn('silent'); } catch { /* ignore */ }
+    const approved = tngBody.state === '0';
+    result = {
+      approved,
+      status: approved ? 'APPROVED' : `DECLINED_W4G_${tngBody.state}`,
+      maskPan: tngBody.cardNo || undefined,
+      cardScheme: payTypeToCardScheme(tngBody.payType),
+      via: 'tng',
+      tngPayTime: tngBody.payTime,
+    };
+    flog(`TNG won race — payType=${tngBody.payType} card=${tngBody.cardNo} appr=${tngBody.apprCode}`);
+  } else if (push) {
+    // ECPI cardRead settled — cancel any in-flight TNG order so the W4G
+    // device doesn't double-charge if the driver also taps it.
+    if (tngEnabled && !tngWinner.resolved) {
+      tngPayCancel(tngOrderId).catch(() => null);
+    }
     const body = push.body ?? {};
     const errorCode = String(body.errorCode ?? '');
     const approved = errorCode === '0000' && !!body.maskPan;
@@ -545,7 +598,31 @@ async function startExitCharge(
         : 'DECLINED',
       maskPan: body.maskPan as string | undefined,
       cardScheme: body.cardScheme as string | undefined,
+      via: 'ecpi',
     };
+  } else if (tngEnabled && !tngWinner.resolved) {
+    // ECPI timed out (60s). Give the TNG promise its remaining budget — it
+    // may still be waiting on a tap. Cancel only if it hasn't resolved by
+    // then. This block runs only when both branches are still in flight.
+    try {
+      const tngBody = await Promise.race([
+        tngPromise ?? Promise.resolve(null),
+        new Promise<null>((r) => setTimeout(() => r(null), 5_000)),
+      ]);
+      if (tngBody) {
+        const approved = tngBody.state === '0';
+        result = {
+          approved,
+          status: approved ? 'APPROVED' : `DECLINED_W4G_${tngBody.state}`,
+          maskPan: tngBody.cardNo || undefined,
+          cardScheme: payTypeToCardScheme(tngBody.payType),
+          via: 'tng',
+          tngPayTime: tngBody.payTime,
+        };
+      } else {
+        tngPayCancel(tngOrderId).catch(() => null);
+      }
+    } catch { /* ignore */ }
   }
 
   // ─── Step 4: record outcome ──────────────────────────────────────────
@@ -582,8 +659,12 @@ async function startExitCharge(
 
   // txnDt comes back like "yyyy-MM-dd HH:mm:ss"; convert to ISO so the SaaS
   // can parse it the same way as exit_time. Falls back to null on garbage.
-  const txnDtRaw = push?.body?.txnDt ? String(push.body.txnDt) : '';
+  // TNG path: use the W4G PayTime (epoch seconds) instead of txnDt.
   const paymentTimestamp = (() => {
+    if (result?.via === 'tng' && result.tngPayTime) {
+      return new Date(result.tngPayTime * 1000).toISOString();
+    }
+    const txnDtRaw = push?.body?.txnDt ? String(push.body.txnDt) : '';
     if (!txnDtRaw) return null;
     const t = Date.parse(txnDtRaw.replace(' ', 'T'));
     return Number.isNaN(t) ? null : new Date(t).toISOString();
@@ -618,8 +699,9 @@ async function startExitCharge(
   })();
   try {
     if (result.approved) {
+      const title = result.via === 'tng' ? 'Paid · TNG' : 'Paid · TQ';
       term.showStatus({
-        titleTXT: 'Paid · TQ',
+        titleTXT: title,
         messageTXT: `${inflight.plate} RM${(inflight.feeCents / 100).toFixed(2)} ${hhmm}`,
         sound: '01', image: '04',
       });

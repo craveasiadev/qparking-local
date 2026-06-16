@@ -202,6 +202,13 @@ function applySchema(d: Database.Database) {
   for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT']) {
     try { d.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
   }
+  // One-shot correction for the W4G default port. Earlier dev builds
+  // defaulted tngPort to 8080 (vendor docs don't specify, my initial guess
+  // was wrong) — the actual test rig at 192.168.1.105 serves on plain
+  // HTTP port 80. Wipe the persisted 8080 so the new default kicks in;
+  // anyone who explicitly chose a different port keeps their value.
+  try { d.prepare(`DELETE FROM settings WHERE key='tngPort' AND value='8080'`).run(); } catch { /* ignore */ }
+
   // Idempotent ALTERs for scopes — installs predating the 2026-06 schedule
   // expansion lack the policy + cutoff columns.
   for (const col of [
@@ -231,6 +238,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   entryCameraHandlesExit: false,
   faceGateEnabled: true,
   minimumChargeCents: 0,
+  tngEnabled: false,
+  tngHost: '192.168.1.105',
+  tngPort: 80,
+  tngCallbackPort: 6002,
+  tngTimeoutSeconds: 30,
 };
 
 export function getSettings(): AppSettings {

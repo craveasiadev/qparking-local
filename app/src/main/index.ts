@@ -37,6 +37,10 @@ import {
 import { fetchSnapshot, pingCamera, startSnapshotUploader } from './camera-snapshots';
 import { pushCamera, pushAllCameras } from './camera-push';
 import { pushTerminal, pushLane, pushAllDevices } from './device-push';
+import {
+  startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
+  pingDevice as tngPing, w4gStatus, w4gEvents, newOrderId as newTngOrderId,
+} from './w4g-tng';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -58,6 +62,10 @@ app.whenReady().then(async () => {
   startBackgroundSync();
   startSnapshotUploader();
   startSyncDrain();
+  // W4G PayResult callback listener — only start when the operator has
+  // enabled the TNG integration. Toggling it on/off in Settings restarts
+  // it via the settings:save handler below.
+  if (settings.tngEnabled) startW4gServer(settings.tngCallbackPort);
   // First-time camera registry mirror — fire and forget so a slow WAN
   // doesn't block boot. Subsequent updates push on every save.
   pushAllCameras().catch(() => null);
@@ -256,6 +264,10 @@ function wireRendererEvents() {
   // which guard fired (or didn't) without needing to open DevTools — shown
   // in a sticky strip at the bottom of the app.
   parkingEvents.on('debug-log', (p: any) => sendToRenderer('parking-flow-log', p));
+
+  // W4G TNG activity → renderer log stream (so the Settings test panel +
+  // bottom log strip can show outbound / inbound / errors live).
+  w4gEvents.on('log', (entry: any) => sendToRenderer('log', { terminalId: -1, ...entry, source: 'w4g' }));
 }
 
 function sendToRenderer(channel: string, payload: unknown) {
@@ -503,7 +515,62 @@ ipcMain.handle('settings:save', (_e, patch) => {
   const next = saveSettings(patch);
   // If the LPR port changed, restart the server.
   if (patch.lprWebhookPort !== undefined) startLprServer(next.lprWebhookPort);
+  // W4G TNG: stop / start / restart the callback listener as needed when
+  // the operator flips the master switch or changes the callback port.
+  const tngTouched =
+    patch.tngEnabled !== undefined || patch.tngCallbackPort !== undefined;
+  if (tngTouched) {
+    if (next.tngEnabled) startW4gServer(next.tngCallbackPort);
+    else stopW4gServer();
+  }
   return next;
+});
+
+// ─── TNG W4G test triggers + status ────────────────────────────────────────
+// Used by the Settings page panel so an operator can hit "Test PayRequest" /
+// "Test PayCancel" / "Ping" without spinning up a real parking session, and
+// see live result frames as they come back from the IO controller.
+ipcMain.handle('tng:ping', () => tngPing());
+ipcMain.handle('tng:status', () => w4gStatus());
+ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
+  payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;
+}) => {
+  // Make sure the listener is up — without it, no PayResult callback can
+  // ever land and the request will time out at the device side.
+  const s = getSettings();
+  if (!s.tngEnabled) return { ok: false, orderId: '', error: 'tng_disabled — flip the master switch on first' };
+  startW4gServer(s.tngCallbackPort);
+  const orderId = opts?.orderId ?? newTngOrderId();
+  try {
+    const body = await tngPayRequest({
+      orderId,
+      payAmount: opts?.payAmount ?? 100,
+      discountAmount: opts?.discountAmount ?? 0,
+      enterTime: opts?.enterTime,
+      payTime: opts?.payTime,
+    });
+    return {
+      ok: body.state === '0',
+      orderId,
+      resultState: body.state,
+      payType: body.payType,
+      cardNo: body.cardNo,
+      balance: body.balance,
+      stan: body.stan,
+      apprCode: body.apprCode,
+    };
+  } catch (e: any) {
+    return { ok: false, orderId, error: e?.message ?? String(e) };
+  }
+});
+ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string) => {
+  if (!orderId) return { ok: false, error: 'orderId_required' };
+  try {
+    const ack = await tngPayCancel(orderId);
+    return { ok: ack.state === 0, deviceState: ack.state };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
 });
 
 ipcMain.handle('diagnose:lpr', () => require('./lpr-webhook').diagnose());
