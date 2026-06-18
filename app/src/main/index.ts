@@ -7,6 +7,42 @@
  */
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } from 'electron';
 import path from 'node:path';
+import fs from 'node:fs';
+
+// ─── userData isolation (dev mode) ─────────────────────────────────────────
+// In packaged builds Electron derives userData from package.json's productName.
+// In `npm run dev` the host process is just `electron.exe`, so app.getName()
+// defaults to "Electron" and userData lands in %APPDATA%/Electron — a dir
+// shared with EVERY other Electron app a developer has touched on this box.
+// That shared dir caches cookies, localStorage, and (worst of all) Service
+// Workers per-origin. If another local Electron project (face_auth/admin,
+// etc.) ever registered a SW on http://localhost:5173, it intercepts every
+// qparking-local fetch and shows ITS cached index.html instead of ours.
+//
+// Set the name BEFORE anyone reads getPath('userData'). One-shot migration
+// below copies the SQLite DB across so existing terminals/cameras/sessions
+// follow the operator to the new isolated path.
+app.setName('qparking-local');
+migrateUserData();
+
+function migrateUserData() {
+  try {
+    const newDir = app.getPath('userData');
+    const legacyDir = path.join(path.dirname(newDir), 'Electron');
+    if (newDir === legacyDir) return;
+    fs.mkdirSync(newDir, { recursive: true });
+    for (const f of ['qparking-local.db', 'qparking-local.db-shm', 'qparking-local.db-wal']) {
+      const from = path.join(legacyDir, f);
+      const to = path.join(newDir, f);
+      if (fs.existsSync(from) && !fs.existsSync(to)) {
+        fs.copyFileSync(from, to);
+        console.log(`[boot] migrated ${f} from shared Electron dir → ${newDir}`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[boot] userData migration skipped: ${e?.message ?? e}`);
+  }
+}
 import {
   getDb, getSettings, saveSettings,
   listTerminals, getTerminal, upsertTerminal, deleteTerminal,
