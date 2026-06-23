@@ -103,6 +103,11 @@ const api = {
   pingFaceGate: () => ipcRenderer.invoke('faceGate:ping'),
   openFaceGate: (opts?: { plate?: string; reason?: string }) => ipcRenderer.invoke('faceGate:open', opts ?? {}),
 
+  // App self-update — check / download / apply against the qparking cloud.
+  appUpdateCheck: () => ipcRenderer.invoke('app-update:check'),
+  appUpdateDownload: (opts: { variant: 'portable' | 'installer' }) => ipcRenderer.invoke('app-update:download', opts),
+  appUpdateApply: (opts: { path: string }) => ipcRenderer.invoke('app-update:apply', opts),
+
   // Touch'n'Go W4G IO-controller bridge (test triggers + live status)
   tngPing: () => ipcRenderer.invoke('tng:ping'),
   tngStatus: () => ipcRenderer.invoke('tng:status'),
@@ -112,7 +117,7 @@ const api = {
   tngTestPayCancel: (orderId: string) => ipcRenderer.invoke('tng:test-pay-cancel', orderId),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'terminal-status'|'session'|'log'|'plate-detected'|'gate-state', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'terminal-status'|'session'|'log'|'plate-detected'|'gate-state'|'sync-status'|'parking-flow-log'|'app-update-progress', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };

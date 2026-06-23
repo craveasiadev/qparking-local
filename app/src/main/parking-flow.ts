@@ -849,6 +849,10 @@ export function ruleForMoment(rules: TariffRule[], when: Date): TariffRule | nul
   const date = when.toISOString().slice(0, 10);
 
   const matches = rules.filter((r) => {
+    // 2026-06-22: respect per-rule activation. Inactive rules are kept in the
+    // local DB so the operator can see them in Scopes, but they MUST NOT
+    // contribute to fee math — that's what the Activations tab toggles.
+    if (r.isActive === false) return false;
     if (r.validFrom && r.validFrom > date) return false;
     if (r.validTo && r.validTo < date) return false;
     if (Array.isArray(r.daysOfWeek) && r.daysOfWeek.length > 0 && !r.daysOfWeek.includes(weekday)) return false;

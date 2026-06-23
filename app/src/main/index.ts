@@ -77,6 +77,7 @@ import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
   pingDevice as tngPing, w4gStatus, w4gEvents, newOrderId as newTngOrderId,
 } from './w4g-tng';
+import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -599,6 +600,18 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
     return { ok: false, orderId, error: e?.message ?? String(e) };
   }
 });
+// ─── App self-update channel ───────────────────────────────────────────────
+// Settings page calls these to check the qparking cloud for a newer
+// build and download + apply it. Implementation lives in app-update.ts.
+ipcMain.handle('app-update:check', () => checkForUpdate());
+ipcMain.handle('app-update:download', async (_e, opts: { variant: 'portable' | 'installer' }) => {
+  return downloadUpdate({
+    variant: opts.variant,
+    onProgress: (p) => sendToRenderer('app-update-progress', p),
+  });
+});
+ipcMain.handle('app-update:apply', (_e, opts: { path: string }) => applyUpdate(opts));
+
 ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string) => {
   if (!orderId) return { ok: false, error: 'orderId_required' };
   try {

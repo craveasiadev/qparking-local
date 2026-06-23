@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi } from 'lucide-react';
+import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -127,6 +127,49 @@ export function Settings() {
     const r = await window.bridge.tngTestPayCancel(tngLastOrderId);
     if (r.ok) pushLog('recv', `✓ Cancel accepted (state=${r.deviceState})`);
     else pushLog('error', `✗ ${r.error ?? `state=${r.deviceState}`}`);
+  });
+
+  // ─── App self-update ─────────────────────────────────────────────────
+  const [appUpdate, setAppUpdate] = useState<{
+    checkedAt?: string;
+    currentVersion?: string;
+    latestVersion?: string;
+    isNewer?: boolean;
+    releasedAt?: string | null;
+    notes?: string | null;
+    portable?: { filename: string; size: number | null; url: string } | null;
+    installer?: { filename: string; size: number | null; url: string } | null;
+    error?: string;
+  } | null>(null);
+  const [downloadPct, setDownloadPct] = useState<number | null>(null);
+  const [downloadedPath, setDownloadedPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Subscribe to streaming progress events from the main process.
+    const off = window.bridge.onEvent('app-update-progress' as any, (p: any) => {
+      if (typeof p?.pct === 'number') setDownloadPct(p.pct);
+    });
+    return () => { try { off(); } catch { /* ignore */ } };
+  }, []);
+
+  const [checkUpdate, checking] = useAsyncAction(async () => {
+    setDownloadPct(null);
+    setDownloadedPath(null);
+    const r = await window.bridge.appUpdateCheck();
+    setAppUpdate({ ...r, checkedAt: new Date().toISOString() });
+  });
+
+  const [downloadUpdate, downloading] = useAsyncAction(async (variant: 'portable' | 'installer') => {
+    setDownloadPct(0);
+    const r = await window.bridge.appUpdateDownload({ variant });
+    if (r.ok && r.path) setDownloadedPath(r.path);
+    else setAppUpdate((prev) => ({ ...(prev ?? {}), error: r.error ?? 'download_failed' }));
+  });
+
+  const [applyUpdate, applying] = useAsyncAction(async () => {
+    if (!downloadedPath) return;
+    if (!confirm('Install the update now?\n\nThis closes the app. For the installer variant, the NSIS wizard opens — accept its prompts. For the portable, the new exe launches in place.')) return;
+    await window.bridge.appUpdateApply({ path: downloadedPath });
   });
 
   const [runClearCache, clearingCache] = useAsyncAction(async () => {
@@ -362,6 +405,127 @@ export function Settings() {
           <input type="number" className="input" value={s.exitGracePeriodSeconds} onChange={(e) => setS({ ...s, exitGracePeriodSeconds: Number(e.target.value) })} />
           <p className="text-[11px] text-gray-500 mt-1">If payment terminal doesn't complete within this window, the operator gets a manual-release prompt.</p>
         </Field>
+      </section>
+
+      <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">App updates</h2>
+        <p className="text-[11px] text-gray-500">
+          Checks the qparking cloud (<code className="font-mono">{`{base}/api/v1/local-server/latest-built`}</code>) for a newer published build of this app. The download is bearer-token authed via the qparking API key in the section above — make sure that's saved before checking.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => checkUpdate()}
+            disabled={checking || downloading || applying}
+            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50"
+          >
+            {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {checking ? 'Checking…' : 'Check for updates'}
+          </button>
+          {appUpdate?.checkedAt && (
+            <span className="text-[11px] text-gray-500">
+              Last checked {new Date(appUpdate.checkedAt).toLocaleTimeString()}
+            </span>
+          )}
+        </div>
+
+        {appUpdate?.error && (
+          <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">
+            <strong>Error:</strong> {appUpdate.error}
+          </div>
+        )}
+
+        {appUpdate?.currentVersion && appUpdate.latestVersion && (
+          <div className={`rounded-lg border px-3 py-2.5 text-xs space-y-1 ${
+            appUpdate.isNewer ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'
+          }`}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="inline-flex items-center gap-1.5">
+                <Package size={13} className={appUpdate.isNewer ? 'text-amber-700' : 'text-emerald-700'} />
+                <span className="font-bold">
+                  {appUpdate.isNewer
+                    ? `Update available: ${appUpdate.latestVersion}`
+                    : `You're on the latest (${appUpdate.currentVersion})`}
+                </span>
+              </div>
+              <span className="font-mono text-[11px] text-gray-600">
+                installed: {appUpdate.currentVersion}
+                {appUpdate.releasedAt && appUpdate.isNewer && (
+                  <> · released: {new Date(appUpdate.releasedAt).toLocaleDateString()}</>
+                )}
+              </span>
+            </div>
+            {appUpdate.notes && (
+              <p className="text-[11px] text-gray-700 mt-1 whitespace-pre-wrap">{appUpdate.notes}</p>
+            )}
+          </div>
+        )}
+
+        {appUpdate?.isNewer && (appUpdate.portable || appUpdate.installer) && !downloadedPath && (
+          <div className="space-y-2">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">Choose how to update</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {appUpdate.installer && (
+                <button
+                  onClick={() => downloadUpdate('installer')}
+                  disabled={downloading || applying}
+                  className="flex flex-col items-start gap-1 rounded-lg border border-gray-200 hover:border-gray-900 px-3 py-2.5 text-left disabled:opacity-50"
+                >
+                  <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide">
+                    <Download size={13} /> Installer (.exe)
+                  </div>
+                  <div className="text-[11px] text-gray-500 font-mono">{appUpdate.installer.filename}</div>
+                  <div className="text-[11px] text-gray-400">
+                    {appUpdate.installer.size ? `${(appUpdate.installer.size / 1024 / 1024).toFixed(1)} MB` : '—'} · NSIS wizard, in-place upgrade
+                  </div>
+                </button>
+              )}
+              {appUpdate.portable && (
+                <button
+                  onClick={() => downloadUpdate('portable')}
+                  disabled={downloading || applying}
+                  className="flex flex-col items-start gap-1 rounded-lg border border-gray-200 hover:border-gray-900 px-3 py-2.5 text-left disabled:opacity-50"
+                >
+                  <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide">
+                    <Download size={13} /> Portable (.exe)
+                  </div>
+                  <div className="text-[11px] text-gray-500 font-mono">{appUpdate.portable.filename}</div>
+                  <div className="text-[11px] text-gray-400">
+                    {appUpdate.portable.size ? `${(appUpdate.portable.size / 1024 / 1024).toFixed(1)} MB` : '—'} · single-file, no installer
+                  </div>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {downloadPct !== null && !downloadedPath && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px] text-gray-600">
+              <span className="inline-flex items-center gap-1.5"><Loader2 size={11} className="animate-spin" /> Downloading…</span>
+              <span className="font-mono">{downloadPct}%</span>
+            </div>
+            <div className="h-2 rounded-full overflow-hidden bg-gray-100">
+              <div className="h-full bg-gray-900 transition-all" style={{ width: `${downloadPct}%` }} />
+            </div>
+          </div>
+        )}
+
+        {downloadedPath && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs space-y-2">
+            <div className="inline-flex items-center gap-1.5 font-bold text-emerald-800">
+              <Check size={13} /> Download complete
+            </div>
+            <div className="font-mono text-[10px] text-gray-600 break-all">{downloadedPath}</div>
+            <button
+              onClick={() => applyUpdate()}
+              disabled={applying}
+              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
+            >
+              {applying ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              {applying ? 'Restarting…' : 'Install & restart'}
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-3">

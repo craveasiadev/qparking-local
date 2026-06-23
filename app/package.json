@@ -1,7 +1,7 @@
 {
   "name": "qparking-local",
   "productName": "QParking Local Server",
-  "version": "0.14.0",
+  "version": "0.14.2",
   "description": "On-prem parking controller: LPR camera ingest, ECPI payment-terminal driver, parking-session state machine, rate sync from qparking SaaS.",
   "main": "dist/main/index.js",
   "author": "QParking",
@@ -17,6 +17,8 @@
     "build:main": "tsc -p src/main/tsconfig.json",
     "package": "npm run build && electron-builder --win nsis portable",
     "package:portable": "npm run build && electron-builder --win portable",
+    "publish:cloud": "node scripts/publish.mjs",
+    "ship": "npm run package && node scripts/publish.mjs",
     "lint": "tsc -p src/main/tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.json --noEmit"
   },
   "dependencies": {

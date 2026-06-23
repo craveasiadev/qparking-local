@@ -156,6 +156,10 @@ export interface TariffRule {
   /** Per-rule daily cap. 0 = inherit policy-level cap. */
   dailyCapCents: number;
   isOvernight: boolean;
+  /** Per-rule activation flag — mirrors the cloud Activations tab. Inactive
+   *  rules are still cached locally so the operator can see the full picture
+   *  in Scopes, but the exit-flow fee math skips them. Defaults to true. */
+  isActive: boolean;
 }
 
 /** Cached qparking scope/rate row. Refreshed periodically from the SaaS. */
@@ -180,8 +184,13 @@ export interface ScopeRate {
   cutoffEnabled: boolean;
   cutoffTime: string | null;
   cutoffBehavior: string | null;
+  /** Fixed fee charged when cutoffBehavior == 'new_day_fixed_fee' and the
+   *  session crosses the daily reset boundary. Null for the other behaviours. */
+  newDayFixedFeeCents: number | null;
   policyId: string | null;
   policyName: string | null;
+  /** Operator-facing free-form description from the cloud Setup & Rules tab. */
+  policyDescription: string | null;
 }
 
 /** A plate-keyed pass cached from qparking SaaS so the gate can decide
@@ -400,6 +409,35 @@ export interface BridgeApi {
   pingFaceGate(): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
   openFaceGate(opts?: { plate?: string; reason?: string }): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
 
+  // App self-update — checks qparking cloud /latest-built endpoint.
+  /** Probe the cloud for a newer published build. Reads version from
+   *  package.json on this side, compares semver-style, returns the manifest. */
+  appUpdateCheck(): Promise<{
+    ok: boolean;
+    currentVersion: string;
+    latestVersion?: string;
+    isNewer?: boolean;
+    releasedAt?: string | null;
+    notes?: string | null;
+    portable?: { filename: string; size: number | null; sha256: string | null; url: string } | null;
+    installer?: { filename: string; size: number | null; sha256: string | null; url: string } | null;
+    error?: string;
+  }>;
+  /** Download the chosen variant (portable | installer) to a temp file and
+   *  return its absolute path. Streams progress via 'app-update-progress'
+   *  event so the renderer can show a bar. */
+  appUpdateDownload(opts: { variant: 'portable' | 'installer' }): Promise<{
+    ok: boolean;
+    path?: string;
+    bytes?: number;
+    sha256?: string;
+    error?: string;
+  }>;
+  /** Launch the downloaded build via the OS and quit the current app so the
+   *  installer/portable can replace it. For NSIS this triggers the standard
+   *  Windows installer wizard; for portable it just opens the new exe. */
+  appUpdateApply(opts: { path: string }): Promise<{ ok: boolean; error?: string }>;
+
   // Touch'n'Go W4G IO-controller bridge
   /** Probe the W4G device: TCP-connect on the configured host:port. Doesn't
    *  send PayRequest — just verifies reachability for the Settings page. */
@@ -432,5 +470,5 @@ export interface BridgeApi {
   }>;
 
   // Stream events to renderer (returns an unsubscribe fn)
-  onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log', cb: (payload: unknown) => void): () => void;
+  onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void): () => void;
 }

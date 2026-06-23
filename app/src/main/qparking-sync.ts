@@ -58,6 +58,12 @@ export async function syncScopes(): Promise<SyncResult> {
             subsequentBlockMinutes: Number(r.subsequent_block_minutes ?? 60),
             dailyCapCents: Number(r.daily_cap_cents ?? 0),
             isOvernight: !!r.is_overnight,
+            // 2026-06-22: per-rule activation flag. Older cloud builds
+            // didn't send this field — default to active so a missing key
+            // doesn't silently disable every rule.
+            isActive: r.is_active === undefined || r.is_active === null
+              ? true
+              : !!r.is_active,
           })).filter((r: TariffRule) => !!r.ruleId)
         : [];
 
@@ -74,10 +80,14 @@ export async function syncScopes(): Promise<SyncResult> {
         rules,
         policyId: row.policy_id ?? null,
         policyName: row.policy_name ?? null,
+        policyDescription: row.policy_description ?? null,
         graceExceededBehavior: row.grace_exceeded_behavior ?? null,
         cutoffEnabled: !!row.cutoff_enabled,
         cutoffTime: row.cutoff_time ?? null,
         cutoffBehavior: row.cutoff_behavior ?? null,
+        newDayFixedFeeCents: row.new_day_fixed_fee_cents !== undefined && row.new_day_fixed_fee_cents !== null
+          ? Number(row.new_day_fixed_fee_cents)
+          : null,
       };
       upsertScope(scope);
       count++;

@@ -218,9 +218,16 @@ function applySchema(d: Database.Database) {
     'cutoff_enabled INTEGER NOT NULL DEFAULT 0',
     'cutoff_time TEXT',
     'cutoff_behavior TEXT',
+    // 2026-06-22: 3-tab Pricing redesign in qparking SaaS adds these.
+    'policy_description TEXT',
+    'new_day_fixed_fee_cents INTEGER',
   ]) {
     try { d.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
+  // 2026-06-22: per-rule is_active flag — mirrors the Activations tab so
+  // operators can see which rules are dimmed and the exit flow can skip
+  // inactive rules even if they technically match the moment.
+  try { d.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -632,10 +639,12 @@ function rowToScope(r: any, rules: TariffRule[] = []): ScopeRate {
     currency: r.currency, fetchedAt: r.fetched_at,
     policyId: r.policy_id ?? null,
     policyName: r.policy_name ?? null,
+    policyDescription: r.policy_description ?? null,
     graceExceededBehavior: (r.grace_exceeded_behavior ?? null) as any,
     cutoffEnabled: !!r.cutoff_enabled,
     cutoffTime: r.cutoff_time ?? null,
     cutoffBehavior: r.cutoff_behavior ?? null,
+    newDayFixedFeeCents: r.new_day_fixed_fee_cents ?? null,
     rules,
   };
 }
@@ -656,6 +665,9 @@ function rowToTariffRule(r: any): TariffRule {
     subsequentBlockMinutes: r.subsequent_block_minutes,
     dailyCapCents: r.daily_cap_cents,
     isOvernight: !!r.is_overnight,
+    // Default true on legacy rows (DB column has DEFAULT 1) so an
+    // unmigrated install doesn't suddenly treat every rule as inactive.
+    isActive: r.is_active === 0 ? false : true,
   };
 }
 
@@ -685,8 +697,9 @@ export function upsertScope(s: ScopeRate): ScopeRate {
     d.prepare(`INSERT INTO scopes (
         scope_id, scope_name, free_minutes, first_block_cents, per_block_cents,
         block_minutes, daily_cap_cents, currency, fetched_at,
-        policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
+        policy_description, new_day_fixed_fee_cents
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_id) DO UPDATE SET
         scope_name=excluded.scope_name,
         free_minutes=excluded.free_minutes,
@@ -701,12 +714,15 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         grace_exceeded_behavior=excluded.grace_exceeded_behavior,
         cutoff_enabled=excluded.cutoff_enabled,
         cutoff_time=excluded.cutoff_time,
-        cutoff_behavior=excluded.cutoff_behavior`)
+        cutoff_behavior=excluded.cutoff_behavior,
+        policy_description=excluded.policy_description,
+        new_day_fixed_fee_cents=excluded.new_day_fixed_fee_cents`)
       .run(
         s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents,
         s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt,
         s.policyId ?? null, s.policyName ?? null, s.graceExceededBehavior ?? null,
         s.cutoffEnabled ? 1 : 0, s.cutoffTime ?? null, s.cutoffBehavior ?? null,
+        s.policyDescription ?? null, s.newDayFixedFeeCents ?? null,
       );
 
     d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(s.scopeId);
@@ -715,8 +731,8 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         time_from, time_to, valid_from, valid_to, rule_type,
         flat_amount_cents, first_block_amount_cents, first_block_minutes,
         subsequent_block_amount_cents, subsequent_block_minutes,
-        daily_cap_cents, is_overnight, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+        daily_cap_cents, is_overnight, is_active, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
     for (const r of s.rules ?? []) {
       insertRule.run(
         r.ruleId, s.scopeId, r.name, r.priority,
@@ -729,6 +745,9 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         r.subsequentBlockAmountCents, r.subsequentBlockMinutes,
         r.dailyCapCents,
         r.isOvernight ? 1 : 0,
+        // Default true so older sync payloads that don't carry is_active keep
+        // every rule live (matches the cloud's pre-2026-06-22 behavior).
+        r.isActive === false ? 0 : 1,
       );
     }
   });
