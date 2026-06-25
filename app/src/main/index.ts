@@ -577,7 +577,11 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
   const s = getSettings();
   if (!s.tngEnabled) return { ok: false, orderId: '', error: 'tng_disabled — flip the master switch on first' };
   startW4gServer(s.tngCallbackPort);
-  const orderId = opts?.orderId ?? newTngOrderId();
+  // For Settings → Test PayRequest, use a TEST<epoch> orderId. Matches the
+  // merchant's reference tester's format and is easy to grep in the W4G
+  // device's own debug log — production exits use the random hex orderId
+  // from newTngOrderId() to avoid plate-keyed collisions.
+  const orderId = opts?.orderId ?? `TEST${Math.floor(Date.now() / 1000)}`;
   try {
     const body = await tngPayRequest({
       orderId,

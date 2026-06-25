@@ -1,7 +1,7 @@
 {
   "name": "qparking-local",
   "productName": "QParking Local Server",
-  "version": "0.14.2",
+  "version": "0.14.4",
   "description": "On-prem parking controller: LPR camera ingest, ECPI payment-terminal driver, parking-session state machine, rate sync from qparking SaaS.",
   "main": "dist/main/index.js",
   "author": "QParking",

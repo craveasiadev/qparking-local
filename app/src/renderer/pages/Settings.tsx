@@ -7,6 +7,10 @@ interface TngTestLine {
   ts: string;
   kind: 'send' | 'recv' | 'error' | 'info';
   text: string;
+  /** Optional structured payload (JSON body, headers, decoded fields). Rendered
+   *  as a collapsible <details> block under the text — operators can pop it
+   *  open to inspect the raw bytes when something fails. */
+  payload?: unknown;
 }
 
 interface TngStatus {
@@ -61,9 +65,14 @@ export function Settings() {
     const off = window.bridge.onEvent('log' as any, (payload: any) => {
       if (payload?.source !== 'w4g') return;
       setTngLog((prev) => [
-        { ts: new Date().toLocaleTimeString(), kind: payload.direction, text: payload.message },
+        {
+          ts: new Date().toLocaleTimeString(),
+          kind: payload.direction,
+          text: payload.message,
+          payload: payload.payload,
+        },
         ...prev,
-      ].slice(0, 30));
+      ].slice(0, 100));
     });
     return () => { try { off(); } catch { /* ignore */ } };
   }, []);
@@ -384,17 +393,42 @@ export function Settings() {
           </button>
         </div>
         {tngLog.length > 0 && (
-          <div className="rounded-lg border border-gray-200 bg-black/95 text-gray-100 px-3 py-2 max-h-56 overflow-auto text-[11px] font-mono space-y-0.5">
-            {tngLog.map((line, idx) => (
-              <div key={idx} className={
+          <div className="rounded-lg border border-gray-200 bg-black/95 text-gray-100 px-3 py-2 max-h-72 overflow-auto text-[11px] font-mono space-y-1">
+            {tngLog.map((line, idx) => {
+              const kindColor =
                 line.kind === 'error' ? 'text-red-400'
                 : line.kind === 'send' ? 'text-sky-300'
                 : line.kind === 'recv' ? 'text-emerald-300'
-                : 'text-gray-400'
-              }>
-                <span className="text-gray-500">{line.ts}</span> <span className="uppercase">{line.kind}</span> {line.text}
-              </div>
-            ))}
+                : 'text-gray-400';
+              const hasPayload = line.payload !== undefined && line.payload !== null;
+              return (
+                <div key={idx} className={kindColor}>
+                  <div className="break-all">
+                    <span className="text-gray-500">{line.ts}</span>{' '}
+                    <span className="uppercase">{line.kind}</span>{' '}
+                    {line.text}
+                  </div>
+                  {hasPayload && (
+                    <details className="ml-12 mt-0.5">
+                      <summary className="cursor-pointer text-gray-500 hover:text-gray-300 text-[10px] uppercase tracking-wider">
+                        payload ▾
+                      </summary>
+                      <pre className="mt-1 px-2 py-1 rounded bg-gray-900/80 text-gray-300 text-[10px] whitespace-pre-wrap break-all leading-snug">
+                        {(() => {
+                          try {
+                            return typeof line.payload === 'string'
+                              ? line.payload
+                              : JSON.stringify(line.payload, null, 2);
+                          } catch {
+                            return String(line.payload);
+                          }
+                        })()}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
