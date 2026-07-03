@@ -32,6 +32,9 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
         snapshot_url: cam.snapshotUrl ? '(see /snapshot)' : null, // never share LAN URL with cloud
         enabled: cam.enabled,
         has_snapshot: !!cam.snapshotUrl,
+        // Which lane this camera watches — cloud resolves to a UUID so
+        // per-camera Open Barrier commands carry the target lane_id.
+        lane_external_id: `local-${lane.id}`,
       }),
       signal: AbortSignal.timeout(10_000),
     });

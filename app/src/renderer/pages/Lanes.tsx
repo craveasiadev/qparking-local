@@ -1,9 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Map as MapIcon, X } from 'lucide-react';
+import { Plus, Trash2, Map as MapIcon, X, Car, Bike, Layers } from 'lucide-react';
 import type { ParkingLane, PaymentTerminal, ScopeRate } from '@shared/types';
 
 const EMPTY: Omit<ParkingLane, 'id'> = {
   name: '', direction: 'entry', scopeId: null, terminalId: null, gateRelayAddress: null, enabled: true,
+  laneType: 'car',
+};
+
+const LANE_TYPE_LABEL: Record<ParkingLane['laneType'], string> = {
+  car: 'Car',
+  motorcycle: 'Motorcycle',
+  mixed: 'Mixed',
 };
 
 export function Lanes() {
@@ -45,9 +52,13 @@ export function Lanes() {
           return (
             <div key={l.id} className="rounded-xl border border-gray-200 bg-white p-4 flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2"><MapIcon size={16} className="text-gray-400" /><h3 className="font-semibold">{l.name}</h3></div>
+                <div className="flex items-center gap-2">
+                  <MapIcon size={16} className="text-gray-400" />
+                  <h3 className="font-semibold">{l.name}</h3>
+                  <LaneTypeBadge type={l.laneType} />
+                </div>
                 <div className="mt-1 text-xs text-gray-500 font-mono">
-                  {l.direction} · scope: {s?.scopeName ?? '—'} · terminal: {t?.name ?? '—'}
+                  {l.direction} · plan: {s?.scopeName ?? 'site default'} · terminal: {t?.name ?? '—'}
                   {!l.enabled && ' · DISABLED'}
                 </div>
               </div>
@@ -76,10 +87,30 @@ export function Lanes() {
                   <option value="entry">Entry</option><option value="exit">Exit</option>
                 </select>
               </Field>
-              <Field label="Scope (rate set)">
+              <Field label="Lane type">
+                {/* Physical vehicle class this lane serves. Drives rate
+                    resolution: a motorcycle lane only picks rules with
+                    vehicle_type='motorcycle' or vehicle_type=null. Mixed
+                    lanes disable the class filter entirely. */}
+                <select className="input" value={editing.laneType ?? 'car'} onChange={(e) => setEditing({ ...editing, laneType: e.target.value as ParkingLane['laneType'] })}>
+                  <option value="car">Car</option>
+                  <option value="motorcycle">Motorcycle</option>
+                  <option value="mixed">Mixed (no class filter)</option>
+                </select>
+              </Field>
+              <Field label="Rate plan">
+                {/* Points at a scope_id which now corresponds to a cloud
+                    RatePolicy — different lanes can bind to different
+                    plans (VIP → premium, general → standard). Leaving
+                    it "— site default —" falls back to the plan the
+                    cloud flagged as default. */}
                 <select className="input" value={editing.scopeId ?? ''} onChange={(e) => setEditing({ ...editing, scopeId: e.target.value || null })}>
-                  <option value="">— none —</option>
-                  {scopes.map((s) => <option key={s.scopeId} value={s.scopeId}>{s.scopeName}</option>)}
+                  <option value="">— site default —</option>
+                  {scopes.map((s) => (
+                    <option key={s.scopeId} value={s.scopeId}>
+                      {s.scopeName}{(s as any).isSiteDefault ? ' (default)' : ''}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field label="Payment terminal">
@@ -111,5 +142,20 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
       {children}
     </div>
+  );
+}
+
+function LaneTypeBadge({ type }: { type: ParkingLane['laneType'] }) {
+  const map: Record<ParkingLane['laneType'], { Icon: any; cls: string }> = {
+    car:        { Icon: Car,    cls: 'bg-blue-100 text-blue-800 border-blue-200' },
+    motorcycle: { Icon: Bike,   cls: 'bg-orange-100 text-orange-800 border-orange-200' },
+    mixed:      { Icon: Layers, cls: 'bg-gray-100 text-gray-700 border-gray-200' },
+  };
+  const t = type ?? 'car';
+  const { Icon, cls } = map[t];
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${cls}`}>
+      <Icon size={10} /> {LANE_TYPE_LABEL[t]}
+    </span>
   );
 }

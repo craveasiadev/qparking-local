@@ -56,6 +56,24 @@ export function startLprServer(port: number) {
     res.statusCode = 404;
     res.end('not found');
   });
+  // Graceful port-conflict handler. Without this, EADDRINUSE bubbles up as
+  // an unhandled exception and crashes the whole main process (the operator
+  // sees a JavaScript-error dialog with no obvious recovery). This is a real
+  // hazard when a developer runs `npm run dev` alongside a packaged install
+  // — both try to bind port 6001. We log a clear warning and continue; LPR
+  // ingest is degraded but the rest of the app keeps working.
+  server.on('error', (err: any) => {
+    if (err?.code === 'EADDRINUSE') {
+      console.warn(`[lpr] port ${port} already in use — LPR webhook listener not bound. Another qparking-local instance may be running (check for the packaged portable). LPR camera events will NOT reach this process until the port is free.`);
+    } else {
+      console.error(`[lpr] server error: ${err?.message ?? err}`);
+    }
+    // Discard the crashed server so subsequent startLprServer() calls can
+    // retry cleanly. Don't rethrow — that's what causes the app-crash dialog.
+    try { server?.close(); } catch { /* ignore */ }
+    server = null;
+    activePort = 0;
+  });
   server.listen(port, '0.0.0.0', () => {
     console.log(`[lpr] listening on :${port}`);
   });

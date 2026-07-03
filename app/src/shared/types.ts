@@ -97,6 +97,18 @@ export interface ParkingLane {
   /** Optional GPIO/relay address for the gate barrier. */
   gateRelayAddress: string | null;
   enabled: boolean;
+  /**
+   * Physical vehicle class the lane serves. `car` is the default for legacy
+   * lanes that never picked. `motorcycle` filters tariff rules that specify
+   * `vehicle_type='motorcycle'`. `mixed` disables the lane-level filter so
+   * the plate's registered vehicle_type (if any) drives the pick instead.
+   *
+   * Why this exists: the LPR camera can't reliably detect a car vs a
+   * motorcycle from a plate photo alone, so we push the class decision
+   * up to the lane (which the physical geometry already enforces —
+   * motorcycles use their own narrow lane).
+   */
+  laneType: 'car' | 'motorcycle' | 'mixed';
 }
 
 /** One parking session = entry event → optional exit event. While the exit
@@ -191,6 +203,49 @@ export interface ScopeRate {
   policyName: string | null;
   /** Operator-facing free-form description from the cloud Setup & Rules tab. */
   policyDescription: string | null;
+  /** Cloud flag: this is the site-wide default plan applied when a lane
+   *  hasn't picked one of its own. Rendered as a "Default" badge in the
+   *  local Rate Plans list so the operator knows which plan governs
+   *  fallback pricing. */
+  isSiteDefault?: boolean;
+}
+
+/** Parking space inventory mirrored from qparking SaaS. Read-only. */
+export interface ParkingSpace {
+  id: string;
+  building: string | null;
+  level: string | null;
+  zone: string | null;
+  spaceNumber: string | null;
+  spaceCode: string | null;
+  /** Free-form status — 'available' | 'occupied' | 'reserved' | 'vip' | 'maintenance' | … */
+  status: string;
+  customerName: string | null;
+  vehiclePlate: string | null;
+  passType: string | null;
+  passId: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  notes: string | null;
+  fetchedAt: string;
+}
+
+/** Vehicle type taxonomy mirrored from qparking SaaS. Read-only. */
+export interface VehicleType {
+  id: string;
+  typeName: string;
+  hourlyRate: number | null;
+  dailyRate: number | null;
+  monthlyRate: number | null;
+  groupName: string | null;
+  fetchedAt: string;
+}
+
+/** Vehicle group taxonomy mirrored from qparking SaaS. Read-only. */
+export interface VehicleGroup {
+  id: string;
+  name: string;
+  fetchedAt: string;
 }
 
 /** A plate-keyed pass cached from qparking SaaS so the gate can decide
@@ -355,10 +410,28 @@ export interface BridgeApi {
   // Sessions
   listOpenSessions(): Promise<ParkingSession[]>;
   listRecentSessions(limit: number): Promise<ParkingSession[]>;
-  listSessionsPage(opts: { tab: 'open' | 'recent'; limit: number; offset: number }): Promise<{
+  listSessionsPage(opts: {
+    tab: 'open' | 'recent';
+    limit: number;
+    offset: number;
+    /** Case-insensitive contains-match on plate — for reconciling
+     *  mis-read exits ("ABC" entry vs "ABX" exit). */
+    plateSearch?: string | null;
+    /** ISO datetime range on entry_at (inclusive). */
+    entryFrom?: string | null;
+    entryTo?: string | null;
+    /** ISO datetime range on exit_at (inclusive). */
+    exitFrom?: string | null;
+    exitTo?: string | null;
+  }): Promise<{
     rows: ParkingSession[];
     counts: { open: number; total: number };
   }>;
+  /** Manually retrigger the exit payment flow for a stuck session. Fires
+   *  the terminal (ECPI initCard + W4G PayRequest race) using the lane +
+   *  terminal wired to the session's lane. Returns immediately; the actual
+   *  card tap resolves asynchronously through the normal parking-flow. */
+  retriggerSessionPayment(id: number): Promise<{ ok: boolean; error?: string }>;
   deleteSession(id: number): Promise<boolean>;
   deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
   manualReleaseSession(id: number, reason: string): Promise<void>;
@@ -370,6 +443,16 @@ export interface BridgeApi {
     notes?: string;
     scopeIdOverride?: string | null;
   }): Promise<ParkingSession>;
+
+  // Mirrored config from qparking SaaS (read-only locally)
+  listSpaces(): Promise<ParkingSpace[]>;
+  syncSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  listVehicleTypes(): Promise<VehicleType[]>;
+  syncVehicleTypesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  listVehicleGroups(): Promise<VehicleGroup[]>;
+  /** Read every active pass cached from the cloud. Already populated by the
+   *  periodic syncPasses(); this just lets the UI display them. */
+  listActivePasses(): Promise<ActivePass[]>;
 
   // Scopes / rates
   listScopes(): Promise<ScopeRate[]>;
@@ -442,6 +525,29 @@ export interface BridgeApi {
   /** Probe the W4G device: TCP-connect on the configured host:port. Doesn't
    *  send PayRequest — just verifies reachability for the Settings page. */
   tngPing(): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+  /** Send GET / to the device and return status + headers + first 400 bytes
+   *  of body. Lets the operator see whether the box is speaking HTTP at all
+   *  on the configured IP+port, independent of the W4G API surface. */
+  tngProbeHttp(): Promise<{
+    ok: boolean;
+    status?: number;
+    statusText?: string;
+    headers?: Record<string, string | string[] | undefined>;
+    bodyPreview?: string;
+    elapsedMs?: number;
+    error?: string;
+  }>;
+  /** POST a synthetic PayResult into our own listener to verify the receive
+   *  path works end-to-end. If this passes but real device callbacks don't
+   *  land, the issue is purely device-side (URL config / firewall). */
+  tngLoopbackPayResult(opts?: { orderId?: string; state?: string; payType?: number; cardNo?: string; balance?: number }): Promise<{
+    ok: boolean;
+    status?: number;
+    responseBody?: string;
+    elapsedMs?: number;
+    sentBody?: string;
+    error?: string;
+  }>;
   /** Fire a one-shot PayRequest and wait for the PayResult callback. Used
    *  by the Settings "Test" trigger to exercise the full round-trip without
    *  opening a real parking session. Defaults: 100c, no discount, now. */
@@ -461,6 +567,7 @@ export interface BridgeApi {
     enabled: boolean;
     listening: boolean;
     listenPort: number;
+    listenPorts: number[];
     listenAddresses: string[];
     host: string;
     port: number;

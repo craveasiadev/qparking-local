@@ -20,6 +20,7 @@
  * pending/failed counts at a glance.
  */
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import {
   enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
   syncQueueStats, getSettings, getLane,
@@ -70,16 +71,42 @@ export function getSyncStatus(): SyncStatus {
 }
 
 /**
+ * Read a plate-capture image off disk and return it as a base64 string ready
+ * to embed in a session upsert payload. Returns null if the path is missing
+ * or the file can't be read — best-effort so a missing image never blocks
+ * the metadata sync. Also caps the size at 500KB so we don't blow up the
+ * HTTP request; anything larger is skipped with a warning.
+ */
+function readImageAsBase64(imagePath: string | null | undefined): string | null {
+  if (!imagePath) return null;
+  try {
+    const stat = fs.statSync(imagePath);
+    const MAX_BYTES = 500 * 1024;
+    if (stat.size > MAX_BYTES) {
+      console.warn(`[sync-queue] skipping oversized plate image ${imagePath} (${stat.size} bytes, cap ${MAX_BYTES})`);
+      return null;
+    }
+    const buf = fs.readFileSync(imagePath);
+    return buf.toString('base64');
+  } catch (e: any) {
+    console.warn(`[sync-queue] failed to read plate image ${imagePath}: ${e?.message ?? e}`);
+    return null;
+  }
+}
+
+/**
  * Public enqueue helpers. parking-flow / IPC handlers call these instead of
  * fetching directly so retries are guaranteed.
  */
 export function enqueueEntry(session: ParkingSession): void {
   const lane = session.entryLaneId ? getLane(session.entryLaneId) : null;
   if (!lane?.scopeId) return; // skip — lane lacks scope, can't attribute
+  const entryImage = readImageAsBase64(session.entryImagePath);
   enqueueSync('session.entry', {
     site_id: lane.scopeId,
     plate_number: session.plate,
     entry_time: session.entryAt,
+    ...(entryImage ? { entry_image_base64: entryImage } : {}),
   });
   scheduleDrain();
 }
@@ -102,6 +129,11 @@ export function enqueueExit(session: ParkingSession): void {
   const lane = session.exitLaneId ? getLane(session.exitLaneId)
     : (session.entryLaneId ? getLane(session.entryLaneId) : null);
   if (!lane?.scopeId) return;
+  // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
+  // and the freshly-captured exit image. Cloud upsert is idempotent per column
+  // so re-uploading the entry image is safe.
+  const entryImage = readImageAsBase64(session.entryImagePath);
+  const exitImage  = readImageAsBase64(session.exitImagePath);
   enqueueSync('session.exit', {
     site_id: lane.scopeId,
     plate_number: session.plate,
@@ -110,6 +142,8 @@ export function enqueueExit(session: ParkingSession): void {
     fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
     duration_minutes: session.durationMinutes ?? 0,
     ...paymentFields(session),
+    ...(entryImage ? { entry_image_base64: entryImage } : {}),
+    ...(exitImage  ? { exit_image_base64:  exitImage  } : {}),
   });
   scheduleDrain();
 }

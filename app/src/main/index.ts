@@ -9,34 +9,61 @@ import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } from 'e
 import path from 'node:path';
 import fs from 'node:fs';
 
-// ─── userData isolation (dev mode) ─────────────────────────────────────────
+// ─── userData isolation (dev vs packaged) ──────────────────────────────────
 // In packaged builds Electron derives userData from package.json's productName.
 // In `npm run dev` the host process is just `electron.exe`, so app.getName()
 // defaults to "Electron" and userData lands in %APPDATA%/Electron — a dir
 // shared with EVERY other Electron app a developer has touched on this box.
 // That shared dir caches cookies, localStorage, and (worst of all) Service
-// Workers per-origin. If another local Electron project (face_auth/admin,
-// etc.) ever registered a SW on http://localhost:5173, it intercepts every
-// qparking-local fetch and shows ITS cached index.html instead of ours.
+// Workers per-origin.
+//
+// We use SEPARATE userData paths for dev vs packaged:
+//   Packaged install → %APPDATA%/qparking-local/
+//   Dev (npm run dev) → %APPDATA%/qparking-local-dev/
+//
+// This gives us two big wins:
+//   1. Single-instance lock doesn't collide — a developer can run `npm run
+//      dev` while the installed portable is still handling the real gate
+//      in the background. Before this split, the dev Electron would call
+//      app.quit() immediately because requestSingleInstanceLock() returned
+//      false, and the developer saw an unexplained exit code 0.
+//   2. Dev experiments (test terminals, mock cameras, synthetic sessions)
+//      don't pollute the production DB the packaged portable is running.
 //
 // Set the name BEFORE anyone reads getPath('userData'). One-shot migration
 // below copies the SQLite DB across so existing terminals/cameras/sessions
 // follow the operator to the new isolated path.
-app.setName('qparking-local');
+const IS_DEV_MODE = !app.isPackaged;
+app.setName(IS_DEV_MODE ? 'qparking-local-dev' : 'qparking-local');
 migrateUserData();
 
+/**
+ * Idempotent userData migration. Handles three transitions:
+ *   1. Legacy %APPDATA%/Electron/ (pre-v0.14.1) → current userData
+ *   2. Packaged %APPDATA%/qparking-local/ → %APPDATA%/qparking-local-dev/
+ *      (only in dev mode, so a developer's first dev launch gets the same
+ *      data the installed portable has been accumulating)
+ * Both copies are best-effort and one-shot — after the first successful
+ * copy the target file exists, subsequent boots skip.
+ */
 function migrateUserData() {
   try {
     const newDir = app.getPath('userData');
-    const legacyDir = path.join(path.dirname(newDir), 'Electron');
-    if (newDir === legacyDir) return;
+    const parent = path.dirname(newDir);
+    const sources = [
+      path.join(parent, 'Electron'),                       // very old default
+      IS_DEV_MODE ? path.join(parent, 'qparking-local') : null,  // packaged → dev
+    ].filter((p): p is string => p !== null && p !== newDir);
+
     fs.mkdirSync(newDir, { recursive: true });
-    for (const f of ['qparking-local.db', 'qparking-local.db-shm', 'qparking-local.db-wal']) {
-      const from = path.join(legacyDir, f);
-      const to = path.join(newDir, f);
-      if (fs.existsSync(from) && !fs.existsSync(to)) {
-        fs.copyFileSync(from, to);
-        console.log(`[boot] migrated ${f} from shared Electron dir → ${newDir}`);
+    for (const src of sources) {
+      for (const f of ['qparking-local.db', 'qparking-local.db-shm', 'qparking-local.db-wal']) {
+        const from = path.join(src, f);
+        const to = path.join(newDir, f);
+        if (fs.existsSync(from) && !fs.existsSync(to)) {
+          fs.copyFileSync(from, to);
+          console.log(`[boot] migrated ${f} from ${src} → ${newDir}`);
+        }
       }
     }
   } catch (e: any) {
@@ -52,14 +79,18 @@ import {
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
   listScopes, getScope,
+  listParkingSpaces, listVehicleTypes, listVehicleGroups, listAllActivePasses,
 } from './db';
-import { computeFee } from './parking-flow';
+import { computeFee, retriggerSessionExit } from './parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './ecpi-terminal';
 import { startLprServer, lprEvents, simulatePlate } from './lpr-webhook';
 import { startParkingFlow, parkingEvents } from './parking-flow';
-import { startBackgroundSync, syncScopes, pushScopeRate } from './qparking-sync';
+import {
+  startBackgroundSync, syncScopes, pushScopeRate, syncSpaces, syncVehicleTypes, syncVehicleGroups,
+  startGatePoll, setGateOpenHandler,
+} from './qparking-sync';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
 import { openFaceGate, pingFaceGate } from './face-gate';
 import {
@@ -75,7 +106,8 @@ import { pushCamera, pushAllCameras } from './camera-push';
 import { pushTerminal, pushLane, pushAllDevices } from './device-push';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
-  pingDevice as tngPing, w4gStatus, w4gEvents, newOrderId as newTngOrderId,
+  pingDevice as tngPing, probeHttp as tngProbeHttp, loopbackPayResult as tngLoopback,
+  w4gStatus, w4gEvents, newOrderId as newTngOrderId,
 } from './w4g-tng';
 import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
 
@@ -94,11 +126,74 @@ app.whenReady().then(async () => {
   getDb(); // open the DB up-front so the schema is applied before anything queries it.
 
   const settings = getSettings();
-  startLprServer(settings.lprWebhookPort);
+  // In dev mode we offset the local-facing listener ports by +1000 so the
+  // dev instance can run side-by-side with a packaged install without
+  // fighting over ports (6001 → 7001 for LPR, 6000 → 7000 for the operator
+  // API). The W4G callback port stays as-is because the device firmware
+  // hardcodes 80 and gracefully skips if it's already bound. Operator's
+  // saved setting is preserved for packaged use — this is a dev-time
+  // override only.
+  const lprPort = IS_DEV_MODE ? (settings.lprWebhookPort + 1000) : settings.lprWebhookPort;
+  console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listener → :${lprPort}`);
+  startLprServer(lprPort);
   startParkingFlow();
   startBackgroundSync();
   startSnapshotUploader();
   startSyncDrain();
+  // Remote gate-open poll — checks cloud for pending gate commands every 20s
+  // and dispatches to the local gate simulator + face-auth turnstile.
+  //
+  // Resolution: cloud sends `camera_external_id` (formatted `local-{id}`)
+  // pointing at the specific camera whose barrier the operator wants raised.
+  // We look up the local camera, then its lane, so the simulator + audit
+  // note reference the actual barrier — not a generic "REMOTE OPEN" that
+  // an operator can't tell apart from other cameras' opens.
+  setGateOpenHandler(async (cmd) => {
+    let targetCamera: ReturnType<typeof listCameras>[number] | null = null;
+    let targetLane: ReturnType<typeof getLane> | null = null;
+    if (cmd.camera_external_id) {
+      const localIdMatch = cmd.camera_external_id.match(/^local-(\d+)$/);
+      if (localIdMatch) {
+        const localId = Number(localIdMatch[1]);
+        targetCamera = listCameras().find((c) => c.id === localId) ?? null;
+        if (targetCamera?.laneId) targetLane = getLane(targetCamera.laneId);
+      }
+    }
+    const label = targetCamera ? `${targetCamera.name} (lane: ${targetLane?.name ?? '—'})` : 'SITE-WIDE (no camera specified)';
+    console.log(`[gate-poll] dispatching remote gate-open cmd=${cmd.id} target=${label} reason="${cmd.reason ?? '-'}"`);
+
+    let simulatorFired = false;
+    let faceGateResult: any = null;
+    try {
+      sendGateEvent({
+        state: 'open',
+        laneName: targetLane?.name ?? targetCamera?.name ?? 'REMOTE OPEN',
+        direction: 'out',
+        reason: cmd.reason ?? 'remote-request',
+        holdMs: 5_000,
+      });
+      setTimeout(() => sendGateEvent({ state: 'closed' }), 5_000);
+      simulatorFired = true;
+    } catch (e: any) {
+      console.warn(`[gate-poll] simulator failed: ${e?.message ?? e}`);
+    }
+    // Face-auth turnstile — best-effort, matches how entry/paid-exit
+    // auto-opens work. The lane name goes into the reason for audit trail.
+    try {
+      faceGateResult = await openFaceGate({
+        reason: `remote-gate-open:${targetCamera?.name ?? cmd.reason ?? 'op'}`,
+      });
+    } catch (e: any) {
+      faceGateResult = { ok: false, error: e?.message ?? String(e) };
+    }
+    const note = [
+      `target=${label}`,
+      simulatorFired ? 'gate simulator fired' : 'gate simulator failed',
+      faceGateResult?.ok ? `face-gate ${faceGateResult.status ?? 'ok'}` : `face-gate ${faceGateResult?.error ?? 'skipped'}`,
+    ].join(' · ');
+    return { ok: simulatorFired || !!faceGateResult?.ok, note };
+  });
+  startGatePoll();
   // W4G PayResult callback listener — only start when the operator has
   // enabled the TNG integration. Toggling it on/off in Settings restarts
   // it via the settings:save handler below.
@@ -397,10 +492,29 @@ ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));
 
 ipcMain.handle('sessions:open', () => listOpenSessions());
 ipcMain.handle('sessions:recent', (_e, limit: number) => listRecentSessions(limit));
-ipcMain.handle('sessions:page', (_e, opts: { tab: 'open' | 'recent'; limit: number; offset: number }) => ({
+ipcMain.handle('sessions:page', (_e, opts: {
+  tab: 'open' | 'recent';
+  limit: number;
+  offset: number;
+  plateSearch?: string | null;
+  entryFrom?: string | null;
+  entryTo?: string | null;
+  exitFrom?: string | null;
+  exitTo?: string | null;
+}) => ({
   rows: listSessionsPage(opts),
-  counts: countSessions(),
+  counts: countSessions({
+    plateSearch: opts.plateSearch ?? null,
+    entryFrom: opts.entryFrom ?? null,
+    entryTo: opts.entryTo ?? null,
+    exitFrom: opts.exitFrom ?? null,
+    exitTo: opts.exitTo ?? null,
+  }),
 }));
+
+// Manual retrigger — synthesizes an exit LPR event for a session so the
+// normal parking-flow can drive the terminal for a stuck / mis-read exit.
+ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number) => retriggerSessionExit(sessionId));
 ipcMain.handle('sessions:delete', (_e, id: number) => {
   // Capture session BEFORE deleting so we have lane/plate/entryAt for the
   // qparking sync payload — otherwise the row is gone before we enqueue.
@@ -502,6 +616,17 @@ ipcMain.handle('sync:backfill-sessions', async () => {
 
 ipcMain.handle('scopes:list', () => listScopes());
 ipcMain.handle('scopes:sync', () => syncScopes());
+
+// Mirrored config from qparking SaaS — read-only locally. Sync handlers
+// each force a fresh pull from the cloud + return the new count. The
+// background sync also refreshes these on its 60s timer.
+ipcMain.handle('spaces:list', () => listParkingSpaces());
+ipcMain.handle('spaces:sync', () => syncSpaces());
+ipcMain.handle('vehicle-types:list', () => listVehicleTypes());
+ipcMain.handle('vehicle-types:sync', () => syncVehicleTypes());
+ipcMain.handle('vehicle-groups:list', () => listVehicleGroups());
+ipcMain.handle('vehicle-groups:sync', () => syncVehicleGroups());
+ipcMain.handle('passes:list', () => listAllActivePasses());
 ipcMain.handle('scopes:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;
@@ -551,7 +676,10 @@ ipcMain.handle('settings:get', () => getSettings());
 ipcMain.handle('settings:save', (_e, patch) => {
   const next = saveSettings(patch);
   // If the LPR port changed, restart the server.
-  if (patch.lprWebhookPort !== undefined) startLprServer(next.lprWebhookPort);
+  if (patch.lprWebhookPort !== undefined) {
+    const port = IS_DEV_MODE ? (next.lprWebhookPort + 1000) : next.lprWebhookPort;
+    startLprServer(port);
+  }
   // W4G TNG: stop / start / restart the callback listener as needed when
   // the operator flips the master switch or changes the callback port.
   const tngTouched =
@@ -568,6 +696,8 @@ ipcMain.handle('settings:save', (_e, patch) => {
 // "Test PayCancel" / "Ping" without spinning up a real parking session, and
 // see live result frames as they come back from the IO controller.
 ipcMain.handle('tng:ping', () => tngPing());
+ipcMain.handle('tng:probe-http', () => tngProbeHttp());
+ipcMain.handle('tng:loopback', (_e, opts?: any) => tngLoopback(opts ?? {}));
 ipcMain.handle('tng:status', () => w4gStatus());
 ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
   payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;

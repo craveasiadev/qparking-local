@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import type {
   ActivePass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
+  ParkingSpace, VehicleType, VehicleGroup,
 } from '../shared/types';
 
 let db: Database.Database | null = null;
@@ -189,6 +190,47 @@ function applySchema(d: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_sync_queue_next ON sync_queue (status, next_attempt_at);
+
+    -- Cached parking space inventory from qparking SaaS. Read-only mirror —
+    -- written by the periodic sync; the on-prem operator views this on the
+    -- Space Management page. Refreshed on the same cadence as scopes/passes.
+    CREATE TABLE IF NOT EXISTS parking_spaces (
+      id TEXT PRIMARY KEY,
+      building TEXT,
+      level TEXT,
+      zone TEXT,
+      space_number TEXT,
+      space_code TEXT,
+      status TEXT NOT NULL DEFAULT 'available',
+      customer_name TEXT,
+      vehicle_plate TEXT,
+      pass_type TEXT,
+      pass_id TEXT,
+      start_date TEXT,
+      end_date TEXT,
+      notes TEXT,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_spaces_building ON parking_spaces (building);
+    CREATE INDEX IF NOT EXISTS idx_spaces_status ON parking_spaces (status);
+
+    -- Cached vehicle type taxonomy. Per-site config from qparking SaaS.
+    CREATE TABLE IF NOT EXISTS vehicle_types (
+      id TEXT PRIMARY KEY,
+      type_name TEXT NOT NULL,
+      hourly_rate REAL,
+      daily_rate REAL,
+      monthly_rate REAL,
+      group_name TEXT,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Cached vehicle group taxonomy. Global lookup from qparking SaaS.
+    CREATE TABLE IF NOT EXISTS vehicle_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Idempotent column adds for installs whose `cameras` table was created
@@ -208,6 +250,14 @@ function applySchema(d: Database.Database) {
   // HTTP port 80. Wipe the persisted 8080 so the new default kicks in;
   // anyone who explicitly chose a different port keeps their value.
   try { d.prepare(`DELETE FROM settings WHERE key='tngPort' AND value='8080'`).run(); } catch { /* ignore */ }
+  // 2026-06-29: tngCallbackPort default moved 6002 → 80 because the W4G
+  // device firmware hardcodes port 80 for its PayResult callback. Sites
+  // running with the old 6002 default never receive PayResult; clear the
+  // persisted value so the new default takes effect. We still bind both
+  // 80 AND whatever the operator explicitly sets, so a deliberate 6002
+  // doesn't break callbacks — it just means the device must also send
+  // to 6002 (rare).
+  try { d.prepare(`DELETE FROM settings WHERE key='tngCallbackPort' AND value='6002'`).run(); } catch { /* ignore */ }
 
   // Idempotent ALTERs for scopes — installs predating the 2026-06 schedule
   // expansion lack the policy + cutoff columns.
@@ -228,6 +278,12 @@ function applySchema(d: Database.Database) {
   // operators can see which rules are dimmed and the exit flow can skip
   // inactive rules even if they technically match the moment.
   try { d.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
+
+  // 2026-07-03: lane_type distinguishes car / motorcycle / mixed lanes so
+  // motorcycle-only lanes can bind to motorcycle-rate rules without the LPR
+  // having to identify the vehicle from a plate photo (which it can't do
+  // reliably). Mixed lanes fall back to a rule's default vehicle_type match.
+  try { d.exec(`ALTER TABLE lanes ADD COLUMN lane_type TEXT NOT NULL DEFAULT 'car'`); } catch { /* already there */ }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -248,7 +304,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   tngEnabled: false,
   tngHost: '192.168.1.105',
   tngPort: 80,
-  tngCallbackPort: 6002,
+  tngCallbackPort: 80,
   tngTimeoutSeconds: 30,
 };
 
@@ -370,6 +426,7 @@ function rowToLane(r: any): ParkingLane {
     id: r.id, name: r.name, direction: r.direction, scopeId: r.scope_id,
     terminalId: r.terminal_id, gateRelayAddress: r.gate_relay_address,
     enabled: !!r.enabled,
+    laneType: (r.lane_type ?? 'car') as ParkingLane['laneType'],
   };
 }
 
@@ -384,13 +441,14 @@ export function getLane(id: number): ParkingLane | null {
 
 export function upsertLane(l: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
   const d = getDb();
+  const laneType = l.laneType ?? 'car';
   if (l.id) {
-    d.prepare(`UPDATE lanes SET name=?, direction=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`)
-      .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, l.id);
+    d.prepare(`UPDATE lanes SET name=?, direction=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=?, lane_type=? WHERE id=?`)
+      .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, laneType, l.id);
     return getLane(l.id)!;
   }
-  const info = d.prepare(`INSERT INTO lanes (name, direction, scope_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?,?)`)
-    .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0);
+  const info = d.prepare(`INSERT INTO lanes (name, direction, scope_id, terminal_id, gate_relay_address, enabled, lane_type) VALUES (?,?,?,?,?,?,?)`)
+    .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, laneType);
   return getLane(Number(info.lastInsertRowid))!;
 }
 
@@ -504,21 +562,60 @@ export function listRecentSessions(limit: number): ParkingSession[] {
   return (getDb().prepare('SELECT * FROM sessions ORDER BY entry_at DESC LIMIT ?').all(limit) as any[]).map(rowToSession);
 }
 
-/** Total session counts for pagination (open vs all). */
-export function countSessions(): { open: number; total: number } {
-  const d = getDb();
-  const open = (d.prepare('SELECT COUNT(*) as c FROM sessions WHERE exit_at IS NULL').get() as any).c as number;
-  const total = (d.prepare('SELECT COUNT(*) as c FROM sessions').get() as any).c as number;
-  return { open, total };
+export interface SessionFilters {
+  plateSearch?: string | null;
+  entryFrom?: string | null;
+  entryTo?: string | null;
+  exitFrom?: string | null;
+  exitTo?: string | null;
 }
 
-/** Paginated session lists for the renderer. */
-export function listSessionsPage(opts: { tab: 'open' | 'recent'; limit: number; offset: number }): ParkingSession[] {
+function buildSessionFilters(f: SessionFilters): { clauses: string[]; args: any[] } {
+  const clauses: string[] = [];
+  const args: any[] = [];
+  if (f.plateSearch && f.plateSearch.trim()) {
+    clauses.push('UPPER(plate) LIKE ?');
+    args.push(`%${f.plateSearch.trim().toUpperCase()}%`);
+  }
+  if (f.entryFrom) { clauses.push('entry_at >= ?'); args.push(f.entryFrom); }
+  if (f.entryTo)   { clauses.push('entry_at <= ?'); args.push(f.entryTo); }
+  if (f.exitFrom)  { clauses.push('exit_at >= ?');  args.push(f.exitFrom); }
+  if (f.exitTo)    { clauses.push('exit_at <= ?');  args.push(f.exitTo); }
+  return { clauses, args };
+}
+
+export function countSessions(filters: SessionFilters = {}): { open: number; total: number } {
   const d = getDb();
-  const sql = opts.tab === 'open'
-    ? 'SELECT * FROM sessions WHERE exit_at IS NULL ORDER BY entry_at DESC LIMIT ? OFFSET ?'
-    : 'SELECT * FROM sessions ORDER BY entry_at DESC LIMIT ? OFFSET ?';
-  return (d.prepare(sql).all(opts.limit, opts.offset) as any[]).map(rowToSession);
+  const { clauses, args } = buildSessionFilters(filters);
+  const openClauses = ['exit_at IS NULL', ...clauses];
+  const openSql = `SELECT COUNT(*) as c FROM sessions WHERE ${openClauses.join(' AND ')}`;
+  const totalSql = clauses.length > 0
+    ? `SELECT COUNT(*) as c FROM sessions WHERE ${clauses.join(' AND ')}`
+    : 'SELECT COUNT(*) as c FROM sessions';
+  const open = d.prepare(openSql).get(...args) as any;
+  const total = d.prepare(totalSql).get(...args) as any;
+  return { open: open.c as number, total: total.c as number };
+}
+
+/**
+ * Paginated session list. Fuzzy plate search + optional entry/exit date
+ * ranges. Used for reconciling LPR mis-reads: filter by the wrong-plate
+ * time window, then the correct entry surfaces even if the plate text
+ * differs by a character.
+ */
+export function listSessionsPage(opts: SessionFilters & {
+  tab: 'open' | 'recent';
+  limit: number;
+  offset: number;
+}): ParkingSession[] {
+  const d = getDb();
+  const { clauses, args } = buildSessionFilters(opts);
+  const whereClauses: string[] = [];
+  if (opts.tab === 'open') whereClauses.push('exit_at IS NULL');
+  whereClauses.push(...clauses);
+  const where = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+  const sql = `SELECT * FROM sessions ${where} ORDER BY entry_at DESC LIMIT ? OFFSET ?`;
+  return (d.prepare(sql).all(...args, opts.limit, opts.offset) as any[]).map(rowToSession);
 }
 
 export function deleteSession(sessionId: number): boolean {
@@ -755,6 +852,35 @@ export function upsertScope(s: ScopeRate): ScopeRate {
   return getScope(s.scopeId)!;
 }
 
+/**
+ * Delete every scope (and its rules) whose id isn't in `keepIds`. Called
+ * after a multi-policy sync so a RatePolicy that was deleted / deactivated
+ * on the cloud stops governing sessions locally. Without this, a lane
+ * still pointing at a stale scope would keep charging the retired rate.
+ */
+export function pruneStaleScopes(keepIds: string[]): number {
+  const d = getDb();
+  const existing = d.prepare('SELECT scope_id FROM scopes').all() as { scope_id: string }[];
+  const stale = existing
+    .map((r) => r.scope_id)
+    .filter((id) => !keepIds.includes(id));
+  if (stale.length === 0) return 0;
+  const tx = d.transaction((ids: string[]) => {
+    const delRule = d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?');
+    const delScope = d.prepare('DELETE FROM scopes WHERE scope_id = ?');
+    // Any lane still bound to a stale scope loses its binding — it'll
+    // fall back to the site-default policy on the next resolver call.
+    const clearLane = d.prepare('UPDATE lanes SET scope_id = NULL WHERE scope_id = ?');
+    for (const id of ids) {
+      delRule.run(id);
+      clearLane.run(id);
+      delScope.run(id);
+    }
+  });
+  tx(stale);
+  return stale.length;
+}
+
 // ─── active passes ─────────────────────────────────────────────────────────
 // Plate-keyed cache of active season/visitor/free-access passes. Refreshed
 // from qparking SaaS on the same cadence as scopes. The gate looks up the
@@ -793,6 +919,112 @@ export function listActivePasses(scopeId?: string): ActivePass[] {
     ? getDb().prepare(sql).all(scopeId)
     : getDb().prepare(sql).all()) as any[];
   return rows.map(rowToActivePass);
+}
+
+/**
+ * Read every cached active pass across all scopes. Used by the Passes
+ * page in the local app to show every pass that the gate currently
+ * recognises (cached from `/api/v1/local-server/passes`).
+ */
+export function listAllActivePasses(): ActivePass[] {
+  return (getDb().prepare('SELECT * FROM active_passes ORDER BY scope_id, plate_number').all() as any[]).map(rowToActivePass);
+}
+
+// ─── parking spaces (mirror) ───────────────────────────────────────────────
+
+function rowToParkingSpace(r: any): ParkingSpace {
+  return {
+    id: r.id,
+    building: r.building ?? null,
+    level: r.level ?? null,
+    zone: r.zone ?? null,
+    spaceNumber: r.space_number ?? null,
+    spaceCode: r.space_code ?? null,
+    status: r.status ?? 'available',
+    customerName: r.customer_name ?? null,
+    vehiclePlate: r.vehicle_plate ?? null,
+    passType: r.pass_type ?? null,
+    passId: r.pass_id ?? null,
+    startDate: r.start_date ?? null,
+    endDate: r.end_date ?? null,
+    notes: r.notes ?? null,
+    fetchedAt: r.fetched_at,
+  };
+}
+
+export function listParkingSpaces(): ParkingSpace[] {
+  return (getDb().prepare('SELECT * FROM parking_spaces ORDER BY building, level, space_code').all() as any[]).map(rowToParkingSpace);
+}
+
+/** Replace the entire cached space inventory in one transaction. */
+export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    d.prepare('DELETE FROM parking_spaces').run();
+    const insert = d.prepare(`INSERT INTO parking_spaces (
+        id, building, level, zone, space_number, space_code, status,
+        customer_name, vehicle_plate, pass_type, pass_id,
+        start_date, end_date, notes, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    for (const s of spaces) {
+      insert.run(
+        s.id, s.building, s.level, s.zone, s.spaceNumber, s.spaceCode, s.status,
+        s.customerName, s.vehiclePlate, s.passType, s.passId,
+        s.startDate, s.endDate, s.notes,
+      );
+    }
+  });
+  tx();
+}
+
+// ─── vehicle types + groups (mirror) ───────────────────────────────────────
+
+function rowToVehicleType(r: any): VehicleType {
+  return {
+    id: r.id,
+    typeName: r.type_name,
+    hourlyRate: r.hourly_rate ?? null,
+    dailyRate: r.daily_rate ?? null,
+    monthlyRate: r.monthly_rate ?? null,
+    groupName: r.group_name ?? null,
+    fetchedAt: r.fetched_at,
+  };
+}
+
+export function listVehicleTypes(): VehicleType[] {
+  return (getDb().prepare('SELECT * FROM vehicle_types ORDER BY type_name').all() as any[]).map(rowToVehicleType);
+}
+
+export function replaceVehicleTypes(types: VehicleType[]): void {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    d.prepare('DELETE FROM vehicle_types').run();
+    const insert = d.prepare(`INSERT INTO vehicle_types (
+        id, type_name, hourly_rate, daily_rate, monthly_rate, group_name, fetched_at
+      ) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    for (const t of types) {
+      insert.run(t.id, t.typeName, t.hourlyRate, t.dailyRate, t.monthlyRate, t.groupName);
+    }
+  });
+  tx();
+}
+
+function rowToVehicleGroup(r: any): VehicleGroup {
+  return { id: r.id, name: r.name, fetchedAt: r.fetched_at };
+}
+
+export function listVehicleGroups(): VehicleGroup[] {
+  return (getDb().prepare('SELECT * FROM vehicle_groups ORDER BY name').all() as any[]).map(rowToVehicleGroup);
+}
+
+export function replaceVehicleGroups(groups: VehicleGroup[]): void {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    d.prepare('DELETE FROM vehicle_groups').run();
+    const insert = d.prepare('INSERT INTO vehicle_groups (id, name, fetched_at) VALUES (?,?,CURRENT_TIMESTAMP)');
+    for (const g of groups) insert.run(g.id, g.name);
+  });
+  tx();
 }
 
 /**

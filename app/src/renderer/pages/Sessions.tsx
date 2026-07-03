@@ -1,25 +1,50 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator,
+  Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
   Trash2, Loader2, ChevronLeft, ChevronRight, CheckSquare, Square,
+  Image as ImageIcon, Zap, ArrowDown, ArrowUp, Eye, Filter,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, ScopeRate } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 const PAGE_SIZE = 20;
 
+interface DateRangeFilters {
+  entryFrom: string;
+  entryTo: string;
+  exitFrom: string;
+  exitTo: string;
+}
+
+const EMPTY_RANGE: DateRangeFilters = { entryFrom: '', entryTo: '', exitFrom: '', exitTo: '' };
+
 export function Sessions() {
   const [tab, setTab] = useState<'open' | 'recent'>('open');
   const [rows, setRows] = useState<ParkingSession[]>([]);
   const [counts, setCounts] = useState({ open: 0, total: 0 });
   const [page, setPage] = useState(0);
+  const [plateSearch, setPlateSearch] = useState('');
+  const [debouncedPlateSearch, setDebouncedPlateSearch] = useState('');
+  const [range, setRange] = useState<DateRangeFilters>(EMPTY_RANGE);
+  const [debouncedRange, setDebouncedRange] = useState<DateRangeFilters>(EMPTY_RANGE);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedPlateSearch(plateSearch.trim()), 300);
+    return () => clearTimeout(h);
+  }, [plateSearch]);
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedRange(range), 300);
+    return () => clearTimeout(h);
+  }, [range]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [viewing, setViewing] = useState<ParkingSession | null>(null);
   const [editing, setEditing] = useState<ParkingSession | null>(null);
   const [releasing, setReleasing] = useState<ParkingSession | null>(null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [retriggerNotice, setRetriggerNotice] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [scopes, setScopes] = useState<ScopeRate[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
-  // Tick every 30s so live fee previews on OPEN sessions advance.
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
 
@@ -27,14 +52,31 @@ export function Sessions() {
   const pageCount = Math.max(1, Math.ceil(totalForTab / PAGE_SIZE));
   const offset = page * PAGE_SIZE;
 
+  const activeFilterCount = useMemo(() => {
+    return (['entryFrom', 'entryTo', 'exitFrom', 'exitTo'] as const)
+      .filter((k) => debouncedRange[k]).length;
+  }, [debouncedRange]);
+
   async function fetchPage() {
-    const result = await window.bridge.listSessionsPage({ tab, limit: PAGE_SIZE, offset });
+    const result = await window.bridge.listSessionsPage({
+      tab,
+      limit: PAGE_SIZE,
+      offset,
+      plateSearch: debouncedPlateSearch || null,
+      entryFrom: debouncedRange.entryFrom ? toIso(debouncedRange.entryFrom) : null,
+      entryTo: debouncedRange.entryTo ? toIso(debouncedRange.entryTo) : null,
+      exitFrom: debouncedRange.exitFrom ? toIso(debouncedRange.exitFrom) : null,
+      exitTo: debouncedRange.exitTo ? toIso(debouncedRange.exitTo) : null,
+    });
     setRows(result.rows);
     setCounts(result.counts);
-    // If we deleted enough rows to exit the current page's range, step back.
     const newTotal = tab === 'open' ? result.counts.open : result.counts.total;
     const lastValidPage = Math.max(0, Math.ceil(newTotal / PAGE_SIZE) - 1);
     if (page > lastValidPage) setPage(lastValidPage);
+    if (viewing) {
+      const fresh = result.rows.find((r) => r.id === viewing.id);
+      if (fresh) setViewing(fresh);
+    }
   }
 
   async function fetchAux() {
@@ -46,14 +88,12 @@ export function Sessions() {
     await Promise.all([fetchPage(), fetchAux()]);
   });
 
-  // Reload when tab/page changes.
-  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page]);
-  // Reload on backend session events (entry/exit-completed/etc).
+  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, debouncedRange]);
   useEffect(() => {
     const off = window.bridge.onEvent('session', () => { void fetchPage(); });
     return off;
-  }, [tab, page]);
-  // Clear selection when switching tab/page.
+  }, [tab, page, debouncedPlateSearch, debouncedRange]);
+  useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange]);
   useEffect(() => { setSelected(new Set()); }, [tab, page]);
 
   function scopeForSession(s: ParkingSession): ScopeRate | null {
@@ -62,6 +102,11 @@ export function Sessions() {
     const lane = lanes.find((l) => l.id === laneId);
     if (!lane?.scopeId) return null;
     return scopes.find((sc) => sc.scopeId === lane.scopeId) ?? null;
+  }
+
+  function laneNameForId(id?: number | null): string {
+    if (!id) return '—';
+    return lanes.find((l) => l.id === id)?.name ?? `Lane #${id}`;
   }
 
   const allOnPageSelected = useMemo(
@@ -87,6 +132,7 @@ export function Sessions() {
 
   const [runDeleteOne, deletingOne] = useAsyncAction(async (id: number) => {
     await window.bridge.deleteSession(id);
+    setViewing(null);
     await fetchPage();
   });
 
@@ -96,6 +142,24 @@ export function Sessions() {
     setConfirmDelete(false);
     await fetchPage();
   });
+
+  const [runRetrigger, retriggering] = useAsyncAction(async (id: number, plate: string) => {
+    setRetriggerNotice(null);
+    const r = await window.bridge.retriggerSessionPayment(id);
+    if (r.ok) {
+      setRetriggerNotice({ tone: 'ok', text: `Terminal armed for ${plate}. Ask the driver to tap now — the session closes automatically on success.` });
+    } else {
+      setRetriggerNotice({ tone: 'err', text: `Couldn't retrigger: ${r.error}` });
+    }
+    setTimeout(() => setRetriggerNotice(null), 8_000);
+  });
+
+  function clearAllFilters() {
+    setPlateSearch('');
+    setRange(EMPTY_RANGE);
+  }
+
+  const hasAnyFilter = debouncedPlateSearch || activeFilterCount > 0;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
@@ -114,7 +178,7 @@ export function Sessions() {
         </button>
       </header>
 
-      {/* Tabs + bulk-action bar */}
+      {/* Tabs + plate search + filter toggle + bulk-action bar */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
         <div className="inline-flex bg-gray-100 rounded-lg p-1 gap-1 self-start">
           {(['open', 'recent'] as const).map((t) => (
@@ -126,6 +190,44 @@ export function Sessions() {
               {t === 'open' ? `Open (${counts.open})` : `Recent (${counts.total})`}
             </button>
           ))}
+        </div>
+
+        <div className="flex flex-1 items-center gap-2">
+          <div className="relative flex-1 max-w-xs">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              value={plateSearch}
+              onChange={(e) => setPlateSearch(e.target.value)}
+              placeholder="Search plate… (e.g. AB matches ABC + ABX)"
+              className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
+            />
+            {plateSearch && (
+              <button
+                onClick={() => setPlateSearch('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <button
+            onClick={() => setFiltersOpen((o) => !o)}
+            className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border text-xs font-bold uppercase tracking-wide ${
+              filtersOpen || activeFilterCount > 0
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-200 hover:border-gray-900'
+            }`}
+            title="Filter by entry/exit date range — use when the LPR mis-read at a known time"
+          >
+            <Filter size={13} />
+            Filters
+            {activeFilterCount > 0 && (
+              <span className="ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-gray-900 text-[10px] font-bold">
+                {activeFilterCount}
+              </span>
+            )}
+          </button>
         </div>
 
         {selected.size > 0 && (
@@ -146,10 +248,54 @@ export function Sessions() {
         )}
       </div>
 
-      {/* DESKTOP/TABLET TABLE — hidden on mobile (md and up). */}
+      {/* Expandable date/time filter panel — for tracing LPR misreads by
+          narrowing the search to the exact time window when the driver came
+          in or out, even when the plate text is corrupted. */}
+      {filtersOpen && (
+        <div className="mb-3 rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <RangeInput
+              label="Entry time"
+              hint="e.g. driver entered ~14:30 today — set a ±5 min window"
+              from={range.entryFrom}
+              to={range.entryTo}
+              onChange={(from, to) => setRange((r) => ({ ...r, entryFrom: from, entryTo: to }))}
+            />
+            <RangeInput
+              label="Exit time"
+              hint="e.g. exit LPR triggered at 15:07 — narrow to that minute"
+              from={range.exitFrom}
+              to={range.exitTo}
+              onChange={(from, to) => setRange((r) => ({ ...r, exitFrom: from, exitTo: to }))}
+            />
+          </div>
+          {hasAnyFilter && (
+            <div className="mt-3 flex items-center justify-end">
+              <button
+                onClick={clearAllFilters}
+                className="text-[11px] font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900"
+              >
+                Clear all filters
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {retriggerNotice && (
+        <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${
+          retriggerNotice.tone === 'ok'
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+            : 'border-red-200 bg-red-50 text-red-800'
+        }`}>
+          {retriggerNotice.text}
+        </div>
+      )}
+
+      {/* DESKTOP/TABLET TABLE */}
       <div className="hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[760px]">
+          <table className="w-full text-sm min-w-[820px]">
             <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
               <tr>
                 <th className="w-10 px-3 py-2">
@@ -158,6 +304,7 @@ export function Sessions() {
                   </button>
                 </th>
                 <th className="text-left px-3 py-2 font-bold">Plate</th>
+                <th className="text-left px-3 py-2 font-bold">Captures</th>
                 <th className="text-left px-3 py-2 font-bold">Entered</th>
                 <th className="text-left px-3 py-2 font-bold">Exited</th>
                 <th className="text-right px-3 py-2 font-bold">Duration</th>
@@ -184,6 +331,12 @@ export function Sessions() {
                       </button>
                     </td>
                     <td className="px-3 py-2 font-mono font-bold">{s.plate}</td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-1">
+                        <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
+                        <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
+                      </div>
+                    </td>
                     <td className="px-3 py-2 text-xs text-gray-600">{new Date(s.entryAt).toLocaleString()}</td>
                     <td className="px-3 py-2 text-xs text-gray-600">{s.exitAt ? new Date(s.exitAt).toLocaleString() : '—'}</td>
                     <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
@@ -196,39 +349,29 @@ export function Sessions() {
                     </td>
                     <td className="px-3 py-2"><StatusBadge status={s.paymentStatus} /></td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">
-                      <button onClick={() => setEditing(s)} className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-600 hover:text-gray-900 mr-2">
-                        <Pencil size={11} /> Edit
-                      </button>
-                      {!s.exitAt && (
-                        <button onClick={() => setReleasing(s)} className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-amber-700 hover:text-amber-900 mr-2">
-                          <ShieldAlert size={11} /> Release
-                        </button>
-                      )}
                       <button
-                        onClick={() => runDeleteOne(s.id)}
-                        disabled={deletingOne}
-                        className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-red-700 hover:text-red-900 disabled:opacity-50"
-                        title="Delete this session"
+                        onClick={() => setViewing(s)}
+                        className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900 border border-gray-200 hover:border-gray-900 rounded-md px-2 py-1"
                       >
-                        {deletingOne ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />} Delete
+                        <Eye size={12} /> View
                       </button>
                     </td>
                   </tr>
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={8} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> Nothing here yet.</td></tr>
+                <tr><td colSpan={9} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
 
-      {/* MOBILE CARDS — visible on small screens. */}
+      {/* MOBILE CARDS */}
       <div className="md:hidden space-y-2">
         {rows.length === 0 && (
           <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500">
-            <Car size={18} className="inline mr-1 text-gray-400" /> Nothing here yet.
+            <Car size={18} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}
           </div>
         )}
         {rows.map((s) => {
@@ -262,21 +405,18 @@ export function Sessions() {
                         : '—'}
                     </span>
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <button onClick={() => setEditing(s)} className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900">
-                      <Pencil size={11} /> Edit
-                    </button>
-                    {!s.exitAt && (
-                      <button onClick={() => setReleasing(s)} className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-amber-700 hover:text-amber-900">
-                        <ShieldAlert size={11} /> Release
-                      </button>
-                    )}
+                  {(s.entryImagePath || s.exitImagePath) && (
+                    <div className="mt-2 flex items-center gap-1">
+                      <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
+                      <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
+                    </div>
+                  )}
+                  <div className="mt-2">
                     <button
-                      onClick={() => runDeleteOne(s.id)}
-                      disabled={deletingOne}
-                      className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-red-700 hover:text-red-900 disabled:opacity-50"
+                      onClick={() => setViewing(s)}
+                      className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900 border border-gray-200 hover:border-gray-900 rounded-md px-2 py-1"
                     >
-                      {deletingOne ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />} Delete
+                      <Eye size={12} /> View details
                     </button>
                   </div>
                 </div>
@@ -320,6 +460,23 @@ export function Sessions() {
         </p>
       )}
 
+      {viewing && (
+        <ViewSessionModal
+          session={viewing}
+          scope={scopeForSession(viewing)}
+          entryLaneName={laneNameForId(viewing.entryLaneId)}
+          exitLaneName={laneNameForId(viewing.exitLaneId)}
+          retriggering={retriggering}
+          deleting={deletingOne}
+          onClose={() => setViewing(null)}
+          onOpenImage={setPreviewImage}
+          onEdit={() => { setEditing(viewing); }}
+          onRelease={() => { setReleasing(viewing); }}
+          onRetrigger={() => runRetrigger(viewing.id, viewing.plate)}
+          onDelete={() => runDeleteOne(viewing.id)}
+        />
+      )}
+
       {editing && (
         <EditSessionModal
           session={editing}
@@ -338,6 +495,26 @@ export function Sessions() {
         />
       )}
 
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 cursor-zoom-out"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img
+            src={previewImage}
+            alt="LPR capture preview"
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+          <button
+            onClick={() => setPreviewImage(null)}
+            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white inline-flex items-center justify-center"
+          >
+            <X size={20} />
+          </button>
+        </div>
+      )}
+
       {confirmDelete && (
         <ConfirmModal
           title={`Delete ${selected.size} session${selected.size === 1 ? '' : 's'}?`}
@@ -353,6 +530,97 @@ export function Sessions() {
   );
 }
 
+/**
+ * Entry + exit datetime range pair. Uses <input type="datetime-local"> so the
+ * operator picks a wall-clock instant; we translate to ISO before shipping
+ * the query. Both bounds are optional — leaving one blank makes it half-open.
+ */
+function RangeInput({
+  label, hint, from, to, onChange,
+}: {
+  label: string;
+  hint: string;
+  from: string;
+  to: string;
+  onChange: (from: string, to: string) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-700">{label}</label>
+        {(from || to) && (
+          <button
+            onClick={() => onChange('', '')}
+            className="text-[10px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      <p className="text-[10px] text-gray-500 mb-1.5">{hint}</p>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="block text-[9px] uppercase tracking-wide text-gray-500 mb-0.5">From</label>
+          <input
+            type="datetime-local"
+            className="w-full h-9 px-2 border border-gray-300 rounded-md text-xs focus:border-gray-900 outline-none bg-white"
+            value={from}
+            onChange={(e) => onChange(e.target.value, to)}
+          />
+        </div>
+        <div>
+          <label className="block text-[9px] uppercase tracking-wide text-gray-500 mb-0.5">To</label>
+          <input
+            type="datetime-local"
+            className="w-full h-9 px-2 border border-gray-300 rounded-md text-xs focus:border-gray-900 outline-none bg-white"
+            value={to}
+            onChange={(e) => onChange(from, e.target.value)}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ThumbCell({
+  path, kind, plate, onOpen,
+}: { path: string | null; kind: 'entry' | 'exit'; plate: string; onOpen: (url: string) => void }) {
+  if (!path) {
+    return (
+      <div
+        className="w-10 h-10 rounded border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center"
+        title={`No ${kind} capture`}
+      >
+        <ImageIcon size={12} className="text-gray-300" />
+      </div>
+    );
+  }
+  const url = `file://${path.replace(/\\/g, '/')}`;
+  const Icon = kind === 'entry' ? ArrowDown : ArrowUp;
+  const accent = kind === 'entry' ? 'bg-emerald-600' : 'bg-blue-600';
+  return (
+    <button
+      onClick={() => onOpen(url)}
+      className="relative w-10 h-10 rounded overflow-hidden border border-gray-200 hover:ring-2 hover:ring-gray-400 focus:outline-none"
+      title={`${kind === 'entry' ? 'Entry' : 'Exit'} capture — click to enlarge · ${plate}`}
+    >
+      <img
+        src={url}
+        alt={`${kind} ${plate}`}
+        className="w-full h-full object-cover"
+        onError={(e) => {
+          const img = e.currentTarget as HTMLImageElement;
+          img.style.display = 'none';
+          img.parentElement?.classList.add('bg-red-50');
+        }}
+      />
+      <span className={`absolute bottom-0 left-0 inline-flex items-center justify-center w-4 h-4 ${accent} text-white text-[8px]`}>
+        <Icon size={8} strokeWidth={3} />
+      </span>
+    </button>
+  );
+}
+
 function computeFeeFromScope(durationMinutes: number, sc: ScopeRate): number {
   const billable = Math.max(0, durationMinutes - sc.freeMinutes);
   if (billable === 0) return 0;
@@ -363,9 +631,204 @@ function computeFeeFromScope(durationMinutes: number, sc: ScopeRate): number {
 }
 
 /**
- * Inline manual-release modal (window.prompt is disabled in Electron's
- * renderer — silent returns make clicks look like no-ops).
+ * View-only detail modal for a session. Consolidates all per-session actions
+ * (Edit, Retrigger pay, Manual release, Delete) so the table row can stay
+ * simple with just a View button. Actions still delegate to their existing
+ * modals — this is a hub, not a replacement.
  */
+function ViewSessionModal({
+  session, scope, entryLaneName, exitLaneName,
+  retriggering, deleting,
+  onClose, onOpenImage, onEdit, onRelease, onRetrigger, onDelete,
+}: {
+  session: ParkingSession;
+  scope: ScopeRate | null;
+  entryLaneName: string;
+  exitLaneName: string;
+  retriggering: boolean;
+  deleting: boolean;
+  onClose: () => void;
+  onOpenImage: (url: string) => void;
+  onEdit: () => void;
+  onRelease: () => void;
+  onRetrigger: () => void;
+  onDelete: () => void;
+}) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const s = session;
+  const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
+  let displayFeeCents: number | null = s.feeCents ?? null;
+  let isLivePreview = false;
+  if (displayFeeCents == null && !s.exitAt && mins != null && scope) {
+    displayFeeCents = computeFeeFromScope(mins, scope);
+    isLivePreview = true;
+  }
+  const isOpen = !s.exitAt;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
+        <header className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 flex-wrap">
+              <h2 className="text-base font-bold">Session #{s.id}</h2>
+              <span className="font-mono font-bold text-lg">{s.plate}</span>
+              <StatusBadge status={s.paymentStatus} />
+            </div>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {isOpen ? 'Vehicle currently on site.' : 'Closed / archived.'}
+            </p>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500 flex-shrink-0"><X size={18} /></button>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {/* Timeline */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <DetailRow label="Entered">
+              <div className="font-mono text-sm">{new Date(s.entryAt).toLocaleString()}</div>
+              <div className="text-[11px] text-gray-500 mt-0.5">Lane: {entryLaneName}</div>
+            </DetailRow>
+            <DetailRow label="Exited">
+              {s.exitAt ? (
+                <>
+                  <div className="font-mono text-sm">{new Date(s.exitAt).toLocaleString()}</div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">Lane: {exitLaneName}</div>
+                </>
+              ) : (
+                <div className="text-sm text-amber-700 font-bold">Still inside</div>
+              )}
+            </DetailRow>
+            <DetailRow label="Duration">
+              <div className="font-mono text-sm">
+                {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m (${mins} min)` : '—'}
+              </div>
+            </DetailRow>
+            <DetailRow label="Fee">
+              <div className="font-mono text-sm">
+                {displayFeeCents != null
+                  ? <span className={isLivePreview ? 'text-amber-700' : ''}>RM {(displayFeeCents / 100).toFixed(2)}{isLivePreview && ' (live preview)'}</span>
+                  : '—'}
+              </div>
+              {scope && (
+                <div className="text-[11px] text-gray-500 mt-0.5">Scope: {scope.scopeName}</div>
+              )}
+            </DetailRow>
+          </div>
+
+          {/* Captures */}
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">LPR captures</div>
+            <div className="grid grid-cols-2 gap-3">
+              <CaptureBlock label="Entry" kind="entry" path={s.entryImagePath} plate={s.plate} onOpen={onOpenImage} />
+              <CaptureBlock label="Exit" kind="exit" path={s.exitImagePath} plate={s.plate} onOpen={onOpenImage} />
+            </div>
+          </div>
+
+          {s.notes && (
+            <DetailRow label="Notes">
+              <p className="text-sm text-gray-800 whitespace-pre-wrap">{s.notes}</p>
+            </DetailRow>
+          )}
+
+          {/* Action bar — everything an operator can do to this row. */}
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">Actions</div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={onEdit}
+                className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-white border border-gray-300 hover:border-gray-900 text-xs font-bold uppercase tracking-wide"
+              >
+                <Pencil size={13} /> Edit
+              </button>
+              {isOpen && (
+                <>
+                  <button
+                    onClick={onRetrigger}
+                    disabled={retriggering}
+                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
+                    title="Fires the payment terminal for this session — use when the exit LPR misread the plate or the driver needs to tap again"
+                  >
+                    {retriggering ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Retrigger pay
+                  </button>
+                  <button
+                    onClick={onRelease}
+                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase tracking-wide"
+                  >
+                    <ShieldAlert size={13} /> Manual release
+                  </button>
+                </>
+              )}
+              <button
+                onClick={() => setConfirmDelete(true)}
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50 ml-auto"
+              >
+                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
+              </button>
+            </div>
+            {isOpen && (
+              <p className="mt-2 text-[10px] text-gray-500">
+                <span className="font-bold">Retrigger pay</span> arms the terminal so the driver can tap. <span className="font-bold">Manual release</span> closes the session without a payment (audit-only, gate is not opened).
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={`Delete session #${s.id}?`}
+          body={`The session for plate ${s.plate} will be permanently removed from the local database. This cannot be undone.`}
+          confirmLabel="Delete"
+          confirmTone="red"
+          busy={deleting}
+          onClose={() => setConfirmDelete(false)}
+          onConfirm={onDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-3">
+      <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function CaptureBlock({
+  label, kind, path, plate, onOpen,
+}: { label: string; kind: 'entry' | 'exit'; path: string | null; plate: string; onOpen: (url: string) => void }) {
+  const accent = kind === 'entry' ? 'text-emerald-700' : 'text-blue-700';
+  return (
+    <div>
+      <div className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${accent}`}>{label}</div>
+      {path ? (
+        <button
+          onClick={() => onOpen(`file://${path.replace(/\\/g, '/')}`)}
+          className="w-full aspect-video rounded-lg overflow-hidden border border-gray-200 hover:ring-2 hover:ring-gray-400 focus:outline-none block"
+        >
+          <img
+            src={`file://${path.replace(/\\/g, '/')}`}
+            alt={`${label} ${plate}`}
+            className="w-full h-full object-cover"
+          />
+        </button>
+      ) : (
+        <div className="w-full aspect-video rounded-lg border border-dashed border-gray-200 bg-gray-50 flex items-center justify-center">
+          <div className="text-[11px] text-gray-400 flex items-center gap-1">
+            <ImageIcon size={13} /> No {label.toLowerCase()} capture
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReleaseSessionModal({
   session, onClose, onReleased,
 }: { session: ParkingSession; onClose: () => void; onReleased: () => void }) {
@@ -560,7 +1023,7 @@ function ConfirmModal({
       ? 'bg-amber-600 hover:bg-amber-700'
       : 'bg-gray-900 hover:bg-gray-800';
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
         <header className="px-5 py-4 border-b border-gray-200">
           <h2 className="text-base font-bold">{title}</h2>

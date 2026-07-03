@@ -108,10 +108,16 @@ export interface PendingOrder {
 export const w4gEvents = new EventEmitter();
 
 const pendingByOrderId = new Map<string, PendingOrder>();
-let server: http.Server | null = null;
-let listenPort = 0;
+let servers: http.Server[] = [];
+let activePorts: number[] = [];
 let lastError: string | null = null;
 let lastResult: { orderId: string; status: string; payType?: number; at: string } | null = null;
+
+/** Port the device firmware hardcodes for its PayResult callback. We
+ *  ALWAYS try to listen here in addition to the configured port so a
+ *  default device shipped with notify-URL `<pms-ip>:80` Just Works
+ *  without the operator manually changing port settings on the box. */
+const DEVICE_HARDCODED_CALLBACK_PORT = 80;
 
 /**
  * Single funnel for every W4G log line. Emits to the in-memory event bus
@@ -126,13 +132,21 @@ function w4gLog(direction: 'send' | 'recv' | 'error' | 'info', message: string, 
   try { logTerminal(-1, direction, message, payload); } catch { /* DB best-effort */ }
 }
 
-// ─── inbound callback server ────────────────────────────────────────────
+/**
+ * Build the listener's HTTP request handler. Same logic regardless of
+ * which port we bound — both the configured callback port and the
+ * hardcoded device port 80 share this handler so the device can hit
+ * either and we'll process the request identically.
+ */
+function buildListenerHandler(): http.RequestListener {
+  return (req, res) => {
+    const remoteAddr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    const url = req.url ?? '';
+    // Case-insensitive + trailing-slash + query-string tolerant match.
+    const pathOnly = url.split('?')[0].replace(/\/+$/, '');
+    const isPayResult = req.method === 'POST' && /^\/w4g\/payresult$/i.test(pathOnly);
 
-export function startW4gServer(port: number): void {
-  stopW4gServer();
-  listenPort = port;
-  server = http.createServer((req, res) => {
-    if (req.method === 'POST' && req.url?.startsWith('/w4g/PayResult')) {
+    if (isPayResult) {
       handlePayResult(req, res).catch((e) => {
         lastError = e?.message ?? String(e);
         res.statusCode = 500;
@@ -141,26 +155,71 @@ export function startW4gServer(port: number): void {
       });
       return;
     }
+
+    let bodyBytes = 0;
+    req.on('data', (c) => { bodyBytes += (c as Buffer).length; });
+    req.on('end', () => {
+      w4gLog(
+        'error',
+        `Unhandled HTTP request on listener: ${req.method} ${url} from ${remoteAddr}. Expected POST /w4g/PayResult — check the device's PayResult URL config.`,
+        { method: req.method, url, headers: req.headers, bodyBytes, remoteAddr },
+      );
+    });
     res.statusCode = 404;
-    res.end('not found');
-  });
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`[w4g-tng] PayResult listener on :${port}`);
-    w4gLog('info', `Listener UP on 0.0.0.0:${port} — device callback URL: http://<your-lan-ip>:${port}/w4g/PayResult`);
-  });
-  server.on('error', (e) => {
-    lastError = e.message;
-    console.error(`[w4g-tng] server error: ${e.message}`);
-    w4gLog('error', `Listener server error: ${e.message}`, { code: (e as any).code });
-  });
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      error: 'not_found',
+      hint: 'Send POST /w4g/PayResult with the standard W4G payload',
+    }));
+  };
+}
+
+// ─── inbound callback server ────────────────────────────────────────────
+
+/**
+ * Bind the PayResult listener on every port we want to be reachable on.
+ * Always tries:
+ *   - The operator-configured `tngCallbackPort` (default 80)
+ *   - Port 80 (because the device firmware hardcodes that for callbacks)
+ * If either is already in use, we log a clear error and continue with the
+ * one that bound — so a port-80 conflict (IIS, Apache) doesn't break the
+ * whole feature.
+ */
+export function startW4gServer(primaryPort: number): void {
+  stopW4gServer();
+
+  const ports = new Set<number>([primaryPort, DEVICE_HARDCODED_CALLBACK_PORT]);
+  for (const port of ports) {
+    const srv = http.createServer(buildListenerHandler());
+    srv.listen(port, '0.0.0.0', () => {
+      activePorts.push(port);
+      console.log(`[w4g-tng] PayResult listener on :${port}`);
+      const note = port === DEVICE_HARDCODED_CALLBACK_PORT
+        ? ' (matches the W4G firmware\'s hardcoded callback port)'
+        : '';
+      w4gLog('info', `Listener UP on 0.0.0.0:${port}${note} — device callback URL: http://<your-lan-ip>:${port}/w4g/PayResult`);
+    });
+    srv.on('error', (e: any) => {
+      lastError = e.message;
+      console.error(`[w4g-tng] server error on :${port}: ${e.message}`);
+      const isPort80 = port === DEVICE_HARDCODED_CALLBACK_PORT;
+      const hint = e.code === 'EADDRINUSE'
+        ? (isPort80
+            ? ` Another service (IIS, Apache, Skype, etc.) is bound to port 80 — stop it, or set the device's SERVER PORT to ${primaryPort} via the DebugTool.`
+            : ` Pick a different port in Settings → Touch'n'Go.`)
+        : '';
+      w4gLog('error', `Listener failed to bind 0.0.0.0:${port}: ${e.message}.${hint}`, { code: e.code, port });
+    });
+    servers.push(srv);
+  }
 }
 
 export function stopW4gServer(): void {
-  if (server) {
-    try { server.close(); } catch { /* ignore */ }
-    server = null;
+  for (const srv of servers) {
+    try { srv.close(); } catch { /* ignore */ }
   }
-  listenPort = 0;
+  servers = [];
+  activePorts = [];
 }
 
 async function handlePayResult(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -418,13 +477,25 @@ function spacedJson(obj: Record<string, unknown>): string {
 function httpPost(pathname: string, body: Record<string, unknown>): Promise<DeviceAck> {
   const s = getSettings();
   const json = spacedJson(body);
+  // 15s gives slow embedded HTTP stacks more room to respond. The earlier
+  // 8s was tight enough that legitimate slow firmwares looked like outright
+  // failures. Per-transaction overall budget is still capped by
+  // tngTimeoutSeconds (default 30s) — this only bounds the SEND leg.
+  const TIMEOUT_MS = 15_000;
+  const target = `http://${s.tngHost}:${s.tngPort}${pathname}`;
   return new Promise<DeviceAck>((resolve, reject) => {
+    const start = Date.now();
+    const stage = (label: string, extra?: unknown) => {
+      const elapsed = Date.now() - start;
+      w4gLog('info', `HTTP ${pathname} · ${label} · +${elapsed}ms`, extra);
+    };
+
     const req = http.request({
       host: s.tngHost,
       port: s.tngPort,
       method: 'POST',
       path: pathname,
-      timeout: 8_000,
+      timeout: TIMEOUT_MS,
       headers: {
         // Header set + casing matches the merchant's working tester output
         // verbatim. The W4G firmware appears to be header-name lowercase-
@@ -439,10 +510,18 @@ function httpPost(pathname: string, body: Record<string, unknown>): Promise<Devi
         'Content-Length': Buffer.byteLength(json),
       },
     }, (res) => {
+      stage(`response headers ← ${res.statusCode} ${res.statusMessage ?? ''}`, {
+        statusCode: res.statusCode,
+        headers: res.headers,
+      });
       const chunks: Buffer[] = [];
-      res.on('data', (c) => chunks.push(c as Buffer));
+      res.on('data', (c) => {
+        chunks.push(c as Buffer);
+        stage(`data chunk (+${(c as Buffer).length} bytes, total ${chunks.reduce((s, b) => s + b.length, 0)})`);
+      });
       res.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf-8');
+        stage(`response complete · ${raw.length} bytes body`, { body_raw: raw });
         if (res.statusCode !== 200) {
           reject(new Error(`http_${res.statusCode}: ${raw.slice(0, 200)}`));
           return;
@@ -456,10 +535,169 @@ function httpPost(pathname: string, body: Record<string, unknown>): Promise<Devi
         });
       });
     });
-    req.on('timeout', () => { req.destroy(new Error('request_timeout (>8s)')); });
+
+    // Lifecycle telemetry — pinpoints exactly where a hung request stalls:
+    //   - 'socket' fires when the agent provides a socket (almost instant)
+    //   - 'connect' on the socket fires when TCP SYN/ACK completes
+    //   - 'response' fires when HTTP headers are received
+    //   - 'data' on response fires as body bytes arrive
+    //   - 'end' fires when body is fully buffered
+    //   - 'timeout' fires after TIMEOUT_MS of socket inactivity
+    req.on('socket', (sock) => {
+      stage('socket allocated');
+      sock.on('connect', () => stage('TCP connected ✓'));
+      sock.on('close', (hadErr) => stage(`socket closed${hadErr ? ' (with error)' : ''}`));
+    });
+    req.on('timeout', () => {
+      stage(`TIMEOUT — no socket activity in ${TIMEOUT_MS}ms`);
+      req.destroy(new Error(`request_timeout (>${TIMEOUT_MS / 1000}s) — target ${target}. If the previous "TCP connected ✓" stage IS in the log, the device accepted the connection but never sent an HTTP response; otherwise the firewall / wrong IP / wrong port is dropping the connect attempt.`));
+    });
     req.on('error', (e) => reject(e));
     req.write(json);
     req.end();
+    stage('request sent — awaiting response');
+  });
+}
+
+/**
+ * Self-test: simulate a PayResult callback by POSTing a synthetic payload
+ * to our OWN /w4g/PayResult listener on 127.0.0.1:tngCallbackPort. Proves
+ * the listener is alive, the port is reachable on loopback, and the parser
+ * handles the canonical W4G payload. If this passes but real device
+ * callbacks still don't arrive, the issue is purely network (device-side
+ * URL config, firewall, or routing) — NOT our app.
+ */
+export function loopbackPayResult(opts: {
+  orderId?: string;
+  state?: string;
+  payType?: number;
+  cardNo?: string;
+  balance?: number;
+} = {}): Promise<{
+  ok: boolean;
+  status?: number;
+  responseBody?: string;
+  elapsedMs?: number;
+  sentBody?: string;
+  error?: string;
+}> {
+  const s = getSettings();
+  if (!s.tngEnabled || activePorts.length === 0) {
+    return Promise.resolve({ ok: false, error: 'listener_not_running — enable TNG and save settings first' });
+  }
+  // Loopback prefers the configured port; falls back to whichever port is
+  // actually listening if the configured one didn't bind.
+  const loopbackPort = activePorts.includes(s.tngCallbackPort) ? s.tngCallbackPort : activePorts[0];
+  const payload = {
+    State: opts.state ?? '0',
+    OrderId: opts.orderId ?? `LOOPBACK${Math.floor(Date.now() / 1000)}`,
+    PayType: opts.payType ?? 0,
+    CardNo: opts.cardNo ?? '1234567890',
+    Balance: opts.balance ?? 9999,
+    PayTime: Math.floor(Date.now() / 1000),
+    STAN: '000001',
+    APPR_CODE: 'LOOP01',
+  };
+  const json = JSON.stringify(payload);
+  w4gLog('info', `Loopback → POST 127.0.0.1:${loopbackPort}/w4g/PayResult · body=${json}`, payload);
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const req = http.request({
+      host: '127.0.0.1',
+      port: loopbackPort,
+      method: 'POST',
+      path: '/w4g/PayResult',
+      timeout: 5_000,
+      headers: {
+        'Accept': '*/*',
+        'Connection': 'close',
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(json),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c as Buffer));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf-8');
+        const elapsed = Date.now() - start;
+        const ok = res.statusCode === 200;
+        w4gLog(
+          ok ? 'recv' : 'error',
+          `Loopback ← ${res.statusCode} ${res.statusMessage ?? ''} body=${body} · ${elapsed}ms${ok ? ' — listener processed the synthetic PayResult correctly' : ''}`,
+          { status: res.statusCode, body },
+        );
+        resolve({ ok, status: res.statusCode, responseBody: body, elapsedMs: elapsed, sentBody: json });
+      });
+    });
+    req.on('timeout', () => { req.destroy(new Error('loopback_timeout (>5s)')); });
+    req.on('error', (e) => {
+      w4gLog('error', `Loopback failed: ${e.message}`);
+      resolve({ ok: false, error: e.message, sentBody: json });
+    });
+    req.write(json);
+    req.end();
+  });
+}
+
+/**
+ * Diagnostic helper for the Settings "Probe HTTP" button. Sends a plain
+ * GET / to the device and reports status + headers + first 400 bytes of
+ * the body. Lets the operator confirm the box is speaking HTTP at all on
+ * the configured IP+port, independent of whether the W4G API is reachable.
+ */
+export function probeHttp(): Promise<{
+  ok: boolean;
+  status?: number;
+  statusText?: string;
+  headers?: Record<string, string | string[] | undefined>;
+  bodyPreview?: string;
+  elapsedMs?: number;
+  error?: string;
+}> {
+  const s = getSettings();
+  return new Promise((resolve) => {
+    const start = Date.now();
+    let settled = false;
+    const done = (r: Awaited<ReturnType<typeof probeHttp>>) => {
+      if (settled) return;
+      settled = true;
+      const elapsed = Date.now() - start;
+      const final = { ...r, elapsedMs: elapsed };
+      w4gLog(
+        r.ok ? 'recv' : 'error',
+        `Probe HTTP → http://${s.tngHost}:${s.tngPort}/ · ${r.ok ? `${r.status} ${r.statusText ?? ''}` : `FAILED: ${r.error}`} · ${elapsed}ms`,
+        final,
+      );
+      resolve(final);
+    };
+    try {
+      const req = http.request({
+        host: s.tngHost,
+        port: s.tngPort,
+        method: 'GET',
+        path: '/',
+        timeout: 8_000,
+        headers: { 'Accept': '*/*', 'Connection': 'close' },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c as Buffer));
+        res.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf-8');
+          done({
+            ok: true,
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            headers: res.headers as any,
+            bodyPreview: body.slice(0, 400),
+          });
+        });
+      });
+      req.on('timeout', () => { req.destroy(new Error('connect/response timeout (>8s)')); });
+      req.on('error', (e) => done({ ok: false, error: e.message }));
+      req.end();
+    } catch (e: any) {
+      done({ ok: false, error: e?.message ?? String(e) });
+    }
   });
 }
 
@@ -468,7 +706,8 @@ function httpPost(pathname: string, body: Record<string, unknown>): Promise<Devi
 export function w4gStatus(): {
   enabled: boolean;
   listening: boolean;
-  listenPort: number;
+  listenPort: number;          // backwards-compat (first active port)
+  listenPorts: number[];       // every port we successfully bound
   listenAddresses: string[];
   host: string;
   port: number;
@@ -486,8 +725,9 @@ export function w4gStatus(): {
   }
   return {
     enabled: s.tngEnabled,
-    listening: server !== null,
-    listenPort,
+    listening: activePorts.length > 0,
+    listenPort: activePorts[0] ?? 0,
+    listenPorts: [...activePorts],
     listenAddresses: addresses,
     host: s.tngHost,
     port: s.tngPort,

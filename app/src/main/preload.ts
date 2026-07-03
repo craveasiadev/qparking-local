@@ -51,8 +51,20 @@ const api = {
   // sessions
   listOpenSessions: () => ipcRenderer.invoke('sessions:open'),
   listRecentSessions: (limit: number) => ipcRenderer.invoke('sessions:recent', limit),
-  listSessionsPage: (opts: { tab: 'open' | 'recent'; limit: number; offset: number }) =>
-    ipcRenderer.invoke('sessions:page', opts),
+  listSessionsPage: (opts: {
+    tab: 'open' | 'recent';
+    limit: number;
+    offset: number;
+    plateSearch?: string | null;
+    entryFrom?: string | null;
+    entryTo?: string | null;
+    exitFrom?: string | null;
+    exitTo?: string | null;
+  }) => ipcRenderer.invoke('sessions:page', opts),
+  /** Manually retrigger the exit-payment flow for a session — used by the
+   *  Sessions page when the exit LPR misread the plate or the operator
+   *  needs to close a stuck session by asking the driver to tap again. */
+  retriggerSessionPayment: (id: number) => ipcRenderer.invoke('sessions:retrigger-payment', id),
   deleteSession: (id: number) => ipcRenderer.invoke('sessions:delete', id),
   deleteSessionsBulk: (opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) =>
     ipcRenderer.invoke('sessions:delete-bulk', opts),
@@ -71,6 +83,14 @@ const api = {
   // scopes
   listScopes: () => ipcRenderer.invoke('scopes:list'),
   syncScopesNow: () => ipcRenderer.invoke('scopes:sync'),
+
+  // Mirrored config from qparking SaaS (read-only locally)
+  listSpaces: () => ipcRenderer.invoke('spaces:list'),
+  syncSpacesNow: () => ipcRenderer.invoke('spaces:sync'),
+  listVehicleTypes: () => ipcRenderer.invoke('vehicle-types:list'),
+  syncVehicleTypesNow: () => ipcRenderer.invoke('vehicle-types:sync'),
+  listVehicleGroups: () => ipcRenderer.invoke('vehicle-groups:list'),
+  listActivePasses: () => ipcRenderer.invoke('passes:list'),
   saveScopeRate: (input: {
     firstBlockCents: number; perBlockCents: number;
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;
@@ -110,6 +130,8 @@ const api = {
 
   // Touch'n'Go W4G IO-controller bridge (test triggers + live status)
   tngPing: () => ipcRenderer.invoke('tng:ping'),
+  tngProbeHttp: () => ipcRenderer.invoke('tng:probe-http'),
+  tngLoopbackPayResult: (opts?: { orderId?: string; state?: string; payType?: number; cardNo?: string; balance?: number }) => ipcRenderer.invoke('tng:loopback', opts),
   tngStatus: () => ipcRenderer.invoke('tng:status'),
   tngTestPayRequest: (opts?: {
     payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;

@@ -59,6 +59,7 @@ export async function pushLane(laneId: number): Promise<{ ok: boolean; error?: s
     external_id: `local-${lane.id}`,
     name: lane.name,
     direction: lane.direction,
+    lane_type: lane.laneType ?? 'car',
     terminal_external_id: term ? `local-${term.id}` : null,
     gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,

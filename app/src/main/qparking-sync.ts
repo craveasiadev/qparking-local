@@ -11,8 +11,12 @@
  * still works — operators just have to fill the scopes table manually via the
  * Scopes page in the UI.
  */
-import { getSettings, upsertScope, replaceActivePassesForScope, listScopes } from './db';
-import type { ScopeRate, TariffRule, ActivePass } from '../shared/types';
+import {
+  getSettings, upsertScope, replaceActivePassesForScope, listScopes,
+  replaceParkingSpaces, replaceVehicleTypes, replaceVehicleGroups,
+  pruneStaleScopes,
+} from './db';
+import type { ScopeRate, TariffRule, ActivePass, ParkingSpace, VehicleType, VehicleGroup } from '../shared/types';
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
 
@@ -81,6 +85,7 @@ export async function syncScopes(): Promise<SyncResult> {
         policyId: row.policy_id ?? null,
         policyName: row.policy_name ?? null,
         policyDescription: row.policy_description ?? null,
+        isSiteDefault: !!row.is_site_default,
         graceExceededBehavior: row.grace_exceeded_behavior ?? null,
         cutoffEnabled: !!row.cutoff_enabled,
         cutoffTime: row.cutoff_time ?? null,
@@ -92,6 +97,16 @@ export async function syncScopes(): Promise<SyncResult> {
       upsertScope(scope);
       count++;
     }
+    // Prune scopes whose policy no longer exists (or was deactivated) on
+    // the cloud side. Without this a deleted RatePolicy would stay cached
+    // locally forever and lanes bound to it would still price sessions
+    // under a policy that's been retired.
+    try {
+      const seenIds = (body.data ?? [])
+        .map((row: any) => String(row.scope_id ?? row.scopeId ?? row.id ?? ''))
+        .filter(Boolean);
+      pruneStaleScopes(seenIds);
+    } catch { /* pruning is best-effort; sync loop retries next tick */ }
     return { ok: true, fetched: count };
   } catch (e: any) {
     return { ok: false, fetched: 0, error: e.message ?? String(e) };
@@ -152,25 +167,209 @@ export async function syncPasses(): Promise<SyncResult> {
   }
 }
 
+/** Pull the canonical parking-space inventory from the cloud. Read-only
+ *  mirror — operator manages spaces in qparking SaaS, the on-prem app
+ *  just reflects them for visibility. */
+export async function syncSpaces(): Promise<SyncResult> {
+  const s = getSettings();
+  if (!s.qparkingBaseUrl || !s.qparkingApiKey) {
+    return { ok: false, fetched: 0, error: 'qparking_not_configured' };
+  }
+  const url = `${s.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server/spaces`;
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${s.qparkingApiKey}` } });
+    if (!res.ok) {
+      if (res.status === 404) return { ok: true, fetched: 0 };
+      return { ok: false, fetched: 0, error: `http_${res.status}` };
+    }
+    const body = await res.json() as { data?: any[] };
+    const rows: ParkingSpace[] = (body.data ?? []).map((r) => ({
+      id: String(r.id ?? ''),
+      building: r.building ?? null,
+      level: r.level ?? null,
+      zone: r.zone ?? null,
+      spaceNumber: r.space_number ?? null,
+      spaceCode: r.space_code ?? null,
+      status: String(r.status ?? 'available'),
+      customerName: r.customer_name ?? null,
+      vehiclePlate: r.vehicle_plate ?? null,
+      passType: r.pass_type ?? null,
+      passId: r.pass_id ?? null,
+      startDate: r.start_date ?? null,
+      endDate: r.end_date ?? null,
+      notes: r.notes ?? null,
+      fetchedAt: new Date().toISOString(),
+    })).filter((s) => !!s.id);
+    replaceParkingSpaces(rows);
+    return { ok: true, fetched: rows.length };
+  } catch (e: any) {
+    return { ok: false, fetched: 0, error: e?.message ?? String(e) };
+  }
+}
+
+/** Pull vehicle type taxonomy from the cloud. */
+export async function syncVehicleTypes(): Promise<SyncResult> {
+  const s = getSettings();
+  if (!s.qparkingBaseUrl || !s.qparkingApiKey) {
+    return { ok: false, fetched: 0, error: 'qparking_not_configured' };
+  }
+  const url = `${s.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server/vehicle-types`;
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${s.qparkingApiKey}` } });
+    if (!res.ok) {
+      if (res.status === 404) return { ok: true, fetched: 0 };
+      return { ok: false, fetched: 0, error: `http_${res.status}` };
+    }
+    const body = await res.json() as { data?: any[] };
+    const rows: VehicleType[] = (body.data ?? []).map((r) => ({
+      id: String(r.id ?? ''),
+      typeName: String(r.type_name ?? ''),
+      hourlyRate: r.hourly_rate != null ? Number(r.hourly_rate) : null,
+      dailyRate: r.daily_rate != null ? Number(r.daily_rate) : null,
+      monthlyRate: r.monthly_rate != null ? Number(r.monthly_rate) : null,
+      groupName: r.group_name ?? null,
+      fetchedAt: new Date().toISOString(),
+    })).filter((t) => !!t.id);
+    replaceVehicleTypes(rows);
+    return { ok: true, fetched: rows.length };
+  } catch (e: any) {
+    return { ok: false, fetched: 0, error: e?.message ?? String(e) };
+  }
+}
+
+/** Pull vehicle group taxonomy from the cloud. */
+export async function syncVehicleGroups(): Promise<SyncResult> {
+  const s = getSettings();
+  if (!s.qparkingBaseUrl || !s.qparkingApiKey) {
+    return { ok: false, fetched: 0, error: 'qparking_not_configured' };
+  }
+  const url = `${s.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server/vehicle-groups`;
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${s.qparkingApiKey}` } });
+    if (!res.ok) {
+      if (res.status === 404) return { ok: true, fetched: 0 };
+      return { ok: false, fetched: 0, error: `http_${res.status}` };
+    }
+    const body = await res.json() as { data?: any[] };
+    const rows: VehicleGroup[] = (body.data ?? []).map((r) => ({
+      id: String(r.id ?? ''),
+      name: String(r.name ?? ''),
+      fetchedAt: new Date().toISOString(),
+    })).filter((g) => !!g.id);
+    replaceVehicleGroups(rows);
+    return { ok: true, fetched: rows.length };
+  } catch (e: any) {
+    return { ok: false, fetched: 0, error: e?.message ?? String(e) };
+  }
+}
+
 /** Background sync. Default cadence: every 60 seconds — operators expect a
  *  rate edit in qparking SaaS to apply at the gate within ~1 minute, not the
- *  ~60 minutes the legacy interval enforced. Cheap (two GETs), self-healing,
- *  no operator action needed.
+ *  ~60 minutes the legacy interval enforced. Cheap (a handful of GETs),
+ *  self-healing, no operator action needed.
  */
 export function startBackgroundSync(intervalMs = 60_000) {
   stopBackgroundSync();
   syncTimer = setInterval(() => {
     syncScopes().catch(() => null);
     syncPasses().catch(() => null);
+    syncSpaces().catch(() => null);
+    syncVehicleTypes().catch(() => null);
+    syncVehicleGroups().catch(() => null);
   }, intervalMs);
   // Kick one off at startup, fire-and-forget.
   syncScopes().catch(() => null);
   syncPasses().catch(() => null);
+  syncSpaces().catch(() => null);
+  syncVehicleTypes().catch(() => null);
+  syncVehicleGroups().catch(() => null);
 }
 
 export function stopBackgroundSync() {
   if (syncTimer) clearInterval(syncTimer);
   syncTimer = null;
+}
+
+// ─── remote gate-open command poll ─────────────────────────────────────────
+// Independent timer running at 20-second cadence. Slower than 20s would make
+// the operator wait too long between clicking "Open Barrier" in the cloud UI
+// and the physical gate moving; faster is unnecessary chatter over WAN.
+//
+// One-shot flow per command: fetch pending → dispatch to gate handler → ack.
+// Errors during dispatch are logged but the ack still fires (with a note)
+// so the same command doesn't get processed twice on the next poll.
+
+let gatePollTimer: NodeJS.Timeout | null = null;
+
+interface PendingGateCommand {
+  id: string;
+  site_id: string;
+  /** Cloud's own camera UUID — meaningless to local (which uses int PKs). */
+  camera_id: string | null;
+  /** The `external_id` cloud stored when local first pushed the camera up
+   *  (currently formatted `local-{localId}`). This is the value local uses
+   *  to look up which local camera → which local lane to target. */
+  camera_external_id: string | null;
+  /** Cloud-side lane UUID. Populated once lane sync (piece 2) is live. */
+  lane_id: string | null;
+  reason: string | null;
+  requested_at: string;
+}
+
+/** Callback the main process registers so gate open dispatch stays out of
+ *  this file (which is otherwise purely HTTP/sync). Set via
+ *  `setGateOpenHandler()` at boot. */
+let gateOpenHandler: ((cmd: PendingGateCommand) => Promise<{ ok: boolean; note?: string }>) | null = null;
+
+export function setGateOpenHandler(fn: typeof gateOpenHandler): void {
+  gateOpenHandler = fn;
+}
+
+async function pollGateCommands(): Promise<void> {
+  const s = getSettings();
+  if (!s.qparkingBaseUrl || !s.qparkingApiKey) return;
+  const base = s.qparkingBaseUrl.replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/api/v1/local-server/gate-commands/pending`, {
+      headers: { Authorization: `Bearer ${s.qparkingApiKey}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return;
+    const body = await res.json() as { data?: PendingGateCommand[] };
+    for (const cmd of body.data ?? []) {
+      const outcome = gateOpenHandler
+        ? await gateOpenHandler(cmd).catch((e: any) => ({ ok: false, note: `dispatch error: ${e?.message ?? e}` }))
+        : { ok: false, note: 'no gate handler registered' };
+      // Ack regardless of dispatch success — otherwise the same command
+      // gets re-run every 20s indefinitely.
+      try {
+        await fetch(`${base}/api/v1/local-server/gate-commands/${cmd.id}/ack`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${s.qparkingApiKey}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ note: outcome.note ?? (outcome.ok ? 'dispatched' : 'dispatch failed') }),
+          signal: AbortSignal.timeout(8_000),
+        });
+      } catch { /* ack failure is fine — cloud will expire the row after 5m */ }
+    }
+  } catch { /* poll failure is transient — retry on next tick */ }
+}
+
+/** Start the 20s gate-open command poller. Runs alongside the main scope/pass
+ *  sync but on its own timer so a slow scope pull doesn't block gate opens. */
+export function startGatePoll(intervalMs = 20_000): void {
+  stopGatePoll();
+  gatePollTimer = setInterval(() => { void pollGateCommands(); }, intervalMs);
+  // Also fire once immediately so a pending command from just before boot
+  // doesn't wait a full interval.
+  void pollGateCommands();
+}
+
+export function stopGatePoll(): void {
+  if (gatePollTimer) clearInterval(gatePollTimer);
+  gatePollTimer = null;
 }
 
 /**

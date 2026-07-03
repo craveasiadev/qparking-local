@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Car } from 'lucide-react';
+import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Car, Cloud, Star } from 'lucide-react';
 import type { ScopeRate, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -24,8 +24,10 @@ export function Scopes() {
     <div className="p-4 sm:p-6 lg:p-8 max-w-5xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Scopes &amp; rates</h1>
-          <p className="text-xs sm:text-sm text-gray-500 mt-1">Per-site rates — edit here to fix RM 0 rates without logging into the SaaS admin. Saving pushes to qparking and re-syncs.</p>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Rate plans</h1>
+          <p className="text-xs sm:text-sm text-gray-500 mt-1">
+            Every active rate plan configured on the cloud, cached here so the gate can price sessions even if WAN is offline.
+          </p>
         </div>
         <button onClick={() => sync()} disabled={syncing}
           className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50 self-start">
@@ -33,6 +35,22 @@ export function Scopes() {
           {syncing ? 'Syncing…' : 'Sync now'}
         </button>
       </header>
+
+      {/* Source-of-truth callout — the local editor path was retired when we
+          switched to multi-plan sync. Editing here would fight cloud writes
+          from other operators + break the priority-stacking model. */}
+      <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-2.5">
+        <Cloud size={16} className="text-blue-600 mt-0.5 flex-shrink-0" />
+        <div className="text-xs text-blue-900 leading-relaxed">
+          <p className="font-bold uppercase tracking-wide text-[10px]">Managed in cloud</p>
+          <p className="mt-1">
+            Create + edit plans in <strong>qparking → Pricing &amp; Tariffs</strong>. Each active plan appears
+            here as a scope; lanes bind to a specific plan via <strong>Lanes → assign rate plan</strong>.
+            Weekday, weekend, overnight, public holiday and promotion rules layer within a single plan
+            by priority (higher wins).
+          </p>
+        </div>
+      </div>
 
       {result && (
         <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${result.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
@@ -104,9 +122,11 @@ export function Scopes() {
                           <td className="px-3 py-2 text-right font-mono">{s.dailyCapCents > 0 ? fmtCents(s.dailyCapCents, s.currency) : '—'}</td>
                           <td className="px-3 py-2 text-right text-[11px] text-gray-500">{new Date(s.fetchedAt).toLocaleString()}</td>
                           <td className="px-3 py-2 text-right">
-                            <button onClick={() => setEditing(s)} className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900">
-                              <Pencil size={11} /> Edit
-                            </button>
+                            {(s as any).isSiteDefault && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                                <Star size={10} /> Default
+                              </span>
+                            )}
                           </td>
                         </tr>
                         {isOpen && ruleCount > 0 && (
@@ -145,9 +165,11 @@ export function Scopes() {
                         )}
                       </div>
                     </button>
-                    <button onClick={() => setEditing(s)} className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900">
-                      <Pencil size={11} /> Edit
-                    </button>
+                    {(s as any).isSiteDefault && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                        <Star size={10} /> Default
+                      </span>
+                    )}
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
                     <div><span className="text-gray-500">Free:</span> <span className="font-mono">{s.freeMinutes} min</span></div>
@@ -168,7 +190,7 @@ export function Scopes() {
 
           {list.some((s) => s.firstBlockCents === 0 && s.perBlockCents === 0) && (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-[12px] px-3 py-2">
-              <strong>Heads up:</strong> rows in amber have a RM 0 rate — the exit flow will skip the payment terminal and treat all parking as free. Click <strong>Edit</strong> to set real values; the change is pushed to qparking SaaS.
+              <strong>Heads up:</strong> rows in amber have a RM 0 rate — the exit flow will skip the payment terminal and treat all parking as free. Set real values in <strong>qparking → Pricing &amp; Tariffs</strong>; the change syncs down within a minute.
             </div>
           )}
         </>

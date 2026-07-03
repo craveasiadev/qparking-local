@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon, Terminal as TerminalIcon, ChevronUp, ChevronDown } from 'lucide-react';
+import {
+  LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
+  Terminal as TerminalIcon, ChevronUp, ChevronDown,
+  Ticket, Grid3x3, Truck,
+} from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
 import { Cameras } from './pages/Cameras';
@@ -7,17 +11,57 @@ import { Lanes } from './pages/Lanes';
 import { Scopes } from './pages/Scopes';
 import { Sessions } from './pages/Sessions';
 import { Settings } from './pages/Settings';
+import { Passes } from './pages/Passes';
+import { Spaces } from './pages/Spaces';
+import { VehicleTypes } from './pages/VehicleTypes';
 
-type Page = 'dashboard' | 'terminals' | 'cameras' | 'lanes' | 'scopes' | 'sessions' | 'settings';
+type Page =
+  | 'dashboard' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
+  // Parking Management
+  | 'spaces' | 'passes'
+  // Pricing & Tariffs
+  | 'scopes' | 'vehicle-types'
+  // System
+  | 'settings';
 
-const PAGES: { id: Page; label: string; icon: any }[] = [
-  { id: 'dashboard', label: 'Dashboard',   icon: LayoutDashboard },
-  { id: 'terminals', label: 'Terminals',   icon: CreditCard },
-  { id: 'cameras',   label: 'LPR cameras', icon: Camera },
-  { id: 'lanes',     label: 'Lanes',       icon: Map },
-  { id: 'scopes',    label: 'Scopes',      icon: Tag },
-  { id: 'sessions',  label: 'Sessions',    icon: ListOrdered },
-  { id: 'settings',  label: 'Settings',    icon: SettingsIcon },
+interface NavItem { id: Page; label: string; icon: any }
+interface NavSection { key: string; label: string; items: NavItem[] }
+
+// Sidebar matches the cloud SaaS operator menu groupings so an operator who
+// uses both surfaces sees the same mental map. Categories that don't exist
+// locally (HQ-only: Refunds, Customer Mgmt, Corporate Billing, etc.) are
+// deliberately omitted — they're admin workflows that live in the cloud.
+const SECTIONS: NavSection[] = [
+  {
+    key: 'ops', label: 'Operations',
+    items: [
+      { id: 'dashboard',        label: 'Dashboard',         icon: LayoutDashboard },
+      { id: 'sessions',         label: 'Sessions',          icon: ListOrdered },
+      { id: 'cameras',          label: 'LPR cameras',       icon: Camera },
+      { id: 'terminals',        label: 'Payment terminals', icon: CreditCard },
+      { id: 'lanes',            label: 'Lanes',             icon: Map },
+    ],
+  },
+  {
+    key: 'mgmt', label: 'Parking management',
+    items: [
+      { id: 'spaces',           label: 'Space management',  icon: Grid3x3 },
+      { id: 'passes',           label: 'Passes',            icon: Ticket },
+    ],
+  },
+  {
+    key: 'pricing', label: 'Pricing & tariffs',
+    items: [
+      { id: 'scopes',           label: 'Rate plans',        icon: Tag },
+      { id: 'vehicle-types',    label: 'Vehicle types',     icon: Truck },
+    ],
+  },
+  {
+    key: 'system', label: 'System',
+    items: [
+      { id: 'settings',         label: 'Settings',          icon: SettingsIcon },
+    ],
+  },
 ];
 
 interface DebugLogEntry {
@@ -28,10 +72,6 @@ interface DebugLogEntry {
 export function App() {
   const [page, setPage] = useState<Page>('dashboard');
   const [buildInfo, setBuildInfo] = useState<{ version: string; isPackaged: boolean } | null>(null);
-  // Live parking-flow log strip. Filled by main-process emit('debug-log').
-  // Sticky bottom panel; operator can collapse it. Critical for diagnosing
-  // "the reader auto-accepted without tapping" — every guard decision is
-  // surfaced here so we don't need to chase DevTools.
   const [debugLog, setDebugLog] = useState<DebugLogEntry[]>([]);
   const [debugOpen, setDebugOpen] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -48,7 +88,6 @@ export function App() {
   useEffect(() => {
     const off = window.bridge.onEvent('parking-flow-log', (p: any) => {
       setDebugLog((cur) => {
-        // Cap at 200 lines so memory stays bounded over a long shift.
         const next = [...cur, p as DebugLogEntry];
         return next.length > 200 ? next.slice(next.length - 200) : next;
       });
@@ -57,13 +96,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    // Auto-scroll the log to bottom whenever a new line comes in.
     logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [debugLog]);
 
   return (
     <div className="min-h-full flex bg-gray-50">
-      <aside className="w-56 flex-shrink-0 bg-gray-950 text-white flex flex-col">
+      <aside className="w-60 flex-shrink-0 bg-gray-950 text-white flex flex-col">
         <div className="px-5 h-14 flex items-center gap-2 border-b border-white/10">
           <div className="w-7 h-7 rounded-md bg-white text-gray-900 flex items-center justify-center font-bold">Q</div>
           <div>
@@ -71,41 +109,70 @@ export function App() {
             <div className="text-[10px] text-white/40 uppercase tracking-widest">Local Server</div>
           </div>
         </div>
-        <nav className="flex-1 p-2 space-y-1">
-          {PAGES.map((p) => {
-            const active = page === p.id;
-            return (
-              <button
-                key={p.id}
-                onClick={() => setPage(p.id)}
-                className={`w-full flex items-center gap-3 px-3 h-10 rounded-lg text-sm font-medium transition-colors ${
-                  active ? 'bg-white text-gray-900' : 'text-white/70 hover:bg-white/5 hover:text-white'
-                }`}
-              >
-                <p.icon size={16} strokeWidth={2.25} />
-                {p.label}
-              </button>
-            );
-          })}
+        <nav className="flex-1 p-2 space-y-3 overflow-y-auto">
+          {SECTIONS.map((section) => (
+            <div key={section.key}>
+              <div className="px-3 pt-1 pb-1 text-[10px] uppercase tracking-widest text-white/30 font-semibold">
+                {section.label}
+              </div>
+              <div className="space-y-0.5">
+                {section.items.map((p) => {
+                  const active = page === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setPage(p.id)}
+                      className={`w-full flex items-center gap-3 px-3 h-9 rounded-lg text-[13px] font-medium transition-colors ${
+                        active ? 'bg-white text-gray-900' : 'text-white/70 hover:bg-white/5 hover:text-white'
+                      }`}
+                    >
+                      <p.icon size={15} strokeWidth={2.25} />
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
-        <div className="p-3 text-[10px] text-white/40 uppercase tracking-widest flex items-center justify-between">
-          <span>v{buildInfo?.version ?? '…'}</span>
-          {buildInfo && !buildInfo.isPackaged && <span className="text-amber-300/80">dev</span>}
+        {/* Version footer — kept prominent so an operator can instantly tell
+            which build they're on, and a support engineer can eyeball dev vs
+            packaged. If a v0.14.1 window is running side-by-side with a
+            v0.14.8 window, the digit changes here make it obvious which is
+            which. */}
+        <div className="p-3 border-t border-white/10">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="text-[9px] uppercase tracking-widest text-white/40 font-semibold">Build</div>
+              <div className="text-sm font-bold font-mono text-white/90">
+                v{buildInfo?.version ?? '…'}
+              </div>
+            </div>
+            {buildInfo && (
+              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
+                buildInfo.isPackaged
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                  : 'bg-amber-500/20 text-amber-300 border border-amber-400/40'
+              }`}>
+                {buildInfo.isPackaged ? 'installed' : 'dev'}
+              </span>
+            )}
+          </div>
         </div>
       </aside>
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <div className="flex-1 min-h-0 overflow-y-auto">
           {page === 'dashboard' && <Dashboard />}
-          {page === 'terminals' && <Terminals />}
           {page === 'cameras' && <Cameras />}
+          {page === 'terminals' && <Terminals />}
           {page === 'lanes' && <Lanes />}
-          {page === 'scopes' && <Scopes />}
           {page === 'sessions' && <Sessions />}
+          {page === 'spaces' && <Spaces />}
+          {page === 'passes' && <Passes />}
+          {page === 'scopes' && <Scopes />}
+          {page === 'vehicle-types' && <VehicleTypes />}
           {page === 'settings' && <Settings />}
         </div>
-        {/* Live debug strip — sticky bottom panel showing every parking-flow
-            decision in real-time. Operator can collapse if they don't want
-            to look at it; data still streams in. */}
         <div className="flex-shrink-0 bg-gray-950 text-white border-t border-white/10">
           <button
             onClick={() => setDebugOpen((o) => !o)}
@@ -131,10 +198,6 @@ export function App() {
                 <div className="py-2 text-white/40">No parking-flow activity yet. Trigger an exit (real LPR or Demo flow) to see live decisions.</div>
               ) : (
                 debugLog.map((entry, i) => {
-                  // Colour-code lines so the operator can spot rejections instantly:
-                  //   red    — IGNORED / REPLAY / REJECTED / TIMEOUT / FAILED
-                  //   green  — settling / received / cardRead / outcome=paid
-                  //   amber  — STEP / initCard / abortTxn
                   const t = entry.text.toLowerCase();
                   const color = t.includes('ignored') || t.includes('replay') || t.includes('timeout') || t.includes('failed') || t.includes('rejected')
                     ? 'text-red-300'

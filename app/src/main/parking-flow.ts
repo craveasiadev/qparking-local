@@ -25,7 +25,7 @@ import { app } from 'electron';
 import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getLane, getScope, getSettings, getTerminal,
-  listLanes, recordExit, findActivePassByPlate,
+  listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,
 } from './db';
 import { lprEvents, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
@@ -171,12 +171,16 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
-  // Compute fee from scope rate.
+  // Compute fee from scope rate. `vehicleType` context flows from the
+  // lane geometry — a motorcycle-only lane pins the class regardless of
+  // what the LPR camera saw. Mixed lanes send null (no vehicle_type
+  // filter) so a rule without a class still applies. See ruleForMoment.
   const scope = lane.scopeId ? getScope(lane.scopeId) : null;
+  const vehicleType = deriveVehicleType(lane);
   const entryMs = Date.parse(session.entryAt);
   const exitMs = Date.now();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  let feeCents = computeFee(durationMinutes, scope, session.entryAt);
+  let feeCents = computeFee(durationMinutes, scope, session.entryAt, vehicleType);
 
   // ─── Active-pass shortcut ────────────────────────────────────────────
   // Before driving the terminal, see if this plate is on the cached pass
@@ -741,6 +745,7 @@ export function computeFee(
   durationMinutes: number,
   scope: ScopeRate | null,
   entryAt?: string | Date,
+  vehicleType?: string | null,
 ): number {
   if (!scope) return 0;
 
@@ -777,7 +782,7 @@ export function computeFee(
   // of the session; subsequent blocks use subsequentBlockAmount. Mixing rules
   // mid-session: each rule's per-block charge applies to its segment.
   while (cursorMs < billableEndMs) {
-    const ruleForCursor = ruleForMoment(scope.rules, new Date(cursorMs));
+    const ruleForCursor = ruleForMoment(scope.rules, new Date(cursorMs), vehicleType);
     if (!ruleForCursor) {
       // No rule matches this moment — treat as free time.
       cursorMs += 60_000;
@@ -837,10 +842,28 @@ function nextBoundaryMs(rule: TariffRule, cursorMs: number, billableEndMs: numbe
   return Math.min(...candidates);
 }
 
-/** Pick the highest-priority rule whose day-of-week + time window + date
- *  range covers the given moment. Mirrors LocalServerController.effectiveRuleFor
- *  on the SaaS side so the local app's math agrees with the cloud preview. */
-export function ruleForMoment(rules: TariffRule[], when: Date): TariffRule | null {
+/**
+ * Pick the highest-priority rule whose day-of-week + time window + date
+ * range + vehicle_type all cover the given moment.
+ *
+ * `vehicleType` context: LPR alone can't tell a car from a motorcycle from
+ * a plate photo, so we NEVER apply a rule's `vehicle_type` filter based on
+ * an inferred class. The context is trustworthy only when:
+ *   (a) the plate matches a registered Vehicle (known type from cloud), OR
+ *   (b) the physical lane the session used is single-class (e.g. a
+ *       motorcycle-only lane geometry naturally enforces the class).
+ * When neither applies, `vehicleType` is null and we treat vehicle_type
+ * as a wildcard so an over-restrictive rule doesn't leak charges through
+ * (default rule with no vehicle_type still wins).
+ *
+ * Mirrors LocalServerController.effectiveRuleFor on the SaaS side so the
+ * local app's math agrees with the cloud preview.
+ */
+export function ruleForMoment(
+  rules: TariffRule[],
+  when: Date,
+  vehicleType?: string | null,
+): TariffRule | null {
   const weekday = when.getDay();
   const hh = String(when.getHours()).padStart(2, '0');
   const mm = String(when.getMinutes()).padStart(2, '0');
@@ -849,13 +872,15 @@ export function ruleForMoment(rules: TariffRule[], when: Date): TariffRule | nul
   const date = when.toISOString().slice(0, 10);
 
   const matches = rules.filter((r) => {
-    // 2026-06-22: respect per-rule activation. Inactive rules are kept in the
-    // local DB so the operator can see them in Scopes, but they MUST NOT
-    // contribute to fee math — that's what the Activations tab toggles.
     if (r.isActive === false) return false;
     if (r.validFrom && r.validFrom > date) return false;
     if (r.validTo && r.validTo < date) return false;
     if (Array.isArray(r.daysOfWeek) && r.daysOfWeek.length > 0 && !r.daysOfWeek.includes(weekday)) return false;
+    // vehicle_type filter — only enforced when we HAVE a trustworthy class.
+    // Rules without a vehicle_type (null/empty) always match. Rules with
+    // a specific type only match when the context vehicleType is that
+    // same type; unknown context ignores the filter (see docblock).
+    if (r.vehicleType && vehicleType && r.vehicleType !== vehicleType) return false;
     const from = r.timeFrom;
     const to = r.timeTo === '23:59:59' || r.timeTo === '23:59:00' ? '24:00:00' : r.timeTo;
     if (from === to) return true;
@@ -866,6 +891,11 @@ export function ruleForMoment(rules: TariffRule[], when: Date): TariffRule | nul
   if (matches.length === 0) return null;
   matches.sort((a, b) => {
     if (a.priority !== b.priority) return b.priority - a.priority;
+    // When priority ties, a rule that SPECIFIES the session's vehicle_type
+    // beats a wildcard — the class-specific rate is more specific.
+    const aTypeSpecific = a.vehicleType && vehicleType && a.vehicleType === vehicleType;
+    const bTypeSpecific = b.vehicleType && vehicleType && b.vehicleType === vehicleType;
+    if (aTypeSpecific !== bTypeSpecific) return aTypeSpecific ? -1 : 1;
     return (b.isOvernight ? 1 : 0) - (a.isOvernight ? 1 : 0);
   });
   return matches[0];
@@ -888,6 +918,69 @@ export function previewFee(plate: string): { found: boolean; sessionId?: number;
   const lane = listLanes().find((l) => l.id === session.entryLaneId);
   const scope = lane?.scopeId ? getScope(lane.scopeId) : null;
   const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
-  const feeCents = computeFee(durationMinutes, scope, session.entryAt);
+  const vehicleType = lane ? deriveVehicleType(lane) : null;
+  const feeCents = computeFee(durationMinutes, scope, session.entryAt, vehicleType);
   return { found: true, sessionId: session.id, durationMinutes, feeCents, scope };
+}
+
+/**
+ * Determine the vehicle_type context we can trust for rate resolution.
+ * See ruleForMoment's docblock for why we don't infer from LPR.
+ *
+ *   • motorcycle-only lane  → 'motorcycle'
+ *   • car-only lane         → 'car'
+ *   • mixed lane            → null (no filter — rule vehicle_type ignored)
+ *
+ * Later we can widen this to also consult a plate→registered-vehicle map
+ * (once local caches the vehicle registry) so an EV driving through a
+ * mixed lane still picks an EV-specific rate. For now the lane is the
+ * only source of truth we have that's reliable at exit time.
+ */
+function deriveVehicleType(lane: ParkingLane | null | undefined): string | null {
+  if (!lane) return null;
+  const t = lane.laneType ?? 'car';
+  if (t === 'mixed') return null;
+  return t;
+}
+
+/**
+ * Manual retrigger: fire the exit-payment flow for a specific session without
+ * needing an LPR event. Used by the Sessions page "Retrigger payment" button
+ * when the exit LPR misread the plate (or the operator wants to close a
+ * stuck session by asking the driver to tap again).
+ *
+ * Implementation: synthesize an LPR plate event and re-emit it via the
+ * existing `lprEvents` channel, so all the normal orchestration kicks in —
+ * fee compute, W4G race, ECPI initCard, replay guards, session record.
+ * The direction is forced to 'exit' so it never accidentally becomes an
+ * entry retry.
+ */
+export function retriggerSessionExit(sessionId: number): { ok: boolean; error?: string } {
+  const session = getSessionById(sessionId);
+  if (!session) return { ok: false, error: 'session_not_found' };
+  if (session.exitAt) return { ok: false, error: 'session_already_closed — nothing to retrigger' };
+
+  const laneId = session.exitLaneId ?? session.entryLaneId;
+  if (!laneId) return { ok: false, error: 'session_has_no_lane — attach the session to a lane in Edit first' };
+
+  const lane = getLane(laneId);
+  if (!lane) return { ok: false, error: 'lane_not_found' };
+  if (!lane.terminalId) return { ok: false, error: `lane "${lane.name}" has no payment terminal wired — attach one in Lanes` };
+
+  // Pick any enabled camera on that lane so laneForCamera() can resolve it
+  // back to the same lane during the synthesized event dispatch.
+  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
+  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — the parking-flow uses the camera to look up the lane` };
+
+  flog(`RETRIGGER: session=${sessionId} plate=${session.plate} lane=${lane.name} terminal=${lane.terminalId} — synthesizing exit LPR event`);
+  const event: PlateEvent = {
+    cameraId: cam.id,
+    plate: session.plate,
+    confidence: 1.0,
+    imagePath: null,
+    timestamp: new Date().toISOString(),
+    direction: 'exit',
+  };
+  lprEvents.emit('plate', event);
+  return { ok: true };
 }

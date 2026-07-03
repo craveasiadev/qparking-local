@@ -19,7 +19,7 @@
  * checkout moves you only need to update CLOUD_BUILD_DIR below.
  */
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, statSync, copyFileSync, writeFileSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, statSync, copyFileSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,6 +46,32 @@ function fail(msg) {
   process.exit(1);
 }
 
+/**
+ * Delete every QParkingLocal-*.exe (and matching .blockmap) in `dir` whose
+ * filename doesn't reference the current version. Keeps the release + cloud
+ * folders clean — after every ship there's exactly ONE version's artifacts.
+ * Non-matching filenames (e.g. `latest.json`, `builder-debug.yml`, subdirs)
+ * are left alone.
+ */
+function purgeOldBuilds(dir, currentVersion) {
+  if (!existsSync(dir)) return { deleted: [], skipped: [] };
+  const deleted = [];
+  const skipped = [];
+  for (const name of readdirSync(dir)) {
+    // Match QParkingLocal-<version>-{portable,x64}.exe(.blockmap)?
+    const m = name.match(/^QParkingLocal-([\d.]+)-(?:portable|x64)\.exe(?:\.blockmap)?$/);
+    if (!m) { skipped.push(name); continue; }
+    if (m[1] === currentVersion) { skipped.push(name); continue; }
+    try {
+      unlinkSync(join(dir, name));
+      deleted.push(name);
+    } catch (e) {
+      console.error(`  ✗ could not delete ${name}: ${e.message}`);
+    }
+  }
+  return { deleted, skipped };
+}
+
 async function main() {
   const pkg = JSON.parse(readFileSync(join(APP_DIR, 'package.json'), 'utf8'));
   const version = pkg.version;
@@ -69,6 +95,20 @@ async function main() {
   }
 
   console.log(`\nPublishing qparking-local v${version}`);
+
+  // Purge stale versioned artifacts from BOTH the local release/ folder AND
+  // the cloud storage folder. Keeps disk usage flat over time and prevents
+  // confusion (a running old portable can pin release/ files open; if that
+  // happens the unlink fails and we surface it to the operator).
+  const localPurge = purgeOldBuilds(RELEASE_DIR, version);
+  if (localPurge.deleted.length > 0) {
+    console.log(`  🗑  release/ — removed ${localPurge.deleted.length} stale file(s): ${localPurge.deleted.join(', ')}`);
+  }
+  const cloudPurge = purgeOldBuilds(CLOUD_BUILD_DIR, version);
+  if (cloudPurge.deleted.length > 0) {
+    console.log(`  🗑  cloud    — removed ${cloudPurge.deleted.length} stale file(s): ${cloudPurge.deleted.join(', ')}`);
+  }
+
   console.log(`  → ${CLOUD_BUILD_DIR}`);
 
   // Copy + hash both variants.

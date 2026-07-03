@@ -17,6 +17,7 @@ interface TngStatus {
   enabled: boolean;
   listening: boolean;
   listenPort: number;
+  listenPorts: number[];
   listenAddresses: string[];
   host: string;
   port: number;
@@ -77,8 +78,8 @@ export function Settings() {
     return () => { try { off(); } catch { /* ignore */ } };
   }, []);
 
-  const pushLog = (kind: TngTestLine['kind'], text: string) => {
-    setTngLog((prev) => [{ ts: new Date().toLocaleTimeString(), kind, text }, ...prev].slice(0, 30));
+  const pushLog = (kind: TngTestLine['kind'], text: string, payload?: unknown) => {
+    setTngLog((prev) => [{ ts: new Date().toLocaleTimeString(), kind, text, payload }, ...prev].slice(0, 100));
   };
 
   const [save, saving] = useAsyncAction(async () => {
@@ -96,6 +97,37 @@ export function Settings() {
     setFaceGateTest('Pinging…');
     const r = await window.bridge.pingFaceGate();
     setFaceGateTest(r.ok ? `✓ Reachable (status ${r.status})` : `✗ ${r.error ?? `status ${r.status}`}`);
+  });
+
+  const [runTngLoopback, tngLooping] = useAsyncAction(async () => {
+    if (!s) return;
+    if (!s.tngEnabled) {
+      pushLog('error', 'Enable TNG and save settings first');
+      return;
+    }
+    await window.bridge.saveSettings(s);
+    pushLog('info', `Loopback test — POSTing synthetic PayResult to our own listener…`);
+    const r = await window.bridge.tngLoopbackPayResult();
+    if (r.ok) {
+      pushLog('recv', `✓ Loopback succeeded · status=${r.status} · ${r.elapsedMs}ms — listener is healthy and parsing correctly. If real device callbacks still aren't landing, the issue is purely device-side (PayResult URL or firewall).`, { sent: r.sentBody, response: r.responseBody });
+    } else {
+      pushLog('error', `✗ Loopback failed: ${r.error ?? `status=${r.status}`} — our own listener can't be reached on the callback port. Save settings first, then retry.`);
+    }
+  });
+
+  const [runTngProbe, tngProbing] = useAsyncAction(async () => {
+    if (!s) return;
+    await window.bridge.saveSettings(s);
+    pushLog('info', `Probe HTTP GET / at ${s.tngHost}:${s.tngPort}…`);
+    const r = await window.bridge.tngProbeHttp();
+    if (r.ok) {
+      pushLog('recv', `✓ HTTP ${r.status} ${r.statusText ?? ''} · ${r.elapsedMs}ms`, {
+        headers: r.headers,
+        body_preview: r.bodyPreview,
+      });
+    } else {
+      pushLog('error', `✗ Probe failed: ${r.error}`);
+    }
   });
 
   const [runTngPing, tngPinging] = useAsyncAction(async () => {
@@ -353,13 +385,27 @@ export function Settings() {
           </Field>
         </div>
         {tngStatus && (
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-1">
             <div className="flex items-center gap-2">
               <span className={`inline-block w-2 h-2 rounded-full ${tngStatus.listening ? 'bg-emerald-500' : 'bg-gray-400'}`} />
               {tngStatus.listening
-                ? <span>Listener UP on :{tngStatus.listenPort} — device callback URL: <strong>http://&lt;{tngStatus.listenAddresses[0] ?? 'this-host'}&gt;:{tngStatus.listenPort}/w4g/PayResult</strong></span>
+                ? <span>Listener UP on 0.0.0.0:{(tngStatus.listenPorts ?? [tngStatus.listenPort]).join(', ')}</span>
                 : <span>Listener DOWN — flip ON and save to start</span>}
             </div>
+            {tngStatus.listening && tngStatus.listenAddresses.length > 0 && (
+              <div className="text-gray-700">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Configure the W4G device to POST PayResult to ONE of these URLs (the device firmware hardcodes port 80, so prefer that):</div>
+                {tngStatus.listenAddresses.flatMap((ip) =>
+                  (tngStatus.listenPorts ?? [tngStatus.listenPort]).map((port) => (
+                    <div key={`${ip}:${port}`} className="flex items-center gap-1.5">
+                      <span className={`inline-flex items-center px-1.5 rounded text-[10px] font-bold ${port === 80 ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'}`}>{ip}:{port}{port === 80 ? ' ★' : ''}</span>
+                      <code className="text-gray-900 select-all">http://{ip}:{port}/w4g/PayResult</code>
+                    </div>
+                  ))
+                )}
+                <div className="text-[10px] text-gray-500 mt-0.5">★ = device default port. Use this entry in the device's SERVER IP setting via DebugTool. If Windows Firewall blocks inbound TCP, open it: <code>New-NetFirewallRule -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -DisplayName 'qparking-local W4G'</code></div>
+              </div>
+            )}
             {tngStatus.pending.length > 0 && (
               <div>Pending orders: {tngStatus.pending.map((p) => `${p.orderId.slice(0, 8)}…(${p.payAmount}c)`).join(', ')}</div>
             )}
@@ -376,10 +422,22 @@ export function Settings() {
             <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">Test amount (cents)</label>
             <input type="number" min="1" className="input w-32" value={tngTestAmount} onChange={(e) => setTngTestAmount(Math.max(1, Number(e.target.value) || 1))} />
           </div>
-          <button onClick={() => runTngPing()} disabled={tngPinging || tngPayBusy || tngCancelBusy}
+          <button onClick={() => runTngPing()} disabled={tngPinging || tngProbing || tngPayBusy || tngCancelBusy}
             className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
             {tngPinging ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
             {tngPinging ? 'Pinging…' : 'Ping device'}
+          </button>
+          <button onClick={() => runTngProbe()} disabled={tngPinging || tngProbing || tngLooping || tngPayBusy || tngCancelBusy}
+            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50"
+            title="Sends a plain GET / to the device to verify it's speaking HTTP at all. Useful when PayRequest times out but Ping passes.">
+            {tngProbing ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />}
+            {tngProbing ? 'Probing…' : 'Probe HTTP /'}
+          </button>
+          <button onClick={() => runTngLoopback()} disabled={tngPinging || tngProbing || tngLooping || tngPayBusy || tngCancelBusy}
+            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-violet-200 hover:bg-violet-50 text-violet-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50"
+            title="POSTs a synthetic PayResult to our own listener — proves the receive path works end-to-end. If this passes but real device callbacks still don't land, the issue is the device's callback URL config or Windows Firewall.">
+            {tngLooping ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />}
+            {tngLooping ? 'Looping…' : 'Test loopback'}
           </button>
           <button onClick={() => runTngPayRequest()} disabled={tngPinging || tngPayBusy || tngCancelBusy}
             className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
