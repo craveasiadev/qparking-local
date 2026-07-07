@@ -22,7 +22,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
-import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../shared/types';
+import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getLane, getScope, getSettings, getTerminal,
   listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,

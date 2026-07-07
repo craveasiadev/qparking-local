@@ -19,7 +19,7 @@ import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { getSettings } from './db';
+import { getSettings } from './services/db';
 
 export interface BuildVariantMeta {
   filename: string;

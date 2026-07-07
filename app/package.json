@@ -11,7 +11,7 @@
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "dev": "concurrently -k -n vite,electron -c blue,yellow \"npm:dev:vite\" \"npm:dev:electron\"",
     "dev:vite": "vite",
-    "dev:electron": "wait-on tcp:5173 && tsc -p src/main/tsconfig.json && cross-env NODE_ENV=development electron dist/main/index.js",
+    "dev:electron": "wait-on tcp:5173 && tsc -p src/main/tsconfig.json && node scripts/dev-electron.mjs",
     "build": "npm run build:renderer && npm run build:main",
     "build:renderer": "vite build",
     "build:main": "tsc -p src/main/tsconfig.json",

@@ -26,7 +26,7 @@ import {
   syncQueueStats, getSettings, getLane,
   type SyncOp,
 } from './db';
-import type { ParkingSession } from '../shared/types';
+import type { ParkingSession } from '../../shared/types';
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
 const MAX_ATTEMPTS = 6;

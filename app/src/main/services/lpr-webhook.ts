@@ -26,7 +26,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
 import { getCamera, listCameras } from './db';
-import type { LprCamera } from '../shared/types';
+import type { LprCamera } from '../../shared/types';
 
 export interface PlateEvent {
   cameraId: number;

@@ -80,35 +80,35 @@ import {
   updateSessionFields,
   listScopes, getScope,
   listParkingSpaces, listVehicleTypes, listVehicleGroups, listAllActivePasses,
-} from './db';
-import { computeFee, retriggerSessionExit } from './parking-flow';
+} from './services/db';
+import { computeFee, retriggerSessionExit } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
-} from './ecpi-terminal';
-import { startLprServer, lprEvents, simulatePlate } from './lpr-webhook';
-import { startParkingFlow, parkingEvents } from './parking-flow';
+} from './services/ecpi-terminal';
+import { startLprServer, lprEvents, simulatePlate } from './services/lpr-webhook';
+import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncScopes, pushScopeRate, syncSpaces, syncVehicleTypes, syncVehicleGroups,
   startGatePoll, setGateOpenHandler,
-} from './qparking-sync';
+} from './services/qparking-sync';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
-import { openFaceGate, pingFaceGate } from './face-gate';
+import { openFaceGate, pingFaceGate } from './services/face-gate';
 import {
   startSyncDrain, syncEvents, getSyncStatus, drainNow,
   enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete,
   backfillAllSessions,
-} from './sync-queue';
+} from './services/sync-queue';
 import {
   listFailedSync, retryAllFailedSync, clearFailedSync,
-} from './db';
-import { fetchSnapshot, pingCamera, startSnapshotUploader } from './camera-snapshots';
-import { pushCamera, pushAllCameras } from './camera-push';
-import { pushTerminal, pushLane, pushAllDevices } from './device-push';
+} from './services/db';
+import { fetchSnapshot, pingCamera, startSnapshotUploader } from './services/camera-snapshots';
+import { pushCamera, pushAllCameras } from './services/camera-push';
+import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
   pingDevice as tngPing, probeHttp as tngProbeHttp, loopbackPayResult as tngLoopback,
   w4gStatus, w4gEvents, newOrderId as newTngOrderId,
-} from './w4g-tng';
+} from './services/w4g-tng';
 import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -756,7 +756,7 @@ ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string) => {
   }
 });
 
-ipcMain.handle('diagnose:lpr', () => require('./lpr-webhook').diagnose());
+ipcMain.handle('diagnose:lpr', () => require('./services/lpr-webhook').diagnose());
 
 // Face-auth turnstile integration
 ipcMain.handle('faceGate:ping', () => pingFaceGate());

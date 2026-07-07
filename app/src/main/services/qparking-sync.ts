@@ -16,7 +16,7 @@ import {
   replaceParkingSpaces, replaceVehicleTypes, replaceVehicleGroups,
   pruneStaleScopes,
 } from './db';
-import type { ScopeRate, TariffRule, ActivePass, ParkingSpace, VehicleType, VehicleGroup } from '../shared/types';
+import type { ScopeRate, TariffRule, ActivePass, ParkingSpace, VehicleType, VehicleGroup } from '../../shared/types';
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
 

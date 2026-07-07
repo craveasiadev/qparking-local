@@ -12,7 +12,7 @@ import type {
   ActivePass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
   ParkingSpace, VehicleType, VehicleGroup,
-} from '../shared/types';
+} from '../../shared/types';
 
 let db: Database.Database | null = null;
 

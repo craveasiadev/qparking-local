@@ -25,7 +25,7 @@
 import { Socket } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { PaymentTerminal, TerminalConnState, TerminalStatus, EcpiEnvelope } from '../shared/types';
+import type { PaymentTerminal, TerminalConnState, TerminalStatus, EcpiEnvelope } from '../../shared/types';
 import { logTerminal } from './db';
 
 const HEARTBEAT_INTERVAL_MS = 25_000;
