@@ -13,10 +13,10 @@
  */
 import {
   getSettings, upsertScope, replaceActivePassesForScope, listScopes,
-  replaceParkingSpaces, replaceVehicleTypes, replaceVehicleGroups,
+  replaceParkingSpaces,
   pruneStaleScopes,
 } from './db';
-import type { ScopeRate, TariffRule, ActivePass, ParkingSpace, VehicleType, VehicleGroup } from '../../shared/types';
+import type { ScopeRate, TariffRule, ActivePass, ParkingSpace } from '../../shared/types';
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
 
@@ -46,7 +46,6 @@ export async function syncScopes(): Promise<SyncResult> {
             ruleId: String(r.rule_id ?? r.ruleId ?? ''),
             name: String(r.name ?? ''),
             priority: Number(r.priority ?? 0),
-            vehicleType: r.vehicle_type ?? r.vehicleType ?? null,
             daysOfWeek: Array.isArray(r.days_of_week ?? r.daysOfWeek)
               ? (r.days_of_week ?? r.daysOfWeek).map((n: any) => Number(n))
               : null,
@@ -93,6 +92,12 @@ export async function syncScopes(): Promise<SyncResult> {
         newDayFixedFeeCents: row.new_day_fixed_fee_cents !== undefined && row.new_day_fixed_fee_cents !== null
           ? Number(row.new_day_fixed_fee_cents)
           : null,
+        // 2026-07-08: parity fields with SaaS TariffCalculator. Absent on older
+        // cloud builds → null/false, which computeFee treats as the defaults
+        // (occupancy basis, sum flat mode, first block per cycle).
+        rateBasis: (row.rate_basis ?? row.rateBasis ?? null) as any,
+        flatMultiRate: (row.flat_multi_rate ?? row.flatMultiRate ?? null) as any,
+        firstBlockOncePerEntry: !!(row.first_block_once_per_entry ?? row.firstBlockOncePerEntry ?? false),
       };
       upsertScope(scope);
       count++;
@@ -207,62 +212,6 @@ export async function syncSpaces(): Promise<SyncResult> {
   }
 }
 
-/** Pull vehicle type taxonomy from the cloud. */
-export async function syncVehicleTypes(): Promise<SyncResult> {
-  const s = getSettings();
-  if (!s.qparkingBaseUrl || !s.qparkingApiKey) {
-    return { ok: false, fetched: 0, error: 'qparking_not_configured' };
-  }
-  const url = `${s.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server/vehicle-types`;
-  try {
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${s.qparkingApiKey}` } });
-    if (!res.ok) {
-      if (res.status === 404) return { ok: true, fetched: 0 };
-      return { ok: false, fetched: 0, error: `http_${res.status}` };
-    }
-    const body = await res.json() as { data?: any[] };
-    const rows: VehicleType[] = (body.data ?? []).map((r) => ({
-      id: String(r.id ?? ''),
-      typeName: String(r.type_name ?? ''),
-      hourlyRate: r.hourly_rate != null ? Number(r.hourly_rate) : null,
-      dailyRate: r.daily_rate != null ? Number(r.daily_rate) : null,
-      monthlyRate: r.monthly_rate != null ? Number(r.monthly_rate) : null,
-      groupName: r.group_name ?? null,
-      fetchedAt: new Date().toISOString(),
-    })).filter((t) => !!t.id);
-    replaceVehicleTypes(rows);
-    return { ok: true, fetched: rows.length };
-  } catch (e: any) {
-    return { ok: false, fetched: 0, error: e?.message ?? String(e) };
-  }
-}
-
-/** Pull vehicle group taxonomy from the cloud. */
-export async function syncVehicleGroups(): Promise<SyncResult> {
-  const s = getSettings();
-  if (!s.qparkingBaseUrl || !s.qparkingApiKey) {
-    return { ok: false, fetched: 0, error: 'qparking_not_configured' };
-  }
-  const url = `${s.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server/vehicle-groups`;
-  try {
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${s.qparkingApiKey}` } });
-    if (!res.ok) {
-      if (res.status === 404) return { ok: true, fetched: 0 };
-      return { ok: false, fetched: 0, error: `http_${res.status}` };
-    }
-    const body = await res.json() as { data?: any[] };
-    const rows: VehicleGroup[] = (body.data ?? []).map((r) => ({
-      id: String(r.id ?? ''),
-      name: String(r.name ?? ''),
-      fetchedAt: new Date().toISOString(),
-    })).filter((g) => !!g.id);
-    replaceVehicleGroups(rows);
-    return { ok: true, fetched: rows.length };
-  } catch (e: any) {
-    return { ok: false, fetched: 0, error: e?.message ?? String(e) };
-  }
-}
-
 /** Background sync. Default cadence: every 60 seconds — operators expect a
  *  rate edit in qparking SaaS to apply at the gate within ~1 minute, not the
  *  ~60 minutes the legacy interval enforced. Cheap (a handful of GETs),
@@ -274,15 +223,11 @@ export function startBackgroundSync(intervalMs = 60_000) {
     syncScopes().catch(() => null);
     syncPasses().catch(() => null);
     syncSpaces().catch(() => null);
-    syncVehicleTypes().catch(() => null);
-    syncVehicleGroups().catch(() => null);
   }, intervalMs);
   // Kick one off at startup, fire-and-forget.
   syncScopes().catch(() => null);
   syncPasses().catch(() => null);
   syncSpaces().catch(() => null);
-  syncVehicleTypes().catch(() => null);
-  syncVehicleGroups().catch(() => null);
 }
 
 export function stopBackgroundSync() {

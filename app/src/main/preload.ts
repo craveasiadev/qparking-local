@@ -87,9 +87,6 @@ const api = {
   // Mirrored config from qparking SaaS (read-only locally)
   listSpaces: () => ipcRenderer.invoke('spaces:list'),
   syncSpacesNow: () => ipcRenderer.invoke('spaces:sync'),
-  listVehicleTypes: () => ipcRenderer.invoke('vehicle-types:list'),
-  syncVehicleTypesNow: () => ipcRenderer.invoke('vehicle-types:sync'),
-  listVehicleGroups: () => ipcRenderer.invoke('vehicle-groups:list'),
   listActivePasses: () => ipcRenderer.invoke('passes:list'),
   saveScopeRate: (input: {
     firstBlockCents: number; perBlockCents: number;

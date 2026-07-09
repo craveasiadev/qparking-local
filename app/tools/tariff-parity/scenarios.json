@@ -1,0 +1,124 @@
+[
+  {
+    "id": "S1-simple-match",
+    "desc": "grace 0, one 24h block rule, first=sub minutes, 90min stay -> should MATCH",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-08T11:30:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S2-grace-charge-from-entry",
+    "desc": "grace 15 + charge_from_entry, 70min stay -> cloud bills from ENTRY, local from grace end",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-08T11:10:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 15, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S3-first-block-size",
+    "desc": "first_block_minutes 30 != subsequent 60, grace 0, 90min -> local uses sub minutes for first block",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-08T11:30:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 30, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S4-daily-cap-multiday",
+    "desc": "policy cap 4000c, ~50h stay -> cloud caps per-day, local caps whole session",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-10T12:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": 4000 },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 300, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S5-per-rule-cap",
+    "desc": "rule daily_cap 1000c, policy cap null, 10h stay -> cloud honors rule cap, local ignores it",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-08T20:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 300, "subsequent_block_minutes": 60, "daily_cap_cents": 1000, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S6-cutoff-new-day-fixed-fee",
+    "desc": "cutoff at 00:00 with new_day_fixed_fee, ~30h stay -> cloud adds fixed fee per cutoff, local ignores cutoff",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-09T16:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": true, "cutoff_time": "00:00:00", "cutoff_behavior": "new_day_fixed_fee", "new_day_fixed_fee_cents": 1500, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 300, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S7-rate-basis-entry",
+    "desc": "rate_basis=entry, enter daytime(500c/hr) exit night(200c/hr), 4h -> cloud uses entry rule whole stay, local prices per-window",
+    "entry": "2026-07-08T16:00:00+08:00",
+    "exit":  "2026-07-08T20:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "entry", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "Daytime", "priority": 10, "vehicle_type": null, "days_of_week": null, "time_from": "06:00:00", "time_to": "18:00:00", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 500, "first_block_minutes": 60, "subsequent_block_amount_cents": 500, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true },
+      { "name": "Night", "priority": 5, "vehicle_type": null, "days_of_week": null, "time_from": "18:00:00", "time_to": "06:00:00", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 200, "first_block_minutes": 60, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": true, "is_active": true }
+    ]
+  },
+  {
+    "id": "S8-flat-multi-day-sum",
+    "desc": "flat 500c rule (24h), flat_multi_rate=sum, ~30h stay across 2 days -> cloud sum dedups by rule (500 once), local charges per day window",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-09T16:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "Flat entry fee", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "flat_rate", "flat_amount_cents": 500, "first_block_amount_cents": 0, "first_block_minutes": 60, "subsequent_block_amount_cents": 0, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S3b-first-block-size-strong",
+    "desc": "first_block_minutes 120 (RM5) != subsequent 60 (RM2), grace 0, 90min -> cloud=one first block, local splits into 60min blocks",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-08T11:30:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 500, "first_block_minutes": 120, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S4b-daily-cap-with-cutoff",
+    "desc": "policy cap 4000c WITH cutoff enabled, ~50h stay -> cloud caps EACH day, local caps whole session once",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-10T12:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": true, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": 4000 },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 300, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
+    "id": "S9-simple-30min-within-first-block",
+    "desc": "grace 0, 45min stay under 60min first block -> both should charge one first block (control case)",
+    "entry": "2026-07-08T10:00:00+08:00",
+    "exit":  "2026-07-08T10:45:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "occupancy", "flat_multi_rate": "sum", "first_block_once_per_entry": false, "cutoff_enabled": false, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "All day", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:59", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  }
+]

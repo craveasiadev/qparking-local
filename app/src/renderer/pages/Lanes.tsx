@@ -88,14 +88,14 @@ export function Lanes() {
                 </select>
               </Field>
               <Field label="Lane type">
-                {/* Physical vehicle class this lane serves. Drives rate
-                    resolution: a motorcycle lane only picks rules with
-                    vehicle_type='motorcycle' or vehicle_type=null. Mixed
-                    lanes disable the class filter entirely. */}
+                {/* Descriptive label for the physical lane only (mirrored to
+                    the cloud equipment map). It does NOT affect pricing —
+                    fees are driven solely by the assigned rate plan's
+                    day/time/date rules. */}
                 <select className="input" value={editing.laneType ?? 'car'} onChange={(e) => setEditing({ ...editing, laneType: e.target.value as ParkingLane['laneType'] })}>
                   <option value="car">Car</option>
                   <option value="motorcycle">Motorcycle</option>
-                  <option value="mixed">Mixed (no class filter)</option>
+                  <option value="mixed">Mixed</option>
                 </select>
               </Field>
               <Field label="Rate plan">

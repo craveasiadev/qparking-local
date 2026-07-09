@@ -171,16 +171,14 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
-  // Compute fee from scope rate. `vehicleType` context flows from the
-  // lane geometry — a motorcycle-only lane pins the class regardless of
-  // what the LPR camera saw. Mixed lanes send null (no vehicle_type
-  // filter) so a rule without a class still applies. See ruleForMoment.
+  // Compute fee from the lane's scope rate. Pricing is lane-based only —
+  // the lane binds to a rate policy (scope) whose rules are scoped by
+  // day/time/date. There is no vehicle-type dimension.
   const scope = lane.scopeId ? getScope(lane.scopeId) : null;
-  const vehicleType = deriveVehicleType(lane);
   const entryMs = Date.parse(session.entryAt);
   const exitMs = Date.now();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  let feeCents = computeFee(durationMinutes, scope, session.entryAt, vehicleType);
+  let feeCents = computeFee(durationMinutes, scope, session.entryAt);
 
   // ─── Active-pass shortcut ────────────────────────────────────────────
   // Before driving the terminal, see if this plate is on the cached pass
@@ -745,7 +743,6 @@ export function computeFee(
   durationMinutes: number,
   scope: ScopeRate | null,
   entryAt?: string | Date,
-  vehicleType?: string | null,
 ): number {
   if (!scope) return 0;
 
@@ -759,146 +756,290 @@ export function computeFee(
     return cents;
   }
 
-  // Schedule-driven path.
+  // Schedule-driven path. This is a 1:1 port of the qparking SaaS
+  // App\Services\TariffCalculator so the on-prem gate charges exactly what the
+  // cloud simulator / invoice would: grace behaviour, cut-off billing cycles,
+  // rate_basis (entry vs occupancy), flat-rate combining modes, and per-rule +
+  // policy daily caps. A parity harness lives in app/tools/tariff-parity.
   const exitMs = Date.now();
-  const baseEntryMs = entryAt ? new Date(entryAt as any).getTime() : exitMs - durationMinutes * 60_000;
-  const totalMs = exitMs - baseEntryMs;
-  if (totalMs <= 0) return 0;
+  const entryMs = entryAt ? new Date(entryAt as any).getTime() : exitMs - durationMinutes * 60_000;
+  if (exitMs <= entryMs) return 0;
 
-  // Apply policy-level grace first (free minutes from the start of the session).
-  const graceMs = Math.max(0, scope.freeMinutes) * 60_000;
-  if (totalMs <= graceMs) return 0;
-  const billableStartMs = baseEntryMs + graceMs;
-  const billableEndMs = exitMs;
+  // Grace: within the grace window the whole stay is free. Mirrors the cloud's
+  // `duration_minutes <= grace_minutes` check (integer minutes).
+  const durMin = diffFloorMinutes(entryMs, exitMs);
+  const grace = Math.max(0, scope.freeMinutes || 0);
+  if (durMin <= grace) return 0;
 
-  // Walk the billable window in <=60-minute slices and bill each minute under
-  // the matching rule. Slicing this fine keeps the math simple and lets cross-
-  // midnight / cross-window sessions get the right rate per segment without a
-  // custom interval-intersection routine.
-  let cents = 0;
-  let cursorMs = billableStartMs;
-  let blockIndex = 0;
-  // For block_hourly rules we apply firstBlockAmount only on the first block
-  // of the session; subsequent blocks use subsequentBlockAmount. Mixing rules
-  // mid-session: each rule's per-block charge applies to its segment.
-  while (cursorMs < billableEndMs) {
-    const ruleForCursor = ruleForMoment(scope.rules, new Date(cursorMs), vehicleType);
-    if (!ruleForCursor) {
-      // No rule matches this moment — treat as free time.
-      cursorMs += 60_000;
-      continue;
+  // Billing start: ONLY 'charge_from_grace_end' bills from the grace boundary;
+  // every other value (including the cloud default 'charge_from_entry') bills
+  // from the entry instant once grace is exceeded.
+  const billStartMs = scope.graceExceededBehavior === 'charge_from_grace_end'
+    ? entryMs + grace * 60_000
+    : entryMs;
+
+  // rate_basis 'entry' — the rule covering the ENTRY moment governs the entire
+  // stay (early-bird pricing). Clone it as an all-day rule.
+  let rulesForStay = scope.rules;
+  if ((scope.rateBasis ?? 'occupancy') === 'entry') {
+    const entryRule = pickRuleAtMoment(entryMs, scope.rules, false);
+    if (entryRule) {
+      rulesForStay = [{
+        ...entryRule,
+        timeFrom: '00:00:00',
+        timeTo: '23:59:59',
+        daysOfWeek: null,
+        validFrom: null,
+        validTo: null,
+        isOvernight: false,
+      }];
     }
-    if (ruleForCursor.ruleType === 'flat_rate') {
-      // Flat rules charge once per session segment they apply to. Add the flat
-      // amount the first time we hit this rule, then jump to the rule's window
-      // boundary so we don't double-charge.
-      cents += ruleForCursor.flatAmountCents;
-      cursorMs = nextBoundaryMs(ruleForCursor, cursorMs, billableEndMs);
-      continue;
-    }
-    // Block-hourly. Advance by one block (or until window end / exit, whichever first).
-    const blockMin = Math.max(1, ruleForCursor.subsequentBlockMinutes || ruleForCursor.firstBlockMinutes || 60);
-    const blockMs = blockMin * 60_000;
-    const segmentEnd = Math.min(cursorMs + blockMs, billableEndMs, nextBoundaryMs(ruleForCursor, cursorMs, billableEndMs));
-    const usedMin = Math.ceil((segmentEnd - cursorMs) / 60_000);
-    if (usedMin <= 0) {
-      cursorMs += 60_000;
-      continue;
-    }
-    const blocksThisSegment = Math.ceil(usedMin / blockMin);
-    for (let i = 0; i < blocksThisSegment; i++) {
-      cents += blockIndex === 0 ? ruleForCursor.firstBlockAmountCents : ruleForCursor.subsequentBlockAmountCents;
-      blockIndex++;
-    }
-    // Apply per-rule cap for this rule's contribution within the day. The
-    // policy-level cap is enforced below.
-    cursorMs = segmentEnd;
   }
 
-  // Policy-level daily cap.
-  if (scope.dailyCapCents > 0 && cents > scope.dailyCapCents) cents = scope.dailyCapCents;
-  return cents;
+  const cycles = buildBillingCycles(billStartMs, exitMs, scope);
+  // first_block_once_per_entry only matters across cut-off cycles.
+  const carryBlocks = !!scope.firstBlockOncePerEntry && !!scope.cutoffEnabled;
+  const flatMode = ['sum', 'entry', 'highest', 'per_day'].includes(scope.flatMultiRate ?? 'sum')
+    ? (scope.flatMultiRate ?? 'sum')
+    : 'sum';
+  // Local stores an uncapped policy as 0, and the cloud wire format also sends
+  // 0 for "no cap" (null coalesced). So only a value > 0 is a real cap.
+  const policyCap = scope.dailyCapCents && scope.dailyCapCents > 0 ? scope.dailyCapCents : null;
+
+  let total = 0;
+  let blockMinutes = 0;
+  for (let idx = 0; idx < cycles.length; idx++) {
+    const [cs, ce] = cycles[idx];
+    // On every cut-off crossing under 'new_day_fixed_fee', charge the fixed fee
+    // for the new day instead of pricing the cycle by time.
+    if (idx > 0 && scope.cutoffBehavior === 'new_day_fixed_fee') {
+      total += scope.newDayFixedFeeCents ?? 0;
+      continue;
+    }
+    const preferOvernight = idx > 0 && scope.cutoffBehavior === 'overnight_tariff';
+    const res = priceBillingCycle(
+      cs, ce, rulesForStay, preferOvernight, policyCap,
+      carryBlocks ? blockMinutes : 0, flatMode,
+    );
+    if (carryBlocks) blockMinutes = res.blockMinutesAfter;
+    total += res.total;
+  }
+  return total;
 }
 
-/** First boundary moment after `cursorMs` where the matching rule could change.
- *  Boundaries are the rule's time_to (end of its current window) and midnight.
- *  Capped at `billableEndMs` so we never project past the session. */
-function nextBoundaryMs(rule: TariffRule, cursorMs: number, billableEndMs: number): number {
-  const d = new Date(cursorMs);
-  // End of today.
-  const endOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
-  // End of the rule's current time window.
-  const [eh, em, es] = rule.timeTo.split(':').map((n) => Number(n));
-  const windowEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), eh || 0, em || 0, es || 0).getTime();
-  // If timeTo is before timeFrom the window wraps past midnight.
-  const [sh, sm] = rule.timeFrom.split(':').map((n) => Number(n));
-  const windowStartToday = new Date(d.getFullYear(), d.getMonth(), d.getDate(), sh || 0, sm || 0, 0).getTime();
-  const wraps = rule.timeTo <= rule.timeFrom;
-  const resolvedWindowEnd = wraps && cursorMs >= windowStartToday
-    ? new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, eh || 0, em || 0, es || 0).getTime()
-    : windowEnd;
-  const candidates = [endOfDay, resolvedWindowEnd, billableEndMs]
-    .filter((ms) => ms > cursorMs);
-  return Math.min(...candidates);
+// ─── fee-calc internals (1:1 mirror of SaaS App\Services\TariffCalculator) ───
+// All date math is LOCAL-time (the site's timezone), matching how the on-prem
+// gate perceives entry/exit. Kept intentionally close to the PHP structure so
+// the two implementations can be diffed line-for-line.
+
+/** yyyy-MM-dd in LOCAL time (not UTC — matters for day-of-week / validity). */
+function ymdLocal(ms: number): string {
+  const d = new Date(ms); const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+/** HH:mm:ss in LOCAL time. */
+function hmsLocal(ms: number): string {
+  const d = new Date(ms); const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function startOfNextDayMs(ms: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+}
+function setTimeOnMs(ms: number, h: number, m: number, s: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, s, 0).getTime();
+}
+function addOneDayMs(ms: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, d.getHours(), d.getMinutes(), d.getSeconds(), 0).getTime();
+}
+/** Truncated (floor) whole minutes, matching Carbon's `(int) diffInMinutes`. */
+function diffFloorMinutes(aMs: number, bMs: number): number {
+  return Math.floor((bMs - aMs) / 60_000);
+}
+/** '23:59'/'23:59:59' → '24:00:00' (end-of-day sentinel); pad 'HH:mm'. */
+function normTime(v: string): string {
+  let s = String(v ?? '');
+  if (s.length === 5) s += ':00';
+  if (s === '23:59:00' || s === '23:59:59') return '24:00:00';
+  return s;
+}
+
+/** Does `rule` cover the given moment? (validity / day-of-week / time window) */
+function ruleMatchesAtMoment(r: TariffRule, atMs: number): boolean {
+  if (r.isActive === false) return false;
+  const date = ymdLocal(atMs);
+  if (r.validFrom && date < r.validFrom) return false;
+  if (r.validTo && date > r.validTo) return false;
+  if (Array.isArray(r.daysOfWeek) && r.daysOfWeek.length > 0) {
+    if (!r.daysOfWeek.includes(new Date(atMs).getDay())) return false;
+  }
+  const now = hmsLocal(atMs);
+  const from = normTime(r.timeFrom);
+  const to = normTime(r.timeTo);
+  if (from === to) return true;
+  if (from < to) return now >= from && now < to;
+  return now >= from || now < to; // wraps past midnight
+}
+
+/** Highest-priority matching rule at `atMs`; ties broken by overnight. */
+function pickRuleAtMoment(
+  atMs: number, rules: TariffRule[], preferOvernight: boolean,
+): TariffRule | null {
+  let matches = rules.filter((r) => ruleMatchesAtMoment(r, atMs));
+  if (matches.length === 0) return null;
+  if (preferOvernight) {
+    const on = matches.filter((r) => r.isOvernight);
+    if (on.length > 0) matches = on;
+  }
+  return matches.slice().sort((a, b) => {
+    if (a.priority !== b.priority) return b.priority - a.priority;
+    return (b.isOvernight ? 1 : 0) - (a.isOvernight ? 1 : 0);
+  })[0];
+}
+
+/** Next moment in (cursor, cycleEnd] where the effective rule could change. */
+function nextBoundaryMsV2(cursorMs: number, cycleEndMs: number, rule: TariffRule): number {
+  const candidates: number[] = [cycleEndMs];
+  const to = normTime(rule.timeTo);
+  const from = normTime(rule.timeFrom);
+  let ruleEnd: number;
+  if (to === '24:00:00') {
+    ruleEnd = startOfNextDayMs(cursorMs);
+  } else {
+    const [h, m, s] = to.split(':').map((n) => Number(n));
+    ruleEnd = setTimeOnMs(cursorMs, h || 0, m || 0, s || 0);
+  }
+  if (from < to) {
+    if (ruleEnd <= cursorMs) ruleEnd = addOneDayMs(ruleEnd);
+  } else {
+    // Wrapping window (e.g. 22:00 → 06:00).
+    if (!(hmsLocal(cursorMs) < to)) ruleEnd = addOneDayMs(ruleEnd);
+  }
+  candidates.push(ruleEnd);
+  candidates.push(startOfNextDayMs(cursorMs)); // re-check day-of-week / validity
+  let earliest: number | null = null;
+  for (const c of candidates) {
+    if (c > cursorMs && (earliest === null || c < earliest)) earliest = c;
+  }
+  return earliest ?? cycleEndMs;
+}
+
+/** Cost of a block-hourly segment. `prior` = block-minutes already billed in
+ *  the stay (so the first-block premium is charged at most once when carried). */
+function priceBlockHourlyCents(minutes: number, rule: TariffRule, prior = 0): number {
+  if (minutes <= 0) return 0;
+  const firstAmt = rule.firstBlockAmountCents || 0;
+  const firstMin = Math.max(1, rule.firstBlockMinutes || 60);
+  const subAmt = rule.subsequentBlockAmountCents || 0;
+  const subMin = Math.max(1, rule.subsequentBlockMinutes || 60);
+  if (prior >= firstMin) return Math.ceil(minutes / subMin) * subAmt;
+  if (prior + minutes <= firstMin) return firstAmt;
+  const extra = (prior + minutes) - firstMin;
+  return firstAmt + Math.ceil(extra / subMin) * subAmt;
+}
+
+/** Split [start, end] into billing cycles at each cut-off crossing. */
+function buildBillingCycles(startMs: number, endMs: number, scope: ScopeRate): Array<[number, number]> {
+  if (!scope.cutoffEnabled) return [[startMs, endMs]];
+  const parts = String(scope.cutoffTime ?? '00:00:00').split(':');
+  const h = Number(parts[0]) || 0, m = Number(parts[1]) || 0, s = Number(parts[2]) || 0;
+  const cycles: Array<[number, number]> = [];
+  let segStart = startMs;
+  let next = setTimeOnMs(segStart, h, m, s);
+  if (next <= segStart) next = addOneDayMs(next);
+  let guard = 0;
+  while (next < endMs && guard++ < 3660) {
+    cycles.push([segStart, next]);
+    segStart = next;
+    next = addOneDayMs(next);
+  }
+  cycles.push([segStart, endMs]);
+  return cycles;
+}
+
+/** Price one billing cycle, walking rule boundaries within it. */
+function priceBillingCycle(
+  cycleStartMs: number, cycleEndMs: number,
+  rules: TariffRule[], preferOvernight: boolean,
+  policyCapCents: number | null, priorBlockMinutes: number, flatMode: string,
+): { total: number; blockMinutesAfter: number } {
+  const segs: Array<{ ruleId: string; isFlat: boolean; amount: number }> = [];
+  const flatSegIdx: number[] = [];
+  const ruleCaps: Record<string, number> = {}; // block_hourly rule id → cap (>0)
+  let blockMinutes = priorBlockMinutes;
+  let hasHourly = false;
+  let cursor = cycleStartMs;
+  let guard = 0;
+  while (cursor < cycleEndMs && guard++ < 100_000) {
+    const rule = pickRuleAtMoment(cursor, rules, preferOvernight);
+    if (!rule) {
+      // The cloud THROWS on an uncovered moment (misconfiguration). The gate
+      // must never crash mid-exit, so we skip the uncovered span as free time.
+      cursor = Math.min(startOfNextDayMs(cursor), cycleEndMs);
+      continue;
+    }
+    const boundary = nextBoundaryMsV2(cursor, cycleEndMs, rule);
+    const segMinutes = diffFloorMinutes(cursor, boundary);
+    const isFlat = rule.ruleType === 'flat_rate';
+    let amount: number;
+    if (isFlat) {
+      amount = rule.flatAmountCents || 0;
+    } else {
+      amount = priceBlockHourlyCents(segMinutes, rule, blockMinutes);
+      blockMinutes += segMinutes;
+      hasHourly = true;
+      if ((rule.dailyCapCents || 0) > 0) ruleCaps[rule.ruleId] = rule.dailyCapCents;
+    }
+    segs.push({ ruleId: rule.ruleId, isFlat, amount });
+    if (isFlat) flatSegIdx.push(segs.length - 1);
+    cursor = boundary;
+  }
+
+  // Combine flat charges across segments per flat_multi_rate.
+  if (flatSegIdx.length > 0) {
+    if (flatMode === 'per_day') {
+      // keep every day-segment's flat charge
+    } else if (flatMode === 'entry') {
+      const keep = flatSegIdx[0];
+      for (const si of flatSegIdx) if (si !== keep) segs[si].amount = 0;
+    } else if (flatMode === 'highest') {
+      let keep = flatSegIdx[0];
+      for (const si of flatSegIdx) if (segs[si].amount > segs[keep].amount) keep = si;
+      for (const si of flatSegIdx) if (si !== keep) segs[si].amount = 0;
+    } else { // 'sum' — each distinct flat rule once
+      const seen = new Set<string>();
+      for (const si of flatSegIdx) {
+        if (seen.has(segs[si].ruleId)) segs[si].amount = 0;
+        else seen.add(segs[si].ruleId);
+      }
+    }
+  }
+
+  let total = segs.reduce((a, sg) => a + sg.amount, 0);
+
+  // Caps apply to time-billed cycles only: min of every applied per-rule cap
+  // and the policy cap.
+  const caps: number[] = Object.values(ruleCaps);
+  if (policyCapCents !== null) caps.push(policyCapCents);
+  if (hasHourly && caps.length > 0) {
+    const cap = Math.min(...caps);
+    if (total > cap) total = cap;
+  }
+
+  return { total, blockMinutesAfter: blockMinutes };
 }
 
 /**
- * Pick the highest-priority rule whose day-of-week + time window + date
- * range + vehicle_type all cover the given moment.
- *
- * `vehicleType` context: LPR alone can't tell a car from a motorcycle from
- * a plate photo, so we NEVER apply a rule's `vehicle_type` filter based on
- * an inferred class. The context is trustworthy only when:
- *   (a) the plate matches a registered Vehicle (known type from cloud), OR
- *   (b) the physical lane the session used is single-class (e.g. a
- *       motorcycle-only lane geometry naturally enforces the class).
- * When neither applies, `vehicleType` is null and we treat vehicle_type
- * as a wildcard so an over-restrictive rule doesn't leak charges through
- * (default rule with no vehicle_type still wins).
- *
- * Mirrors LocalServerController.effectiveRuleFor on the SaaS side so the
- * local app's math agrees with the cloud preview.
+ * Back-compat wrapper — some call sites import `ruleForMoment` directly.
+ * Delegates to the parity-correct picker (occupancy semantics).
  */
 export function ruleForMoment(
   rules: TariffRule[],
   when: Date,
-  vehicleType?: string | null,
 ): TariffRule | null {
-  const weekday = when.getDay();
-  const hh = String(when.getHours()).padStart(2, '0');
-  const mm = String(when.getMinutes()).padStart(2, '0');
-  const ss = String(when.getSeconds()).padStart(2, '0');
-  const time = `${hh}:${mm}:${ss}`;
-  const date = when.toISOString().slice(0, 10);
-
-  const matches = rules.filter((r) => {
-    if (r.isActive === false) return false;
-    if (r.validFrom && r.validFrom > date) return false;
-    if (r.validTo && r.validTo < date) return false;
-    if (Array.isArray(r.daysOfWeek) && r.daysOfWeek.length > 0 && !r.daysOfWeek.includes(weekday)) return false;
-    // vehicle_type filter — only enforced when we HAVE a trustworthy class.
-    // Rules without a vehicle_type (null/empty) always match. Rules with
-    // a specific type only match when the context vehicleType is that
-    // same type; unknown context ignores the filter (see docblock).
-    if (r.vehicleType && vehicleType && r.vehicleType !== vehicleType) return false;
-    const from = r.timeFrom;
-    const to = r.timeTo === '23:59:59' || r.timeTo === '23:59:00' ? '24:00:00' : r.timeTo;
-    if (from === to) return true;
-    if (from < to) return time >= from && time < to;
-    return time >= from || time < to;
-  });
-
-  if (matches.length === 0) return null;
-  matches.sort((a, b) => {
-    if (a.priority !== b.priority) return b.priority - a.priority;
-    // When priority ties, a rule that SPECIFIES the session's vehicle_type
-    // beats a wildcard — the class-specific rate is more specific.
-    const aTypeSpecific = a.vehicleType && vehicleType && a.vehicleType === vehicleType;
-    const bTypeSpecific = b.vehicleType && vehicleType && b.vehicleType === vehicleType;
-    if (aTypeSpecific !== bTypeSpecific) return aTypeSpecific ? -1 : 1;
-    return (b.isOvernight ? 1 : 0) - (a.isOvernight ? 1 : 0);
-  });
-  return matches[0];
+  return pickRuleAtMoment(when.getTime(), rules, false);
 }
 
 /** Convert a stored ISO timestamp to the terminal-friendly "yyyy-MM-dd HH:mm:ss". */
@@ -918,29 +1059,8 @@ export function previewFee(plate: string): { found: boolean; sessionId?: number;
   const lane = listLanes().find((l) => l.id === session.entryLaneId);
   const scope = lane?.scopeId ? getScope(lane.scopeId) : null;
   const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
-  const vehicleType = lane ? deriveVehicleType(lane) : null;
-  const feeCents = computeFee(durationMinutes, scope, session.entryAt, vehicleType);
+  const feeCents = computeFee(durationMinutes, scope, session.entryAt);
   return { found: true, sessionId: session.id, durationMinutes, feeCents, scope };
-}
-
-/**
- * Determine the vehicle_type context we can trust for rate resolution.
- * See ruleForMoment's docblock for why we don't infer from LPR.
- *
- *   • motorcycle-only lane  → 'motorcycle'
- *   • car-only lane         → 'car'
- *   • mixed lane            → null (no filter — rule vehicle_type ignored)
- *
- * Later we can widen this to also consult a plate→registered-vehicle map
- * (once local caches the vehicle registry) so an EV driving through a
- * mixed lane still picks an EV-specific rate. For now the lane is the
- * only source of truth we have that's reliable at exit time.
- */
-function deriveVehicleType(lane: ParkingLane | null | undefined): string | null {
-  if (!lane) return null;
-  const t = lane.laneType ?? 'car';
-  if (t === 'mixed') return null;
-  return t;
 }
 
 /**

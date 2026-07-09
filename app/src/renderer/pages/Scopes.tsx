@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Car, Cloud, Star } from 'lucide-react';
+import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Cloud, Star } from 'lucide-react';
 import type { ScopeRate, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -345,21 +345,12 @@ function ruleMatchesNow(r: TariffRule): boolean {
 function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: boolean }) {
   const rules = [...(scope.rules ?? [])].sort((a, b) => b.priority - a.priority);
 
-  // Group by vehicle_type for readability (matches the cloud UI layout).
-  const groups = new Map<string, TariffRule[]>();
-  for (const r of rules) {
-    const key = r.vehicleType || 'All vehicles';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(r);
-  }
-
-  // Find the single "active now" rule per vehicle group (highest priority match
-  // AMONGST is_active=true rules). Mirrors the exit-flow rule selection.
+  // Find the single "active now" rule (highest-priority match amongst
+  // is_active=true rules). Mirrors the exit-flow rule selection — pricing is
+  // scoped by day/time/date only, no vehicle-type dimension.
   const activeIds = new Set<string>();
-  for (const [, list] of groups) {
-    const match = list.find((r) => r.isActive !== false && ruleMatchesNow(r));
-    if (match) activeIds.add(match.ruleId);
-  }
+  const match = rules.find((r) => r.isActive !== false && ruleMatchesNow(r));
+  if (match) activeIds.add(match.ruleId);
 
   return (
     <div className="space-y-3">
@@ -387,11 +378,7 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
         </div>
       </div>
 
-      {Array.from(groups.entries()).map(([vehicle, list]) => (
-        <div key={vehicle}>
-          <div className="flex items-center gap-1.5 mb-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-500">
-            <Car size={11} /> {vehicle}
-          </div>
+      <div>
           <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
             <table className="w-full text-[12px]">
               <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
@@ -406,7 +393,7 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
                 </tr>
               </thead>
               <tbody>
-                {list.map((r) => {
+                {rules.map((r) => {
                   const active = activeIds.has(r.ruleId);
                   const disabled = r.isActive === false;
                   return (
@@ -435,8 +422,7 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
               </tbody>
             </table>
           </div>
-        </div>
-      ))}
+      </div>
       <p className="text-[10px] text-gray-400">
         Rules are read-only here — edit them in qparking SaaS (Pricing &amp; Tariffs). The local exit-flow picks the highest-priority rule matching the session's moment.
       </p>

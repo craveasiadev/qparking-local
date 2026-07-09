@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown,
-  Ticket, Grid3x3, Truck,
+  Ticket, Grid3x3,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -13,14 +13,13 @@ import { Sessions } from './pages/Sessions';
 import { Settings } from './pages/Settings';
 import { Passes } from './pages/Passes';
 import { Spaces } from './pages/Spaces';
-import { VehicleTypes } from './pages/VehicleTypes';
 
 type Page =
   | 'dashboard' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
   // Parking Management
   | 'spaces' | 'passes'
   // Pricing & Tariffs
-  | 'scopes' | 'vehicle-types'
+  | 'scopes'
   // System
   | 'settings';
 
@@ -53,7 +52,6 @@ const SECTIONS: NavSection[] = [
     key: 'pricing', label: 'Pricing & tariffs',
     items: [
       { id: 'scopes',           label: 'Rate plans',        icon: Tag },
-      { id: 'vehicle-types',    label: 'Vehicle types',     icon: Truck },
     ],
   },
   {
@@ -170,7 +168,6 @@ export function App() {
           {page === 'spaces' && <Spaces />}
           {page === 'passes' && <Passes />}
           {page === 'scopes' && <Scopes />}
-          {page === 'vehicle-types' && <VehicleTypes />}
           {page === 'settings' && <Settings />}
         </div>
         <div className="flex-shrink-0 bg-gray-950 text-white border-t border-white/10">

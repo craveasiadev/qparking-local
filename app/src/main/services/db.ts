@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 import type {
   ActivePass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
-  ParkingSpace, VehicleType, VehicleGroup,
+  ParkingSpace,
 } from '../../shared/types';
 
 let db: Database.Database | null = null;
@@ -120,7 +120,6 @@ function applySchema(d: Database.Database) {
       scope_id TEXT NOT NULL,
       name TEXT NOT NULL,
       priority INTEGER NOT NULL DEFAULT 0,
-      vehicle_type TEXT,
       days_of_week TEXT,                -- JSON array of ints, NULL = all days
       time_from TEXT NOT NULL DEFAULT '00:00:00',
       time_to TEXT NOT NULL DEFAULT '23:59:59',
@@ -213,25 +212,15 @@ function applySchema(d: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_spaces_building ON parking_spaces (building);
     CREATE INDEX IF NOT EXISTS idx_spaces_status ON parking_spaces (status);
-
-    -- Cached vehicle type taxonomy. Per-site config from qparking SaaS.
-    CREATE TABLE IF NOT EXISTS vehicle_types (
-      id TEXT PRIMARY KEY,
-      type_name TEXT NOT NULL,
-      hourly_rate REAL,
-      daily_rate REAL,
-      monthly_rate REAL,
-      group_name TEXT,
-      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- Cached vehicle group taxonomy. Global lookup from qparking SaaS.
-    CREATE TABLE IF NOT EXISTS vehicle_groups (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
   `);
+
+  // 2026-07-09: the cloud retired the vehicle-type concept — pricing is now
+  // purely lane → rate policy → day/time/date. Drop the cached taxonomy tables
+  // and the vehicle_type column on tariff_rules on installs that still have
+  // them. All idempotent / best-effort (DROP COLUMN needs SQLite ≥ 3.35).
+  try { d.exec('DROP TABLE IF EXISTS vehicle_types'); } catch { /* ignore */ }
+  try { d.exec('DROP TABLE IF EXISTS vehicle_groups'); } catch { /* ignore */ }
+  try { d.exec('ALTER TABLE tariff_rules DROP COLUMN vehicle_type'); } catch { /* column absent or old SQLite */ }
 
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
@@ -271,6 +260,11 @@ function applySchema(d: Database.Database) {
     // 2026-06-22: 3-tab Pricing redesign in qparking SaaS adds these.
     'policy_description TEXT',
     'new_day_fixed_fee_cents INTEGER',
+    // 2026-07-08: parity with SaaS TariffCalculator — anchoring, flat-rate
+    // combining, and once-per-entry first block.
+    'rate_basis TEXT',
+    'flat_multi_rate TEXT',
+    'first_block_once_per_entry INTEGER NOT NULL DEFAULT 0',
   ]) {
     try { d.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
@@ -279,10 +273,10 @@ function applySchema(d: Database.Database) {
   // inactive rules even if they technically match the moment.
   try { d.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
 
-  // 2026-07-03: lane_type distinguishes car / motorcycle / mixed lanes so
-  // motorcycle-only lanes can bind to motorcycle-rate rules without the LPR
-  // having to identify the vehicle from a plate photo (which it can't do
-  // reliably). Mixed lanes fall back to a rule's default vehicle_type match.
+  // 2026-07-03: lane_type distinguishes car / motorcycle / mixed lanes.
+  // Descriptive lane metadata mirrored from the cloud only — as of 2026-07-09
+  // it has NO effect on pricing (fees are lane → rate policy → day/time/date;
+  // the vehicle-type dimension was retired).
   try { d.exec(`ALTER TABLE lanes ADD COLUMN lane_type TEXT NOT NULL DEFAULT 'car'`); } catch { /* already there */ }
 }
 
@@ -742,6 +736,9 @@ function rowToScope(r: any, rules: TariffRule[] = []): ScopeRate {
     cutoffTime: r.cutoff_time ?? null,
     cutoffBehavior: r.cutoff_behavior ?? null,
     newDayFixedFeeCents: r.new_day_fixed_fee_cents ?? null,
+    rateBasis: (r.rate_basis ?? null) as any,
+    flatMultiRate: (r.flat_multi_rate ?? null) as any,
+    firstBlockOncePerEntry: !!r.first_block_once_per_entry,
     rules,
   };
 }
@@ -750,7 +747,6 @@ function rowToTariffRule(r: any): TariffRule {
   return {
     ruleId: r.rule_id, name: r.name,
     priority: r.priority,
-    vehicleType: r.vehicle_type ?? null,
     daysOfWeek: r.days_of_week ? JSON.parse(r.days_of_week) : null,
     timeFrom: r.time_from, timeTo: r.time_to,
     validFrom: r.valid_from ?? null, validTo: r.valid_to ?? null,
@@ -795,8 +791,9 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         scope_id, scope_name, free_minutes, first_block_cents, per_block_cents,
         block_minutes, daily_cap_cents, currency, fetched_at,
         policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
-        policy_description, new_day_fixed_fee_cents
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        policy_description, new_day_fixed_fee_cents,
+        rate_basis, flat_multi_rate, first_block_once_per_entry
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_id) DO UPDATE SET
         scope_name=excluded.scope_name,
         free_minutes=excluded.free_minutes,
@@ -813,27 +810,30 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         cutoff_time=excluded.cutoff_time,
         cutoff_behavior=excluded.cutoff_behavior,
         policy_description=excluded.policy_description,
-        new_day_fixed_fee_cents=excluded.new_day_fixed_fee_cents`)
+        new_day_fixed_fee_cents=excluded.new_day_fixed_fee_cents,
+        rate_basis=excluded.rate_basis,
+        flat_multi_rate=excluded.flat_multi_rate,
+        first_block_once_per_entry=excluded.first_block_once_per_entry`)
       .run(
         s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents,
         s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt,
         s.policyId ?? null, s.policyName ?? null, s.graceExceededBehavior ?? null,
         s.cutoffEnabled ? 1 : 0, s.cutoffTime ?? null, s.cutoffBehavior ?? null,
         s.policyDescription ?? null, s.newDayFixedFeeCents ?? null,
+        s.rateBasis ?? null, s.flatMultiRate ?? null, s.firstBlockOncePerEntry ? 1 : 0,
       );
 
     d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(s.scopeId);
     const insertRule = d.prepare(`INSERT INTO tariff_rules (
-        rule_id, scope_id, name, priority, vehicle_type, days_of_week,
+        rule_id, scope_id, name, priority, days_of_week,
         time_from, time_to, valid_from, valid_to, rule_type,
         flat_amount_cents, first_block_amount_cents, first_block_minutes,
         subsequent_block_amount_cents, subsequent_block_minutes,
         daily_cap_cents, is_overnight, is_active, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
     for (const r of s.rules ?? []) {
       insertRule.run(
         r.ruleId, s.scopeId, r.name, r.priority,
-        r.vehicleType ?? null,
         r.daysOfWeek ? JSON.stringify(r.daysOfWeek) : null,
         r.timeFrom, r.timeTo,
         r.validFrom ?? null, r.validTo ?? null,
@@ -973,56 +973,6 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
         s.startDate, s.endDate, s.notes,
       );
     }
-  });
-  tx();
-}
-
-// ─── vehicle types + groups (mirror) ───────────────────────────────────────
-
-function rowToVehicleType(r: any): VehicleType {
-  return {
-    id: r.id,
-    typeName: r.type_name,
-    hourlyRate: r.hourly_rate ?? null,
-    dailyRate: r.daily_rate ?? null,
-    monthlyRate: r.monthly_rate ?? null,
-    groupName: r.group_name ?? null,
-    fetchedAt: r.fetched_at,
-  };
-}
-
-export function listVehicleTypes(): VehicleType[] {
-  return (getDb().prepare('SELECT * FROM vehicle_types ORDER BY type_name').all() as any[]).map(rowToVehicleType);
-}
-
-export function replaceVehicleTypes(types: VehicleType[]): void {
-  const d = getDb();
-  const tx = d.transaction(() => {
-    d.prepare('DELETE FROM vehicle_types').run();
-    const insert = d.prepare(`INSERT INTO vehicle_types (
-        id, type_name, hourly_rate, daily_rate, monthly_rate, group_name, fetched_at
-      ) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const t of types) {
-      insert.run(t.id, t.typeName, t.hourlyRate, t.dailyRate, t.monthlyRate, t.groupName);
-    }
-  });
-  tx();
-}
-
-function rowToVehicleGroup(r: any): VehicleGroup {
-  return { id: r.id, name: r.name, fetchedAt: r.fetched_at };
-}
-
-export function listVehicleGroups(): VehicleGroup[] {
-  return (getDb().prepare('SELECT * FROM vehicle_groups ORDER BY name').all() as any[]).map(rowToVehicleGroup);
-}
-
-export function replaceVehicleGroups(groups: VehicleGroup[]): void {
-  const d = getDb();
-  const tx = d.transaction(() => {
-    d.prepare('DELETE FROM vehicle_groups').run();
-    const insert = d.prepare('INSERT INTO vehicle_groups (id, name, fetched_at) VALUES (?,?,CURRENT_TIMESTAMP)');
-    for (const g of groups) insert.run(g.id, g.name);
   });
   tx();
 }

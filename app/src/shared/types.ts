@@ -98,15 +98,10 @@ export interface ParkingLane {
   gateRelayAddress: string | null;
   enabled: boolean;
   /**
-   * Physical vehicle class the lane serves. `car` is the default for legacy
-   * lanes that never picked. `motorcycle` filters tariff rules that specify
-   * `vehicle_type='motorcycle'`. `mixed` disables the lane-level filter so
-   * the plate's registered vehicle_type (if any) drives the pick instead.
-   *
-   * Why this exists: the LPR camera can't reliably detect a car vs a
-   * motorcycle from a plate photo alone, so we push the class decision
-   * up to the lane (which the physical geometry already enforces —
-   * motorcycles use their own narrow lane).
+   * Descriptive label for the physical lane (`car` default), mirrored to the
+   * cloud equipment map. As of 2026-07-09 it has NO effect on pricing — fees
+   * are driven solely by the lane's assigned rate plan and that plan's
+   * day/time/date rules (the vehicle-type dimension was retired cloud-side).
    */
   laneType: 'car' | 'motorcycle' | 'mixed';
 }
@@ -150,7 +145,6 @@ export interface TariffRule {
   ruleId: string;
   name: string;
   priority: number;
-  vehicleType: string | null;
   /** Days of week ints (0=Sun ... 6=Sat). null = every day. */
   daysOfWeek: number[] | null;
   /** 'HH:mm:ss' string. If timeTo <= timeFrom the window wraps past midnight. */
@@ -192,13 +186,24 @@ export interface ScopeRate {
    *  computeFee picks the rule matching the session moment and IGNORES the
    *  flat firstBlockCents/perBlockCents/blockMinutes above. */
   rules: TariffRule[];
-  graceExceededBehavior: 'charge_from_entry' | 'charge_from_grace' | null;
+  graceExceededBehavior: 'charge_from_entry' | 'charge_from_grace_end' | null;
   cutoffEnabled: boolean;
   cutoffTime: string | null;
   cutoffBehavior: string | null;
   /** Fixed fee charged when cutoffBehavior == 'new_day_fixed_fee' and the
    *  session crosses the daily reset boundary. Null for the other behaviours. */
   newDayFixedFeeCents: number | null;
+  /** How the tariff is anchored across a stay (cloud RatePolicy.rate_basis):
+   *  'occupancy' (default) prices each moment by whichever rule covers it;
+   *  'entry' lets the rule active at entry govern the whole stay. */
+  rateBasis?: 'occupancy' | 'entry' | null;
+  /** How flat-rate rules combine when a stay spans several of them
+   *  (cloud RatePolicy.flat_multi_rate): 'sum' (each distinct rule once),
+   *  'entry' (only the entry rule), 'highest' (single largest), 'per_day'. */
+  flatMultiRate?: 'sum' | 'entry' | 'highest' | 'per_day' | null;
+  /** When true (and cutoff enabled), the first-block premium is charged once
+   *  per entry rather than re-charged each cut-off cycle. */
+  firstBlockOncePerEntry?: boolean | null;
   policyId: string | null;
   policyName: string | null;
   /** Operator-facing free-form description from the cloud Setup & Rules tab. */
@@ -227,24 +232,6 @@ export interface ParkingSpace {
   startDate: string | null;
   endDate: string | null;
   notes: string | null;
-  fetchedAt: string;
-}
-
-/** Vehicle type taxonomy mirrored from qparking SaaS. Read-only. */
-export interface VehicleType {
-  id: string;
-  typeName: string;
-  hourlyRate: number | null;
-  dailyRate: number | null;
-  monthlyRate: number | null;
-  groupName: string | null;
-  fetchedAt: string;
-}
-
-/** Vehicle group taxonomy mirrored from qparking SaaS. Read-only. */
-export interface VehicleGroup {
-  id: string;
-  name: string;
   fetchedAt: string;
 }
 
@@ -447,9 +434,6 @@ export interface BridgeApi {
   // Mirrored config from qparking SaaS (read-only locally)
   listSpaces(): Promise<ParkingSpace[]>;
   syncSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
-  listVehicleTypes(): Promise<VehicleType[]>;
-  syncVehicleTypesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
-  listVehicleGroups(): Promise<VehicleGroup[]>;
   /** Read every active pass cached from the cloud. Already populated by the
    *  periodic syncPasses(); this just lets the UI display them. */
   listActivePasses(): Promise<ActivePass[]>;

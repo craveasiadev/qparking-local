@@ -79,7 +79,7 @@ import {
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
   listScopes, getScope,
-  listParkingSpaces, listVehicleTypes, listVehicleGroups, listAllActivePasses,
+  listParkingSpaces, listAllActivePasses,
 } from './services/db';
 import { computeFee, retriggerSessionExit } from './services/parking-flow';
 import {
@@ -88,7 +88,7 @@ import {
 import { startLprServer, lprEvents, simulatePlate } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
-  startBackgroundSync, syncScopes, pushScopeRate, syncSpaces, syncVehicleTypes, syncVehicleGroups,
+  startBackgroundSync, syncScopes, pushScopeRate, syncSpaces,
   startGatePoll, setGateOpenHandler,
 } from './services/qparking-sync';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
@@ -622,10 +622,6 @@ ipcMain.handle('scopes:sync', () => syncScopes());
 // background sync also refreshes these on its 60s timer.
 ipcMain.handle('spaces:list', () => listParkingSpaces());
 ipcMain.handle('spaces:sync', () => syncSpaces());
-ipcMain.handle('vehicle-types:list', () => listVehicleTypes());
-ipcMain.handle('vehicle-types:sync', () => syncVehicleTypes());
-ipcMain.handle('vehicle-groups:list', () => listVehicleGroups());
-ipcMain.handle('vehicle-groups:sync', () => syncVehicleGroups());
 ipcMain.handle('passes:list', () => listAllActivePasses());
 ipcMain.handle('scopes:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
