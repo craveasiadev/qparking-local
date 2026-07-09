@@ -5,8 +5,12 @@
  * security recommendations).
  */
 import { contextBridge, ipcRenderer } from 'electron';
+import type { BridgeApi } from '../shared/types';
 
-const api = {
+// Typed against the shared contract: add a method here without declaring it
+// in BridgeApi (or vice versa) and this file stops compiling. That same
+// interface is what gives every React page autocomplete on window.bridge.
+const api: BridgeApi = {
   // terminals — config CRUD + connection lifecycle
   listTerminals: () => ipcRenderer.invoke('terminals:list'),
   saveTerminal: (input: unknown) => ipcRenderer.invoke('terminals:save', input),
@@ -148,7 +152,3 @@ const api = {
 };
 
 contextBridge.exposeInMainWorld('bridge', api);
-
-declare global {
-  interface Window { bridge: typeof api; }
-}

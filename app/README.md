@@ -513,7 +513,9 @@ countInside: () => ipcRenderer.invoke('sessions:count-inside'),
 ```
 
 ```ts
-// 3. src/shared/types.ts — (optional) add the type for autocomplete
+// 3. src/shared/types.ts — declare it on BridgeApi (required: preload is
+//    type-checked against this interface, and it's what types window.bridge
+//    in every React page)
 countInside(): Promise<number>;
 ```
 

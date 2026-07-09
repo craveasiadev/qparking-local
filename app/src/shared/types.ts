@@ -521,9 +521,11 @@ export interface BridgeApi {
    *  for sessions that pre-date the auto-sync wiring. */
   backfillSessions(): Promise<{ entries: number; exits: number }>;
 
-  // Settings
+  // Settings + diagnostics
   getSettings(): Promise<AppSettings>;
   saveSettings(s: Partial<AppSettings>): Promise<AppSettings>;
+  /** LPR listener health — bound port, LAN addresses cameras can reach, camera count. */
+  diagnoseLpr(): Promise<{ port: number; addresses: string[]; cameras: number }>;
 
   // Gate simulator
   openGateSimulator(): Promise<void>;
@@ -619,4 +621,15 @@ export interface BridgeApi {
 
   // Stream events to renderer (returns an unsubscribe fn)
   onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void): () => void;
+}
+
+/**
+ * Make `window.bridge` fully typed in the RENDERER. This file is included by
+ * the renderer tsconfig, so every React page gets autocomplete + type-checking
+ * on bridge calls. The implementation side is enforced in preload.ts, which
+ * declares its `api` object as `BridgeApi` — if the two ever drift, the main
+ * build fails instead of the renderer crashing at runtime.
+ */
+declare global {
+  interface Window { bridge: BridgeApi }
 }
