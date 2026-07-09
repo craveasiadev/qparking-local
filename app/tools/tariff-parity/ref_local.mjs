@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 
 // ─────────── VERBATIM COPY START (schedule path + internals) ───────────
-function computeFee(durationMinutes, scope, entryAt) {
+function computeFee(durationMinutes, scope, entryAt, exitAt) {
   if (!scope) return 0;
 
   if (!scope.rules || scope.rules.length === 0) {
@@ -23,7 +23,7 @@ function computeFee(durationMinutes, scope, entryAt) {
     return cents;
   }
 
-  const exitMs = Date.now();
+  const exitMs = exitAt ? new Date(exitAt).getTime() : Date.now();
   const entryMs = entryAt ? new Date(entryAt).getTime() : exitMs - durationMinutes * 60_000;
   if (exitMs <= entryMs) return 0;
 
@@ -56,7 +56,9 @@ function computeFee(durationMinutes, scope, entryAt) {
   const flatMode = ['sum', 'entry', 'highest', 'per_day'].includes(scope.flatMultiRate ?? 'sum')
     ? (scope.flatMultiRate ?? 'sum')
     : 'sum';
-  const policyCap = scope.dailyCapCents && scope.dailyCapCents > 0 ? scope.dailyCapCents : null;
+  const policyCap = scope.policyDailyCapCents != null && scope.policyDailyCapCents > 0
+    ? scope.policyDailyCapCents
+    : null;
 
   let total = 0;
   let blockMinutes = 0;
@@ -290,7 +292,10 @@ for (const sc of scenarios) {
     firstBlockCents: 0,
     perBlockCents: 0,
     blockMinutes: 60,
-    dailyCapCents: p.daily_cap_cents ?? 0,
+    // Legacy effective-rule mirror — set to a deliberately WRONG value so the
+    // harness proves the schedule path ignores it and uses policyDailyCapCents.
+    dailyCapCents: 999999,
+    policyDailyCapCents: p.daily_cap_cents ?? null,
     currency: 'MYR',
     rules: sc.rules.map((r, i) => mapRule(r, i, sc.id)),
     graceExceededBehavior: p.grace_exceeded_behavior ?? null,

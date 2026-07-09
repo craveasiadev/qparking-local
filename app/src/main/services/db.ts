@@ -265,6 +265,9 @@ function applySchema(d: Database.Database) {
     'rate_basis TEXT',
     'flat_multi_rate TEXT',
     'first_block_once_per_entry INTEGER NOT NULL DEFAULT 0',
+    // 2026-07-09: true policy-level daily cap, distinct from the legacy
+    // effective-rule mirror in daily_cap_cents. NULL = uncapped.
+    'policy_daily_cap_cents INTEGER',
   ]) {
     try { d.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
@@ -739,6 +742,7 @@ function rowToScope(r: any, rules: TariffRule[] = []): ScopeRate {
     rateBasis: (r.rate_basis ?? null) as any,
     flatMultiRate: (r.flat_multi_rate ?? null) as any,
     firstBlockOncePerEntry: !!r.first_block_once_per_entry,
+    policyDailyCapCents: r.policy_daily_cap_cents ?? null,
     rules,
   };
 }
@@ -792,8 +796,8 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         block_minutes, daily_cap_cents, currency, fetched_at,
         policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
         policy_description, new_day_fixed_fee_cents,
-        rate_basis, flat_multi_rate, first_block_once_per_entry
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        rate_basis, flat_multi_rate, first_block_once_per_entry, policy_daily_cap_cents
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_id) DO UPDATE SET
         scope_name=excluded.scope_name,
         free_minutes=excluded.free_minutes,
@@ -813,7 +817,8 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         new_day_fixed_fee_cents=excluded.new_day_fixed_fee_cents,
         rate_basis=excluded.rate_basis,
         flat_multi_rate=excluded.flat_multi_rate,
-        first_block_once_per_entry=excluded.first_block_once_per_entry`)
+        first_block_once_per_entry=excluded.first_block_once_per_entry,
+        policy_daily_cap_cents=excluded.policy_daily_cap_cents`)
       .run(
         s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents,
         s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt,
@@ -821,6 +826,7 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         s.cutoffEnabled ? 1 : 0, s.cutoffTime ?? null, s.cutoffBehavior ?? null,
         s.policyDescription ?? null, s.newDayFixedFeeCents ?? null,
         s.rateBasis ?? null, s.flatMultiRate ?? null, s.firstBlockOncePerEntry ? 1 : 0,
+        s.policyDailyCapCents ?? null,
       );
 
     d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(s.scopeId);

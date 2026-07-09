@@ -98,6 +98,11 @@ export async function syncScopes(): Promise<SyncResult> {
         rateBasis: (row.rate_basis ?? row.rateBasis ?? null) as any,
         flatMultiRate: (row.flat_multi_rate ?? row.flatMultiRate ?? null) as any,
         firstBlockOncePerEntry: !!(row.first_block_once_per_entry ?? row.firstBlockOncePerEntry ?? false),
+        // True policy cap (distinct from the legacy effective-rule mirror in
+        // daily_cap_cents). Absent on older cloud builds → null (uncapped).
+        policyDailyCapCents: (row.policy_daily_cap_cents ?? row.policyDailyCapCents) != null
+          ? Number(row.policy_daily_cap_cents ?? row.policyDailyCapCents)
+          : null,
       };
       upsertScope(scope);
       count++;

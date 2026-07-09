@@ -111,6 +111,19 @@
     ]
   },
   {
+    "id": "S10-entry-basis-rule-cap-no-policy-cap",
+    "desc": "real 'test' policy: rate_basis=entry, policy cap NULL, entry rule Time-Extra cap RM20; 09:00->23:00 must be RM20 (governing rule cap), not RM13 (Time-Main cap)",
+    "entry": "2026-07-09T09:00:00+08:00",
+    "exit":  "2026-07-09T23:00:00+08:00",
+    "vehicleType": null,
+    "policy": { "grace_minutes": 0, "grace_exceeded_behavior": "charge_from_entry", "rate_basis": "entry", "flat_multi_rate": "per_day", "first_block_once_per_entry": true, "cutoff_enabled": true, "cutoff_time": "00:00:00", "cutoff_behavior": "restart", "new_day_fixed_fee_cents": null, "daily_cap_cents": null },
+    "rules": [
+      { "name": "Time - Extra", "priority": 20, "vehicle_type": null, "days_of_week": null, "time_from": "09:00:00", "time_to": "18:00:00", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 500, "first_block_minutes": 60, "subsequent_block_amount_cents": 300, "subsequent_block_minutes": 60, "daily_cap_cents": 2000, "is_overnight": false, "is_active": true },
+      { "name": "Time - Main", "priority": 10, "vehicle_type": null, "days_of_week": null, "time_from": "18:00:00", "time_to": "09:00:00", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 300, "first_block_minutes": 60, "subsequent_block_amount_cents": 200, "subsequent_block_minutes": 60, "daily_cap_cents": 1300, "is_overnight": false, "is_active": true },
+      { "name": "Everyday", "priority": 0, "vehicle_type": null, "days_of_week": null, "time_from": "00:00:00", "time_to": "23:59:00", "valid_from": null, "valid_to": null, "rule_type": "block_hourly", "flat_amount_cents": 0, "first_block_amount_cents": 500, "first_block_minutes": 60, "subsequent_block_amount_cents": 300, "subsequent_block_minutes": 60, "daily_cap_cents": null, "is_overnight": false, "is_active": true }
+    ]
+  },
+  {
     "id": "S9-simple-30min-within-first-block",
     "desc": "grace 0, 45min stay under 60min first block -> both should charge one first block (control case)",
     "entry": "2026-07-08T10:00:00+08:00",

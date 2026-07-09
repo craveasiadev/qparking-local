@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Cloud, Star } from 'lucide-react';
+import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator } from 'lucide-react';
 import type { ScopeRate, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -24,9 +24,9 @@ export function Scopes() {
     <div className="p-4 sm:p-6 lg:p-8 max-w-5xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Rate plans</h1>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Parking rates</h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Every active rate plan configured on the cloud, cached here so the gate can price sessions even if WAN is offline.
+            Every active parking rate configured on the cloud, cached here so the gate can price sessions even if WAN is offline. Expand a rate to test a price.
           </p>
         </div>
         <button onClick={() => sync()} disabled={syncing}
@@ -93,11 +93,9 @@ export function Scopes() {
                               type="button"
                               onClick={() => toggle(s.scopeId)}
                               className="inline-flex items-center gap-1.5 text-left hover:opacity-75"
-                              title={ruleCount > 0 ? `${ruleCount} tariff rule${ruleCount === 1 ? '' : 's'} — click to expand` : 'No detailed rules from cloud'}
+                              title="Click to expand — view rules & test a price"
                             >
-                              {ruleCount > 0
-                                ? (isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />)
-                                : <span className="w-[13px] inline-block" />}
+                              {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                               <div>
                                 <div className="font-semibold">{s.scopeName}</div>
                                 <div className="text-[11px] text-gray-500 font-mono">{s.scopeId}</div>
@@ -119,7 +117,7 @@ export function Scopes() {
                           <td className={`px-3 py-2 text-right font-mono ${zero ? 'text-amber-700 font-bold' : ''}`}>{fmtCents(s.firstBlockCents, s.currency)}</td>
                           <td className={`px-3 py-2 text-right font-mono ${zero ? 'text-amber-700 font-bold' : ''}`}>{fmtCents(s.perBlockCents, s.currency)}</td>
                           <td className="px-3 py-2 text-right font-mono">{s.blockMinutes} min</td>
-                          <td className="px-3 py-2 text-right font-mono">{s.dailyCapCents > 0 ? fmtCents(s.dailyCapCents, s.currency) : '—'}</td>
+                          <td className="px-3 py-2 text-right font-mono">{(s.policyDailyCapCents ?? 0) > 0 ? fmtCents(s.policyDailyCapCents!, s.currency) : '—'}</td>
                           <td className="px-3 py-2 text-right text-[11px] text-gray-500">{new Date(s.fetchedAt).toLocaleString()}</td>
                           <td className="px-3 py-2 text-right">
                             {(s as any).isSiteDefault && (
@@ -129,7 +127,7 @@ export function Scopes() {
                             )}
                           </td>
                         </tr>
-                        {isOpen && ruleCount > 0 && (
+                        {isOpen && (
                           <tr className="bg-gray-50/60 border-t border-gray-100">
                             <td colSpan={8} className="px-3 py-3">
                               <RulesTable scope={s} />
@@ -154,9 +152,7 @@ export function Scopes() {
                 <div key={s.scopeId} className={`rounded-xl border bg-white p-3 ${zero ? 'border-amber-300 bg-amber-50/40' : 'border-gray-200'}`}>
                   <div className="flex items-start justify-between gap-2">
                     <button type="button" onClick={() => toggle(s.scopeId)} className="min-w-0 text-left inline-flex items-start gap-1.5">
-                      {ruleCount > 0
-                        ? (isOpen ? <ChevronDown size={13} className="mt-1" /> : <ChevronRight size={13} className="mt-1" />)
-                        : null}
+                      {isOpen ? <ChevronDown size={13} className="mt-1" /> : <ChevronRight size={13} className="mt-1" />}
                       <div>
                         <div className="font-semibold">{s.scopeName}</div>
                         <div className="text-[11px] text-gray-500 font-mono break-all">{s.scopeId}</div>
@@ -176,9 +172,9 @@ export function Scopes() {
                     <div><span className="text-gray-500">Block:</span> <span className="font-mono">{s.blockMinutes} min</span></div>
                     <div><span className="text-gray-500">1st:</span> <span className={`font-mono ${zero ? 'text-amber-700 font-bold' : ''}`}>{fmtCents(s.firstBlockCents, s.currency)}</span></div>
                     <div><span className="text-gray-500">Per:</span> <span className={`font-mono ${zero ? 'text-amber-700 font-bold' : ''}`}>{fmtCents(s.perBlockCents, s.currency)}</span></div>
-                    <div className="col-span-2"><span className="text-gray-500">Daily cap:</span> <span className="font-mono">{s.dailyCapCents > 0 ? fmtCents(s.dailyCapCents, s.currency) : '—'}</span></div>
+                    <div className="col-span-2"><span className="text-gray-500">Daily cap:</span> <span className="font-mono">{(s.policyDailyCapCents ?? 0) > 0 ? fmtCents(s.policyDailyCapCents!, s.currency) : '—'}</span></div>
                   </div>
-                  {isOpen && ruleCount > 0 && (
+                  {isOpen && (
                     <div className="mt-3 pt-3 border-t border-gray-200">
                       <RulesTable scope={s} compact />
                     </div>
@@ -371,8 +367,8 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
             <span><span className="text-gray-500">New-day fee:</span> <span className="font-mono">{scope.currency} {(scope.newDayFixedFeeCents / 100).toFixed(2)}</span></span>
           )}
           <span><span className="text-gray-500">Daily cap:</span>{' '}
-            {scope.dailyCapCents > 0
-              ? <span className="font-mono">{scope.currency} {(scope.dailyCapCents / 100).toFixed(2)}</span>
+            {(scope.policyDailyCapCents ?? 0) > 0
+              ? <span className="font-mono">{scope.currency} {((scope.policyDailyCapCents ?? 0) / 100).toFixed(2)}</span>
               : <span className="text-gray-400">no cap</span>}
           </span>
         </div>
@@ -425,6 +421,85 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
       </div>
       <p className="text-[10px] text-gray-400">
         Rules are read-only here — edit them in qparking SaaS (Pricing &amp; Tariffs). The local exit-flow picks the highest-priority rule matching the session's moment.
+      </p>
+
+      <TestPrice scope={scope} />
+    </div>
+  );
+}
+
+/** Local datetime → "YYYY-MM-DDTHH:mm" for a <input type="datetime-local">. */
+function toLocalInput(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * "Test price" — mirrors the qparking SaaS "Test a price" simulator. Enter an
+ * entry + exit, see the exact fee THIS rate plan would charge locally. Use it
+ * to confirm the on-prem gate agrees with the cloud for the same inputs.
+ */
+function TestPrice({ scope }: { scope: ScopeRate }) {
+  const now = new Date();
+  const hourAgo = new Date(now.getTime() - 60 * 60_000);
+  const [entry, setEntry] = useState(toLocalInput(hourAgo));
+  const [exit, setExit] = useState(toLocalInput(now));
+  const [res, setRes] = useState<{ feeCents: number; durationMinutes: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function run() {
+    setBusy(true); setErr(null); setRes(null);
+    try {
+      // datetime-local has no timezone; the ISO the input yields (":ss" absent)
+      // is parsed as LOCAL time by the main process — same wall-clock the gate
+      // and the cloud simulator use.
+      const r = await window.bridge.simulateScopeFee({ scopeId: scope.scopeId, entry, exit });
+      if (!r.ok) { setErr(r.error ?? 'calc_failed'); return; }
+      setRes({ feeCents: r.feeCents ?? 0, durationMinutes: r.durationMinutes ?? 0 });
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3">
+      <div className="flex items-center gap-1.5 mb-2 text-[11px] font-bold uppercase tracking-wider text-blue-800">
+        <Calculator size={12} /> Test price
+      </div>
+      <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+        <label className="text-[11px] text-gray-600 flex-1">
+          <span className="block mb-0.5">Entry</span>
+          <input type="datetime-local" value={entry} onChange={(e) => setEntry(e.target.value)}
+            className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs font-mono" />
+        </label>
+        <label className="text-[11px] text-gray-600 flex-1">
+          <span className="block mb-0.5">Exit</span>
+          <input type="datetime-local" value={exit} onChange={(e) => setExit(e.target.value)}
+            className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs font-mono" />
+        </label>
+        <button type="button" onClick={run} disabled={busy}
+          className="inline-flex items-center justify-center gap-1.5 h-8 px-4 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold disabled:opacity-50">
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Calculator size={13} />} Calculate
+        </button>
+      </div>
+
+      {err && (
+        <div className="mt-2 text-[11px] text-red-700">{err === 'exit_before_entry' ? 'Exit must be after entry.' : err}</div>
+      )}
+      {res && (
+        <div className="mt-2 flex items-baseline gap-3">
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-widest text-gray-500">Customer pays</div>
+            <div className="text-2xl font-black tabular-nums text-blue-700">{fmtCents(res.feeCents, scope.currency)}</div>
+          </div>
+          <div className="text-[11px] text-gray-500">{res.durationMinutes} min · {scope.scopeName}</div>
+        </div>
+      )}
+      <p className="mt-2 text-[10px] text-gray-400">
+        Enter the same entry/exit in qparking → Parking Rates → “Test a price” for this plan — the amounts should match exactly.
       </p>
     </div>
   );

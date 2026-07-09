@@ -178,7 +178,9 @@ export interface ScopeRate {
   firstBlockCents: number;
   perBlockCents: number;
   blockMinutes: number;
-  /** Policy-level daily cap (cents). 0 = no cap. */
+  /** LEGACY flat mirror — the currently-effective RULE's cap at sync time.
+   *  Used only by the no-rules block fallback. Do NOT use as the policy cap
+   *  for the schedule path — use `policyDailyCapCents` for that. 0 = no cap. */
   dailyCapCents: number;
   currency: string;
   fetchedAt: string;
@@ -204,6 +206,11 @@ export interface ScopeRate {
   /** When true (and cutoff enabled), the first-block premium is charged once
    *  per entry rather than re-charged each cut-off cycle. */
   firstBlockOncePerEntry?: boolean | null;
+  /** TRUE policy-level daily cap in cents (cloud RatePolicy.daily_cap_cents).
+   *  null / undefined / 0 = uncapped. This — NOT the legacy `dailyCapCents`
+   *  mirror — is the policy cap the schedule-path fee calc applies alongside
+   *  each rule's own cap. */
+  policyDailyCapCents?: number | null;
   policyId: string | null;
   policyName: string | null;
   /** Operator-facing free-form description from the cloud Setup & Rules tab. */
@@ -447,6 +454,11 @@ export interface BridgeApi {
     firstBlockCents: number; perBlockCents: number;
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;
   }): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  /** "Test price" — simulate a rate plan's fee for an entry→exit window. */
+  simulateScopeFee(input: { scopeId: string; entry: string; exit: string }): Promise<{
+    ok: boolean; feeCents?: number; durationMinutes?: number;
+    scopeName?: string; currency?: string; error?: string;
+  }>;
 
   // App build metadata — operator-visible version stamp.
   getAppVersion(): Promise<{ version: string; isPackaged: boolean; builtAt: string }>;

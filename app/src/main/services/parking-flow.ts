@@ -743,6 +743,9 @@ export function computeFee(
   durationMinutes: number,
   scope: ScopeRate | null,
   entryAt?: string | Date,
+  /** Explicit exit instant for simulation/testing. Defaults to now (the real
+   *  gate exit). Only affects the schedule-driven path. */
+  exitAt?: string | Date,
 ): number {
   if (!scope) return 0;
 
@@ -761,7 +764,7 @@ export function computeFee(
   // cloud simulator / invoice would: grace behaviour, cut-off billing cycles,
   // rate_basis (entry vs occupancy), flat-rate combining modes, and per-rule +
   // policy daily caps. A parity harness lives in app/tools/tariff-parity.
-  const exitMs = Date.now();
+  const exitMs = exitAt ? new Date(exitAt as any).getTime() : Date.now();
   const entryMs = entryAt ? new Date(entryAt as any).getTime() : exitMs - durationMinutes * 60_000;
   if (exitMs <= entryMs) return 0;
 
@@ -802,9 +805,13 @@ export function computeFee(
   const flatMode = ['sum', 'entry', 'highest', 'per_day'].includes(scope.flatMultiRate ?? 'sum')
     ? (scope.flatMultiRate ?? 'sum')
     : 'sum';
-  // Local stores an uncapped policy as 0, and the cloud wire format also sends
-  // 0 for "no cap" (null coalesced). So only a value > 0 is a real cap.
-  const policyCap = scope.dailyCapCents && scope.dailyCapCents > 0 ? scope.dailyCapCents : null;
+  // Policy-level cap = the TRUE policy daily cap (policyDailyCapCents), NOT the
+  // legacy `dailyCapCents` mirror (which holds whichever RULE was effective at
+  // sync time and would wrongly over-cap block_hourly stays). Per-rule caps are
+  // applied separately inside priceBillingCycle. null/0 = uncapped.
+  const policyCap = scope.policyDailyCapCents != null && scope.policyDailyCapCents > 0
+    ? scope.policyDailyCapCents
+    : null;
 
   let total = 0;
   let blockMinutes = 0;
@@ -1061,6 +1068,30 @@ export function previewFee(plate: string): { found: boolean; sessionId?: number;
   const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
   const feeCents = computeFee(durationMinutes, scope, session.entryAt);
   return { found: true, sessionId: session.id, durationMinutes, feeCents, scope };
+}
+
+/**
+ * "Test price" — compute what a given rate plan (scope) would charge for an
+ * explicit entry→exit window, without needing a live session. Mirrors the
+ * qparking SaaS "Test a price" simulator so an operator can confirm the gate
+ * charge matches the cloud for the same inputs.
+ */
+export function simulateScopeFee(
+  scopeId: string,
+  entryIso: string,
+  exitIso: string,
+): { ok: boolean; feeCents?: number; durationMinutes?: number; scopeName?: string; currency?: string; error?: string } {
+  const scope = getScope(scopeId);
+  if (!scope) return { ok: false, error: 'rate_plan_not_found' };
+  const entryMs = Date.parse(entryIso);
+  const exitMs = Date.parse(exitIso);
+  if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return { ok: false, error: 'invalid_dates' };
+  if (exitMs < entryMs) return { ok: false, error: 'exit_before_entry' };
+  // Floor to whole minutes — matches the cloud TariffCalculator's integer
+  // duration so the two produce identical block math.
+  const durationMinutes = Math.max(0, Math.floor((exitMs - entryMs) / 60_000));
+  const feeCents = computeFee(durationMinutes, scope, entryIso, exitIso);
+  return { ok: true, feeCents, durationMinutes, scopeName: scope.scopeName, currency: scope.currency };
 }
 
 /**

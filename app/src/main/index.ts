@@ -81,7 +81,7 @@ import {
   listScopes, getScope,
   listParkingSpaces, listAllActivePasses,
 } from './services/db';
-import { computeFee, retriggerSessionExit } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, simulateScopeFee } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './services/ecpi-terminal';
@@ -627,6 +627,9 @@ ipcMain.handle('scopes:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;
 }) => pushScopeRate(input));
+// "Test price" — simulate the fee a rate plan charges for an entry→exit window.
+ipcMain.handle('scopes:simulate', (_e, input: { scopeId: string; entry: string; exit: string }) =>
+  simulateScopeFee(input.scopeId, input.entry, input.exit));
 
 // Build version — used by the renderer sidebar to confirm the live build.
 // Reads from package.json baked at build time via electron's app.getVersion().

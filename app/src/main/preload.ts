@@ -92,6 +92,8 @@ const api = {
     firstBlockCents: number; perBlockCents: number;
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;
   }) => ipcRenderer.invoke('scopes:save-rate', input),
+  simulateScopeFee: (input: { scopeId: string; entry: string; exit: string }) =>
+    ipcRenderer.invoke('scopes:simulate', input),
 
   // sync queue (outbound to qparking SaaS)
   getSyncStatus: () => ipcRenderer.invoke('sync:status'),
