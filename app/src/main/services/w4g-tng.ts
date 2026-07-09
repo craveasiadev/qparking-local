@@ -22,6 +22,8 @@
  * itself out.
  */
 import http from 'node:http';
+import os from 'node:os';
+import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import { getSettings, logTerminal } from './db';
@@ -435,7 +437,6 @@ export async function payCancel(orderId: string): Promise<{ state: number; order
  *  verifies the box is reachable on the LAN. */
 export function pingDevice(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
   const s = getSettings();
-  const { Socket } = require('node:net') as typeof import('node:net');
   return new Promise((resolve) => {
     const start = Date.now();
     const sock = new Socket();
@@ -716,11 +717,10 @@ export function w4gStatus(): {
   lastError?: string;
 } {
   const s = getSettings();
-  const os = require('node:os') as typeof import('node:os');
   const addresses: string[] = [];
-  for (const ifaces of Object.values(os.networkInterfaces())) {
-    for (const i of ifaces ?? []) {
-      if (i.family === 'IPv4' && !i.internal) addresses.push(i.address);
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const nic of interfaces ?? []) {
+      if (nic.family === 'IPv4' && !nic.internal) addresses.push(nic.address);
     }
   }
   return {

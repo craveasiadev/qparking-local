@@ -79,7 +79,7 @@ import {
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
   listScopes, getScope,
-  listParkingSpaces, listAllActivePasses,
+  listParkingSpaces, listActivePasses,
 } from './services/db';
 import { computeFee, retriggerSessionExit, simulateScopeFee } from './services/parking-flow';
 import {
@@ -90,6 +90,7 @@ import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncScopes, pushScopeRate, syncSpaces,
   startGatePoll, setGateOpenHandler,
+  syncAll,
 } from './services/qparking-sync';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
 import { openFaceGate, pingFaceGate } from './services/face-gate';
@@ -622,7 +623,7 @@ ipcMain.handle('scopes:sync', () => syncScopes());
 // background sync also refreshes these on its 60s timer.
 ipcMain.handle('spaces:list', () => listParkingSpaces());
 ipcMain.handle('spaces:sync', () => syncSpaces());
-ipcMain.handle('passes:list', () => listAllActivePasses());
+ipcMain.handle('passes:list', () => listActivePasses());
 ipcMain.handle('scopes:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;
@@ -779,3 +780,5 @@ ipcMain.handle('gate:test', (_e, opts: { plate?: string; direction?: 'in'|'out'|
   });
   setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
 });
+
+ipcMain.handle('sync:all-tables', () => syncAll());

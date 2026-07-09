@@ -9,8 +9,13 @@
  *     the cloud dashboard can show what each camera sees, without needing
  *     a tunnel into the branch LAN
  */
+import axios from 'axios';
 import { getCamera, listCameras } from './db';
-import { getSettings } from './db';
+import { getCloudApi } from './cloud-api';
+
+const SNAPSHOT_TIMEOUT_MS = 5_000;
+const PING_TIMEOUT_MS = 3_000;
+const UPLOAD_TIMEOUT_MS = 15_000;
 
 export interface SnapshotResult {
   ok: boolean;
@@ -22,53 +27,58 @@ export interface SnapshotResult {
 }
 
 export async function fetchSnapshot(cameraId: number): Promise<SnapshotResult> {
-  const cam = getCamera(cameraId);
-  if (!cam) return { ok: false, error: 'unknown_camera' };
-  if (!cam.snapshotUrl) return { ok: false, error: 'snapshot_url_not_set' };
+  const camera = getCamera(cameraId);
+  if (!camera) return { ok: false, error: 'unknown_camera' };
+  if (!camera.snapshotUrl) return { ok: false, error: 'snapshot_url_not_set' };
   try {
-    const res = await fetch(cam.snapshotUrl, {
-      signal: AbortSignal.timeout(5_000),
-      // Camera HTTP endpoints often use basic auth — leave the URL to carry
-      // user:pass@host or let the operator embed it in snapshotUrl directly.
+    // Camera HTTP endpoints often use basic auth — the operator can embed
+    // user:pass@host directly in snapshotUrl (axios honours credentials in
+    // the URL; Node's built-in fetch would reject them).
+    const response = await axios.get(camera.snapshotUrl, {
+      responseType: 'arraybuffer',
+      timeout: SNAPSHOT_TIMEOUT_MS,
+      validateStatus: () => true,
     });
-    if (!res.ok) {
-      return { ok: false, status: res.status, error: `http_${res.status}` };
+    if (response.status < 200 || response.status >= 300) {
+      return { ok: false, status: response.status, error: `http_${response.status}` };
     }
-    const ct = res.headers.get('content-type') || 'image/jpeg';
-    const buf = Buffer.from(await res.arrayBuffer());
+    const contentType = String(response.headers['content-type'] ?? 'image/jpeg');
+    const imageBuffer = Buffer.from(response.data);
     return {
       ok: true,
-      contentType: ct,
-      base64: buf.toString('base64'),
+      contentType,
+      base64: imageBuffer.toString('base64'),
       fetchedAt: new Date().toISOString(),
-      status: res.status,
+      status: response.status,
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
+  } catch (error: any) {
+    return { ok: false, error: error?.message ?? String(error) };
   }
 }
 
-/** Lightweight TCP/HTTP reachability probe — uses snapshotUrl if set, else
+/** Lightweight HTTP reachability probe — uses snapshotUrl if set, else
  *  falls back to http://<host>/. Mainly used by the UI's "Test connection"
  *  button so the operator knows the IP is right before saving. */
 export async function pingCamera(cameraId: number): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }> {
-  const cam = getCamera(cameraId);
-  if (!cam) return { ok: false, error: 'unknown_camera' };
-  const url = cam.snapshotUrl || (cam.host ? `http://${cam.host}/` : null);
+  const camera = getCamera(cameraId);
+  if (!camera) return { ok: false, error: 'unknown_camera' };
+  const url = camera.snapshotUrl || (camera.host ? `http://${camera.host}/` : null);
   if (!url) return { ok: false, error: 'no_host_or_snapshot_url' };
-  const t0 = Date.now();
+  const startedAt = Date.now();
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      signal: AbortSignal.timeout(3_000),
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      timeout: PING_TIMEOUT_MS,
+      validateStatus: () => true,
     });
-    return { ok: res.ok, status: res.status, latencyMs: Date.now() - t0 };
-  } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - t0 };
+    const httpOk = response.status >= 200 && response.status < 300;
+    return { ok: httpOk, status: response.status, latencyMs: Date.now() - startedAt };
+  } catch (error: any) {
+    return { ok: false, error: error?.message ?? String(error), latencyMs: Date.now() - startedAt };
   }
 }
 
-// ─── periodic upload to qparking SaaS ──────────────────────────────────────
+// ─── periodic upload to qparking SaaS ────────────────────────────────────────
 //
 // Every camera with a snapshotUrl uploads its latest snapshot to qparking
 // every UPLOAD_INTERVAL_MS. The cloud dashboard reads from these stored
@@ -79,40 +89,32 @@ export async function pingCamera(cameraId: number): Promise<{ ok: boolean; statu
 const UPLOAD_INTERVAL_MS = 10_000;
 let uploadTimer: NodeJS.Timeout | null = null;
 
-export function startSnapshotUploader() {
+export function startSnapshotUploader(): void {
   stopSnapshotUploader();
   uploadTimer = setInterval(() => { void uploadAllSnapshots(); }, UPLOAD_INTERVAL_MS);
   // First run immediately so the cloud sees the cameras quickly.
   void uploadAllSnapshots();
 }
 
-export function stopSnapshotUploader() {
+export function stopSnapshotUploader(): void {
   if (uploadTimer) clearInterval(uploadTimer);
   uploadTimer = null;
 }
 
-async function uploadAllSnapshots() {
-  const s = getSettings();
-  if (!s.qparkingBaseUrl || !s.qparkingApiKey) return; // not configured — silently skip
+async function uploadAllSnapshots(): Promise<void> {
+  const cloud = getCloudApi();
+  if (!cloud) return; // not configured — silently skip
 
-  for (const cam of listCameras()) {
-    if (!cam.enabled || !cam.snapshotUrl) continue;
-    const snap = await fetchSnapshot(cam.id);
-    if (!snap.ok || !snap.base64) continue;
+  for (const camera of listCameras()) {
+    if (!camera.enabled || !camera.snapshotUrl) continue;
+    const snapshot = await fetchSnapshot(camera.id);
+    if (!snapshot.ok || !snapshot.base64) continue;
     try {
-      await fetch(`${s.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server/cameras/${cam.id}/snapshot`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${s.qparkingApiKey}`,
-        },
-        body: JSON.stringify({
-          content_type: snap.contentType,
-          base64: snap.base64,
-          fetched_at: snap.fetchedAt,
-        }),
-        signal: AbortSignal.timeout(15_000),
-      });
+      await cloud.post(`/cameras/${camera.id}/snapshot`, {
+        content_type: snapshot.contentType,
+        base64: snapshot.base64,
+        fetched_at: snapshot.fetchedAt,
+      }, { timeout: UPLOAD_TIMEOUT_MS });
     } catch {
       // best-effort — if the cloud is unreachable, just skip this round
     }

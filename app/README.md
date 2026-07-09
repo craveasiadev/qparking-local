@@ -7,8 +7,9 @@ It sits between the physical parking hardware and the qparking cloud:
 - **ECPI payment terminals** over TCP (JSON + SHA-256 + heartbeat) — drives the
   gate's payment flow.
 - **qparking SaaS** over HTTPS — a **Laravel REST API** we pull scope/rate config
-  from every hour, so fees can be calculated even when the WAN is down, and push
-  session records up to.
+  from every 60 seconds (so fees can be calculated even when the WAN is down) and
+  push session records up to. All of these calls go through **one shared axios
+  client** (`services/cloud-api.ts`).
 
 State lives in a local SQLite DB at `%APPDATA%\qparking-local\qparking-local.db`.
 Captured plate images go to `%APPDATA%\qparking-local\plates\<date>\`.
@@ -117,7 +118,8 @@ React never touches hardware or data directly. It talks to the backend two ways.
 ### Direction A — React asks, backend answers (request → response)
 
 Think of `window.bridge.x()` as this app's `axios` — same idea as `axios.get()`,
-but the backend lives in the same program:
+but the backend lives in the same program. (The backend *does* use real axios —
+but only for calling the Laravel cloud API; see `services/cloud-api.ts` below.)
 
 ```
 React component                preload.ts                    index.ts (Node)
@@ -146,6 +148,104 @@ useEffect(() => {
 ```
 
 On the backend that push is `mainWindow.webContents.send('plate-detected', …)`.
+
+### The IPC vocabulary (`ipcMain.handle`, `invoke`, `send`, …)
+
+"IPC" = **Inter-Process Communication** — how the two processes (React window ↔
+Node backend) talk, since they can't share memory. There are only five names to
+know, and they pair up:
+
+| Name | Runs on | Direction | What it does | Web analogy |
+|------|---------|-----------|--------------|-------------|
+| `contextBridge.exposeInMainWorld('bridge', api)` | preload | — | Safely puts the `api` object on the renderer's `window` as `window.bridge`. The only hole in the sandbox wall. | Handing the frontend a pre-built API client |
+| `ipcRenderer.invoke('channel', …args)` | preload / renderer | React → Node | Sends a request on a named channel and returns a **Promise** with the reply. | `axios.get()` |
+| `ipcMain.handle('channel', fn)` | main (Node) | answers the above | Registers the function that runs when that channel is invoked, and returns a value back. | `router.get('/path', handler)` |
+| `webContents.send('channel', payload)` | main (Node) | Node → React | **Pushes** a message to the window, unprompted (fire-and-forget, no reply). | `socket.emit()` from the server |
+| `ipcRenderer.on('channel', cb)` / `.off(...)` | preload / renderer | receives the above | Subscribes / unsubscribes to pushed messages. | `socket.on()` on the client |
+
+They form two pairs plus the setup call:
+
+```
+SETUP:        contextBridge.exposeInMainWorld('bridge', api)   → gives React `window.bridge`
+
+REQUEST/REPLY: ipcRenderer.invoke('scopes:list')   ⇄   ipcMain.handle('scopes:list', fn)
+               (React asks)                              (Node answers)
+
+PUSH/SUBSCRIBE: webContents.send('plate-detected', e)  →  ipcRenderer.on('plate-detected', cb)
+               (Node pushes)                               (React listens)
+```
+
+The **`'channel'` string** (like `'scopes:list'` or `'plate-detected'`) is just a
+label both sides agree on — the invoke and its handle must use the *exact same
+string*, or the message goes nowhere. That string is the thing you search for
+when tracing a call (see below).
+
+> **Don't confuse IPC with `EventEmitter`.** Inside the Node backend you'll also
+> see `lprEvents.emit('plate', …)` / `parkingEvents.on('exit-completed', …)`.
+> Those are Node's plain [`EventEmitter`](https://nodejs.org/api/events.html) —
+> pub/sub **between backend modules in the same process**. They never reach React.
+> Only `webContents.send` crosses the process boundary to the UI. Rule of thumb:
+> `emit`/`on` on a local emitter = internal; `webContents.send` = out to React.
+
+### Following a call across the layers (frontend → Electron → backend → SQL)
+
+When you see `window.bridge.something()` in a React page and want to find *what it
+actually does* (all the way down to the database), follow this 4-hop trail. Each
+hop is a plain text search — no guessing.
+
+Worked trace for `window.bridge.listScopes()`:
+
+**Hop 1 — Frontend (React).** You start here, in a page:
+```tsx
+// src/renderer/pages/Scopes.tsx
+setList(await window.bridge.listScopes());
+```
+→ Note the method name: **`listScopes`**.
+
+**Hop 2 — The bridge (preload).** Search `listScopes` in `src/main/preload.ts`:
+```ts
+listScopes: () => ipcRenderer.invoke('scopes:list'),
+```
+→ This gives you the **channel string**: `'scopes:list'`. (The method name and the
+channel string are often different — the channel is what actually crosses into Node.)
+
+**Hop 3 — The handler (Electron main).** Search `'scopes:list'` in `src/main/index.ts`:
+```ts
+ipcMain.handle('scopes:list', () => listScopes());
+```
+→ This is the "endpoint". It calls a backend function, also named **`listScopes`**
+(imported from `./services/db`).
+
+**Hop 4 — The backend + SQL.** Search `function listScopes` in `src/main/services/`:
+```ts
+// src/main/services/db.ts
+export function listScopes(): ScopeRate[] {
+  const rows = getDb().prepare('SELECT * FROM scopes ORDER BY scope_name').all();
+  // …maps rows to ScopeRate objects…
+}
+```
+→ **Here's the actual SQL.** You've reached the bottom.
+
+#### The trail in one line
+
+```
+window.bridge.listScopes()   →   'scopes:list'   →   ipcMain.handle(...)   →   db.ts listScopes()   →   SELECT * FROM scopes
+   (React page)                    (preload.ts)         (index.ts)              (services/*.ts)            (SQLite)
+   search: method name             search: channel      search: fn name         the query
+```
+
+#### Fast way (search terms to use)
+
+1. In your editor, **search the whole `src/main/` folder** for the method name
+   (`listScopes`) → lands you in `preload.ts`, revealing the channel string.
+2. **Search for the channel string** (`'scopes:list'`) → lands you on the
+   `ipcMain.handle` in `index.ts`, revealing the backend function name.
+3. **Search for `function <name>`** → lands you in `services/…` at the real logic
+   + SQL.
+
+The reverse also works: to find *what triggers* a SQL query, search the backend
+function name → its `ipcMain.handle` channel → the `window.bridge.*` method → the
+page that calls it.
 
 ---
 
@@ -182,23 +282,67 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 | `index.ts` | App entry: opens window + tray, starts every service, registers all `ipcMain.handle(...)` endpoints. Keeps the app alive when the window closes. |
 | `preload.ts` | The bridge — exposes the safe `window.bridge.*` surface to React. The single most useful file to see what the UI can do. |
 | `gate-simulator.ts` | The always-on-top red/green gate window. |
-| `app-update.ts` | Self-updater: check cloud → download → relaunch. |
+| `app-update.ts` | Self-updater: check the cloud for a newer build → stream-download it → relaunch. Talks to the cloud via `services/cloud-api.ts` like everything else. |
 
 ### `src/main/services/` (Node backend 🟢)
 
 | File | Purpose |
 |------|---------|
 | `db.ts` | SQLite schema + every query (sessions, terminals, cameras, lanes, scopes, settings, sync queue). |
-| `lpr-webhook.ts` | HTTP server the LPR cameras POST plate events to. Also powers the "Simulate" button. |
+| `cloud-api.ts` | **The one axios client for the Laravel API.** Builds base URL + `Bearer` auth + 10s timeout from Settings. Every cloud call in the rows below goes through it. |
+| `lpr-webhook.ts` | HTTP **server** the LPR cameras POST plate events to. Also powers the "Simulate" button. |
 | `parking-flow.ts` | The brain: entry vs exit, fee calculation, drives the terminal, records the result, opens the gate. |
 | `ecpi-terminal.ts` | Payment-terminal driver over a raw TCP socket (heartbeat + state machine). |
-| `w4g-tng.ts` | Touch'n'Go integration — a parallel payment path via the W4G IO-controller. |
-| `face-gate.ts` | Calls the face-auth turnstile's HTTP API to raise the barrier. |
-| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /api/v1/local-server/scopes`, `/passes`, `/spaces`, `/vehicle-types`, `/gate-commands/pending`, … (`Bearer <apiKey>`). |
-| `sync-queue.ts` | **Push** to the Laravel API: `POST /api/v1/local-server/parking-records`, with retries so a WAN outage never drops a record. |
-| `camera-snapshots.ts` | Fetches live JPEG snapshots from cameras (UI preview + cloud upload). |
+| `w4g-tng.ts` | Touch'n'Go integration — a parallel payment path via the W4G IO-controller. Deliberately hand-rolled HTTP (no axios): the device firmware is byte-picky about header order + JSON spacing. |
+| `face-gate.ts` | Calls the face-auth turnstile's HTTP API to raise the barrier (its own axios client — different server, different token). |
+| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /scopes`, `/passes`, `/spaces`, `/gate-commands/pending`; `PUT /scopes/rate` pushes rate edits back up. |
+| `sync-queue.ts` | **Push** to the Laravel API: `POST /parking-records`, with exponential-backoff retries so a WAN outage never drops a record. |
+| `camera-snapshots.ts` | Fetches live JPEG snapshots from cameras (UI preview) and uploads them to the cloud on a 10s timer. |
 | `camera-push.ts` | Mirrors the local camera registry up to the cloud. |
 | `device-push.ts` | Mirrors terminals + lanes up to the cloud. |
+
+### How the backend calls the Laravel API (`cloud-api.ts`)
+
+Every service that talks to the cloud used to build its own URL, auth header and
+timeout. Now that plumbing lives in exactly one place:
+
+```ts
+// src/main/services/cloud-api.ts
+export function getCloudApi(): AxiosInstance | null {
+  const settings = getSettings();
+  if (!settings.qparkingBaseUrl || !settings.qparkingApiKey) return null; // not configured yet
+  return axios.create({
+    baseURL: `${settings.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server`,
+    headers: { Authorization: `Bearer ${settings.qparkingApiKey}` },
+    timeout: CLOUD_REQUEST_TIMEOUT_MS, // 10s — no cloud call can hang forever
+  });
+}
+```
+
+Every cloud call in the app then follows the same three-line pattern:
+
+```ts
+const cloud = getCloudApi();
+if (!cloud) return NOT_CONFIGURED;            // operator hasn't filled in Settings yet
+const { data } = await cloud.get('/scopes');  // relative path — base URL + auth come from the client
+```
+
+What this buys:
+
+- **One source of truth** — endpoints in services are short relative paths
+  (`'/passes'`, `'/parking-records'`), not hand-assembled URLs.
+- **Settings apply instantly** — `getCloudApi()` re-reads Settings on every call,
+  so changing the base URL / API key needs no restart.
+- **Uniform errors** — axios throws on any non-2xx, so failure handling is one
+  `catch` per function instead of scattered `if (!res.ok)` checks. Shared helpers:
+  `isHttpStatus(error, 404)` (e.g. tolerate older SaaS versions without an
+  endpoint) and `describeRequestError(error)` (best human-readable message).
+- **Timeouts everywhere by default** — previously some calls had none and could
+  hang forever on a dead WAN.
+
+Two deliberate exceptions that do **not** use the shared client:
+`w4g-tng.ts` (see table above) and `lpr-webhook.ts` (an inbound HTTP *server*,
+not a client).
 
 ### `src/renderer/` (React ⚛️)
 
@@ -224,7 +368,8 @@ A car pays and exits:
                                        services/ecpi-terminal.ts      🟢 Node
                                               │ TCP: "tap card" → approved
 4.                                            ▼
-                                       db.ts recordExit + sync-queue.ts (→ Laravel)
+                                       db.ts recordExit + sync-queue.ts
+                                              │ (→ Laravel via cloud-api.ts)
                                               │ emits 'exit-completed'
 5.                                            ▼
                                        index.ts                        ⚡ Electron
@@ -282,9 +427,10 @@ const [sync, syncing] = useAsyncAction(async () => {
 ```
 
 `syncScopesNow` → `ipcRenderer.invoke('scopes:sync')` → `ipcMain.handle('scopes:sync',
-() => syncScopes())`, and `syncScopes()` (in `services/qparking-sync.ts`) does
-`GET /api/v1/local-server/scopes` with the `Bearer` token, writes the rows to
-SQLite, and returns the count.
+() => syncScopes())`, and `syncScopes()` (in `services/qparking-sync.ts`) calls
+`GET /scopes` through the shared cloud client (`cloud-api.ts` adds the base URL +
+`Bearer` token), maps the snake_case rows to local types, writes them to SQLite,
+and returns the count.
 
 ### Example 3 — Live events pushed from the backend
 
@@ -378,6 +524,108 @@ const n = await window.bridge.countInside();
 
 That's the whole pattern every feature in this app follows.
 
+### Recipe — a complete feature, end to end ("Sync all tables" button)
+
+The recipe above is the minimal skeleton. Here's a **full-size worked example** —
+adding a Settings button that pulls *all* cloud tables (scopes + passes + spaces)
+from the Laravel API in one click, with a spinner and a result message. It shows
+where real logic, error handling, and UI states go in each layer. Same 4 hops,
+bottom-up:
+
+**Step 1 — Backend logic** (`src/main/services/qparking-sync.ts`). The real work
+lives in a service, not in the IPC handler. Reuse the existing per-table syncs
+and run them in parallel; the per-call `.catch(toFailedSyncResult)` converts any
+crash into an `{ ok: false, error }` result so one failing endpoint doesn't
+block the others:
+
+```ts
+/** Run all three pulls in parallel; one failing doesn't block the others. */
+export async function syncAll(): Promise<{
+  scopes: SyncResult;
+  passes: SyncResult;
+  spaces: SyncResult;
+}> {
+  const [scopes, passes, spaces] = await Promise.all([
+    syncScopes().catch(toFailedSyncResult),
+    syncPasses().catch(toFailedSyncResult),
+    syncSpaces().catch(toFailedSyncResult),
+  ]);
+  return { scopes, passes, spaces };
+}
+```
+
+**Step 2 — IPC endpoint** (`src/main/index.ts`). Import the function, register
+the channel. Handlers stay thin — one line that delegates to the service:
+
+```ts
+import { …, syncAll } from './services/qparking-sync';
+
+ipcMain.handle('sync:all-tables', () => syncAll());
+```
+
+> Channel naming: pick something unambiguous. Here `sync:all-tables`, not
+> `sync:all` — the existing `sync:*` channels are about the *outbound* queue
+> (local → cloud); this one is inbound (cloud → local).
+
+**Step 3 — Bridge + type** (`src/main/preload.ts` + `src/shared/types.ts`):
+
+```ts
+// preload.ts
+syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
+
+// types.ts (BridgeApi) — gives every page autocomplete on the result shape
+syncAllNow(): Promise<{
+  scopes: { ok: boolean; fetched: number; error?: string };
+  passes: { ok: boolean; fetched: number; error?: string };
+  spaces: { ok: boolean; fetched: number; error?: string };
+}>;
+```
+
+**Step 4 — UI** (`src/renderer/pages/Settings.tsx`). Use the page's existing
+`useAsyncAction` hook — it gives you the busy flag for the spinner/disable —
+and keep a result string in state:
+
+```tsx
+const [syncResult, setSyncResult] = useState<string | null>(null);
+
+const [runSyncAll, syncingAll] = useAsyncAction(async () => {
+  setSyncResult(null);
+  const r = await window.bridge.syncAllNow();
+  const bits = [`${r.scopes.fetched} scopes`, `${r.passes.fetched} passes`, `${r.spaces.fetched} spaces`];
+  const errs = [r.scopes, r.passes, r.spaces].filter((x) => !x.ok);
+  setSyncResult(errs.length === 0
+    ? `✓ Fetched ${bits.join(', ')}`
+    : `✗ ${errs[0].error ?? 'sync failed'} (fetched ${bits.join(', ')})`);
+});
+
+<button onClick={() => runSyncAll()} disabled={syncingAll} className="…">
+  {syncingAll ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+  {syncingAll ? 'Syncing…' : 'Sync now'}
+</button>
+
+{syncResult && (
+  <div className={syncResult.startsWith('✓') ? '…green…' : '…red…'}>{syncResult}</div>
+)}
+```
+
+**The full path of one click:**
+
+```
+click → runSyncAll() → window.bridge.syncAllNow()          ⚛️ React
+      → ipcRenderer.invoke('sync:all-tables')              ⚡ preload
+      → ipcMain.handle('sync:all-tables')                  ⚡ index.ts
+      → syncAll() → 3× GET /api/v1/local-server/…          🟢 qparking-sync.ts → Laravel
+      → rows written to SQLite, counts returned back up    🟢 db.ts
+      → "✓ Fetched 7 scopes, 12 passes, 40 spaces"         ⚛️ React
+```
+
+Rules of thumb baked into this example:
+- **Logic in `services/`, not in the handler** — `index.ts` handlers are one-liners.
+- **Errors cross the bridge as data** (`{ ok, error }`), not thrown exceptions —
+  the UI decides how to show them.
+- **Every button that awaits the bridge gets a busy state** (`useAsyncAction`)
+  so double-clicks can't fire twice and the user sees progress.
+
 ---
 
 ## Running it (dev)
@@ -396,6 +644,14 @@ npm run dev
 1. **Vite** serves the React UI on `http://localhost:5173`.
 2. **Electron** waits for Vite, compiles `src/main`, then opens the window
    pointing at Vite. Hot-reload + Chrome DevTools work as normal.
+
+> **What hot-reloads and what doesn't.** Edits under `src/renderer/` hot-reload
+> instantly via Vite. Edits under `src/main/` (including `preload.ts` and
+> `services/*`) do **NOT** — they're compiled once at startup, so you must
+> **restart `npm run dev`** to pick them up. Tell-tale symptom of forgetting:
+> you add a new method to `preload.ts` and the UI throws
+> `window.bridge.yourMethod is not a function` — the window is still running
+> the preload compiled before your edit.
 
 > **Dev-launcher note.** VS Code (and other Electron-based hosts) leak an env var
 > `ELECTRON_RUN_AS_NODE=1` into the terminal, which makes Electron boot as plain

@@ -3,6 +3,7 @@ import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown,
   Ticket, Grid3x3,
+  MapPin,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -10,6 +11,7 @@ import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
 import { Scopes } from './pages/Scopes';
 import { Sessions } from './pages/Sessions';
+import { SiteSettings } from './pages/SiteSettings';
 import { Settings } from './pages/Settings';
 import { Passes } from './pages/Passes';
 import { Spaces } from './pages/Spaces';
@@ -21,7 +23,7 @@ type Page =
   // Pricing & Tariffs
   | 'scopes'
   // System
-  | 'settings';
+  | 'settings' | 'site-setting';
 
 interface NavItem { id: Page; label: string; icon: any }
 interface NavSection { key: string; label: string; items: NavItem[] }
@@ -34,30 +36,31 @@ const SECTIONS: NavSection[] = [
   {
     key: 'ops', label: 'Operations',
     items: [
-      { id: 'dashboard',        label: 'Dashboard',         icon: LayoutDashboard },
-      { id: 'sessions',         label: 'Sessions',          icon: ListOrdered },
-      { id: 'cameras',          label: 'LPR cameras',       icon: Camera },
-      { id: 'terminals',        label: 'Payment terminals', icon: CreditCard },
-      { id: 'lanes',            label: 'Lanes',             icon: Map },
+      { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+      { id: 'sessions', label: 'Sessions', icon: ListOrdered },
+      { id: 'cameras', label: 'LPR cameras', icon: Camera },
+      { id: 'terminals', label: 'Payment terminals', icon: CreditCard },
+      { id: 'lanes', label: 'Lanes', icon: Map },
     ],
   },
   {
     key: 'mgmt', label: 'Parking management',
     items: [
-      { id: 'spaces',           label: 'Space management',  icon: Grid3x3 },
-      { id: 'passes',           label: 'Passes',            icon: Ticket },
+      { id: 'spaces', label: 'Space management', icon: Grid3x3 },
+      { id: 'passes', label: 'Passes', icon: Ticket },
     ],
   },
   {
     key: 'pricing', label: 'Pricing & tariffs',
     items: [
-      { id: 'scopes',           label: 'Parking rates',     icon: Tag },
+      { id: 'scopes', label: 'Parking rates', icon: Tag },
     ],
   },
   {
-    key: 'system', label: 'System',
+    key: 'system', label: 'Administration',
     items: [
-      { id: 'settings',         label: 'Settings',          icon: SettingsIcon },
+      { id: 'site-setting', label: 'Site Settings', icon: MapPin },
+      { id: 'settings', label: 'Settings', icon: SettingsIcon },
     ],
   },
 ];
@@ -120,9 +123,8 @@ export function App() {
                     <button
                       key={p.id}
                       onClick={() => setPage(p.id)}
-                      className={`w-full flex items-center gap-3 px-3 h-9 rounded-lg text-[13px] font-medium transition-colors ${
-                        active ? 'bg-white text-gray-900' : 'text-white/70 hover:bg-white/5 hover:text-white'
-                      }`}
+                      className={`w-full flex items-center gap-3 px-3 h-9 rounded-lg text-[13px] font-medium transition-colors ${active ? 'bg-white text-gray-900' : 'text-white/70 hover:bg-white/5 hover:text-white'
+                        }`}
                     >
                       <p.icon size={15} strokeWidth={2.25} />
                       {p.label}
@@ -147,11 +149,10 @@ export function App() {
               </div>
             </div>
             {buildInfo && (
-              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
-                buildInfo.isPackaged
+              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${buildInfo.isPackaged
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
                   : 'bg-amber-500/20 text-amber-300 border border-amber-400/40'
-              }`}>
+                }`}>
                 {buildInfo.isPackaged ? 'installed' : 'dev'}
               </span>
             )}
@@ -168,6 +169,7 @@ export function App() {
           {page === 'spaces' && <Spaces />}
           {page === 'passes' && <Passes />}
           {page === 'scopes' && <Scopes />}
+          {page === 'site-setting' && <SiteSettings />}
           {page === 'settings' && <Settings />}
         </div>
         <div className="flex-shrink-0 bg-gray-950 text-white border-t border-white/10">
@@ -199,10 +201,10 @@ export function App() {
                   const color = t.includes('ignored') || t.includes('replay') || t.includes('timeout') || t.includes('failed') || t.includes('rejected')
                     ? 'text-red-300'
                     : t.includes('settling') || t.includes('outcome=paid') || t.includes('received')
-                    ? 'text-emerald-300'
-                    : t.includes('step') || t.includes('initcard') || t.includes('aborttxn')
-                    ? 'text-amber-200'
-                    : 'text-white/70';
+                      ? 'text-emerald-300'
+                      : t.includes('step') || t.includes('initcard') || t.includes('aborttxn')
+                        ? 'text-amber-200'
+                        : 'text-white/70';
                   const time = new Date(entry.ts).toLocaleTimeString();
                   return (
                     <div key={i} className={`whitespace-pre-wrap break-words ${color}`}>

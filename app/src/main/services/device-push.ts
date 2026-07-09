@@ -8,59 +8,57 @@
  * matches the lane.scopeId. Terminals don't have their own scopeId, so we
  * resolve site via the lane that references them.
  */
-import { getSettings, getLane, getTerminal, listLanes, listTerminals } from './db';
+import { getLane, getTerminal, listLanes, listTerminals } from './db';
+import { getCloudApi, describeRequestError } from './cloud-api';
 
-async function post(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
-  const s = getSettings();
-  if (!s.qparkingBaseUrl || !s.qparkingApiKey) return { ok: false, error: 'qparking_not_configured' };
+interface PushResult { ok: boolean; error?: string }
+
+async function postToCloud(path: string, body: Record<string, unknown>): Promise<PushResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return { ok: false, error: 'qparking_not_configured' };
   try {
-    const res = await fetch(`${s.qparkingBaseUrl.replace(/\/+$/, '')}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.qparkingApiKey}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-    return { ok: res.ok, status: res.status };
-  } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
+    await cloud.post(path, body);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: describeRequestError(error) };
   }
 }
 
 /** Push a single terminal. Resolves site_id via any lane that references it.
  *  If no lane references the terminal yet, we skip (no cloud site to attribute to). */
-export async function pushTerminal(terminalId: number): Promise<{ ok: boolean; error?: string }> {
-  const term = getTerminal(terminalId);
-  if (!term) return { ok: false, error: 'unknown_terminal' };
-  const owningLane = listLanes().find((l) => l.terminalId === term.id);
+export async function pushTerminal(terminalId: number): Promise<PushResult> {
+  const terminal = getTerminal(terminalId);
+  if (!terminal) return { ok: false, error: 'unknown_terminal' };
+  const owningLane = listLanes().find((lane) => lane.terminalId === terminal.id);
   if (!owningLane?.scopeId) return { ok: false, error: 'terminal_not_attached_to_scoped_lane' };
 
-  return post('/api/v1/local-server/terminals', {
-    external_id: `local-${term.id}`,
-    name: term.name,
-    host: term.host,
-    port: term.port,
-    plaza_id: term.plazaId,
-    lane_id_str: term.laneId,
-    lane_type: term.laneType,
-    mode: term.mode,
-    operation_mode: term.operationMode,
-    enabled: term.enabled,
+  return postToCloud('/terminals', {
+    external_id: `local-${terminal.id}`,
+    name: terminal.name,
+    host: terminal.host,
+    port: terminal.port,
+    plaza_id: terminal.plazaId,
+    lane_id_str: terminal.laneId,
+    lane_type: terminal.laneType,
+    mode: terminal.mode,
+    operation_mode: terminal.operationMode,
+    enabled: terminal.enabled,
   });
 }
 
 /** Push a single lane. */
-export async function pushLane(laneId: number): Promise<{ ok: boolean; error?: string }> {
+export async function pushLane(laneId: number): Promise<PushResult> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'unknown_lane' };
   if (!lane.scopeId) return { ok: false, error: 'lane_has_no_scope' };
-  const term = lane.terminalId ? getTerminal(lane.terminalId) : null;
+  const terminal = lane.terminalId ? getTerminal(lane.terminalId) : null;
 
-  return post('/api/v1/local-server/lanes', {
+  return postToCloud('/lanes', {
     external_id: `local-${lane.id}`,
     name: lane.name,
     direction: lane.direction,
     lane_type: lane.laneType ?? 'car',
-    terminal_external_id: term ? `local-${term.id}` : null,
+    terminal_external_id: terminal ? `local-${terminal.id}` : null,
     gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,
   });
@@ -72,7 +70,7 @@ export async function pushAllDevices(): Promise<void> {
   for (const lane of listLanes()) {
     await pushLane(lane.id).catch(() => null);
   }
-  for (const term of listTerminals()) {
-    await pushTerminal(term.id).catch(() => null);
+  for (const terminal of listTerminals()) {
+    await pushTerminal(terminal.id).catch(() => null);
   }
 }

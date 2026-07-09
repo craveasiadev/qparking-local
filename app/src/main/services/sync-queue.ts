@@ -21,11 +21,13 @@
  */
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import axios from 'axios';
 import {
   enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
-  syncQueueStats, getSettings, getLane,
+  syncQueueStats, getLane,
   type SyncOp,
 } from './db';
+import { getCloudApi } from './cloud-api';
 import type { ParkingSession } from '../../shared/types';
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
@@ -222,18 +224,17 @@ async function drainOnce(): Promise<void> {
   syncEvents.emit('status', getSyncStatus());
 
   try {
-    const due = listDueSync();
-    if (due.length === 0) return;
+    const dueRows = listDueSync();
+    if (dueRows.length === 0) return;
 
-    const s = getSettings();
-    if (!s.qparkingBaseUrl || !s.qparkingApiKey) {
+    if (!getCloudApi()) {
       // Not configured yet — leave rows pending; they'll retry once the
       // operator fills in URL + key in Settings.
       lastError = 'qparking_not_configured';
       return;
     }
 
-    for (const row of due) {
+    for (const row of dueRows) {
       const result = await sendOp(row.op, row.payload);
       if (result.ok) {
         markSyncOk(row.id);
@@ -261,34 +262,25 @@ async function drainOnce(): Promise<void> {
 }
 
 async function sendOp(op: SyncOp, payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
-  const s = getSettings();
-  const base = s.qparkingBaseUrl.replace(/\/+$/, '');
+  const cloud = getCloudApi();
+  if (!cloud) return { ok: false, error: 'qparking_not_configured' };
   // All session ops currently hit the same parking-records upsert endpoint
   // — the server differentiates entry vs exit vs update by what fields are
   // present (exit_time present = closing record; absent = open/update).
   // Delete is the exception: we use a body flag the server recognises as
   // "mark this record cancelled".
-  const path = '/api/v1/local-server/parking-records';
   const body = op === 'session.delete' ? { ...payload, _delete: true } : payload;
   try {
-    const res = await fetch(`${base}${path}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${s.qparkingApiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (res.ok) return { ok: true, status: res.status };
-    let msg = res.statusText;
-    try {
-      const parsed: any = await res.json();
-      msg = parsed?.message || parsed?.error || msg;
-    } catch { /* ignore */ }
-    return { ok: false, status: res.status, error: `${res.status} ${msg}` };
-  } catch (e: any) {
-    return { ok: false, error: e?.name === 'TimeoutError' ? 'timeout (10s)' : (e?.message ?? String(e)) };
+    const response = await cloud.post('/parking-records', body);
+    return { ok: true, status: response.status };
+  } catch (error: any) {
+    if (axios.isAxiosError(error) && error.response) {
+      const responseBody: any = error.response.data;
+      const message = responseBody?.message || responseBody?.error || error.response.statusText;
+      return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
+    }
+    const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+    return { ok: false, error: isTimeout ? 'timeout (10s)' : (error?.message ?? String(error)) };
   }
 }
 
@@ -309,13 +301,13 @@ export function backfillAllSessions(): { entries: number; exits: number } {
   // Import here to avoid the circular import that would trigger if we
   // pulled this in at module-load time (db.ts → sync-queue.ts → db.ts).
   const db = require('./db') as typeof import('./db');
-  const all = db.listRecentSessions(10_000);
+  const allSessions = db.listRecentSessions(10_000);
   let entries = 0, exits = 0;
-  for (const s of all) {
-    if (s.exitAt) {
-      enqueueExit(s); exits++;
+  for (const session of allSessions) {
+    if (session.exitAt) {
+      enqueueExit(session); exits++;
     } else {
-      enqueueEntry(s); entries++;
+      enqueueEntry(session); entries++;
     }
   }
   scheduleDrain();

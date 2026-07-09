@@ -24,7 +24,7 @@ import { EventEmitter } from 'node:events';
 import { app } from 'electron';
 import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../../shared/types';
 import {
-  createEntrySession, findOpenSessionByPlate, getLane, getScope, getSettings, getTerminal,
+  createEntrySession, findOpenSessionByPlate, getCamera, getLane, getScope, getSettings, getTerminal,
   listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,
 } from './db';
 import { lprEvents, type PlateEvent } from './lpr-webhook';
@@ -125,9 +125,9 @@ function handlePlateEvent(event: PlateEvent) {
 }
 
 function laneForCamera(cameraId: number): ParkingLane | null {
-  const cam = require('./db').getCamera(cameraId);
-  if (!cam?.laneId) return null;
-  return getLane(cam.laneId);
+  const camera = getCamera(cameraId);
+  if (!camera?.laneId) return null;
+  return getLane(camera.laneId);
 }
 
 function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
@@ -1036,26 +1036,6 @@ function priceBillingCycle(
   }
 
   return { total, blockMinutesAfter: blockMinutes };
-}
-
-/**
- * Back-compat wrapper — some call sites import `ruleForMoment` directly.
- * Delegates to the parity-correct picker (occupancy semantics).
- */
-export function ruleForMoment(
-  rules: TariffRule[],
-  when: Date,
-): TariffRule | null {
-  return pickRuleAtMoment(when.getTime(), rules, false);
-}
-
-/** Convert a stored ISO timestamp to the terminal-friendly "yyyy-MM-dd HH:mm:ss". */
-function localDtFromIso(iso: string): string {
-  try {
-    const d = new Date(iso);
-    const p = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-  } catch { return ''; }
 }
 
 /** Used by the UI fee-preview panel — shows what the calculated charge WOULD be

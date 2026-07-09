@@ -62,8 +62,6 @@ export function openGateSimulator(isDev: boolean) {
   return gateWindow;
 }
 
-export function isGateOpen() { return !!gateWindow && !gateWindow.isDestroyed(); }
-
 export function sendGateEvent(event: GateEvent) {
   if (gateWindow && !gateWindow.isDestroyed()) {
     gateWindow.webContents.send('gate-state', event);

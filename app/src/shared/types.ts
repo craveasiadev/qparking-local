@@ -242,6 +242,43 @@ export interface ParkingSpace {
   fetchedAt: string;
 }
 
+/** The branch/site record mirrored from the qparking SaaS `sites` table
+ *  (Laravel App\Models\Site). Cloud is the source of truth; cached locally so
+ *  company / receipt / logo / scope-override config is available offline.
+ *  `id` and `companyId` are cloud UUIDs. */
+export interface Site {
+  id: string;
+  localServerApiKey: string | null;
+  companyId: string | null;
+  name: string;
+  address: string | null;
+  totalSpaces: number;
+  occupiedSpaces: number;
+  revenueToday: number;
+  status: 'active' | 'maintenance' | 'offline';
+  alarmCount: number;
+  contactPerson: string | null;
+  telephone: string | null;
+  fax: string | null;
+  country: string | null;
+  email: string | null;
+  seasonPassLogoUrl: string | null;
+  parkingSiteType: string | null;
+  logoUrl: string | null;
+  receiptHeader: string | null;
+  receiptFooter: string | null;
+  primaryColor: string;
+  /** Per-site scope overrides editable from the local Scopes page. Null = use
+   *  the cloud rate plan unchanged. */
+  scopeFreeMinutes: number | null;
+  scopeFirstBlockCents: number | null;
+  scopePerBlockCents: number | null;
+  scopeBlockMinutes: number | null;
+  scopeDailyCapCents: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** A plate-keyed pass cached from qparking SaaS so the gate can decide
  *  "skip charging this car, it's already paid" without a WAN round-trip. */
 export interface ActivePass {
@@ -448,6 +485,14 @@ export interface BridgeApi {
   // Scopes / rates
   listScopes(): Promise<ScopeRate[]>;
   syncScopesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+
+  syncAllNow(): Promise<{
+  scopes: { ok: boolean; fetched: number; error?: string };
+  passes: { ok: boolean; fetched: number; error?: string };
+  spaces: { ok: boolean; fetched: number; error?: string };
+}>;
+
+
   /** Push a rate edit to qparking SaaS, then re-pull. The SaaS becomes the
    *  source of truth; the local cache reflects whatever it canonicalised. */
   saveScopeRate(input: {

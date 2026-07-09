@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 import type {
   ActivePass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
-  ParkingSpace,
+  ParkingSpace, Site,
 } from '../../shared/types';
 
 let db: Database.Database | null = null;
@@ -26,8 +26,8 @@ export function getDb(): Database.Database {
   return db;
 }
 
-function applySchema(d: Database.Database) {
-  d.exec(`
+function applySchema(db: Database.Database) {
+  db.exec(`
     CREATE TABLE IF NOT EXISTS terminals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -212,33 +212,69 @@ function applySchema(d: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_spaces_building ON parking_spaces (building);
     CREATE INDEX IF NOT EXISTS idx_spaces_status ON parking_spaces (status);
+
+    -- Local mirror of the qparking SaaS sites table (Laravel Site model): the
+    -- union of create_sites_table + local_server_api_key + scope-override
+    -- migrations. Cloud is the source of truth; cached here so company /
+    -- receipt / logo / scope-override config is available offline. id and
+    -- company_id are cloud UUIDs (TEXT, not autoincrement).
+    CREATE TABLE IF NOT EXISTS sites (
+      id TEXT PRIMARY KEY,
+      local_server_api_key TEXT UNIQUE,
+      company_id TEXT,
+      name TEXT NOT NULL,
+      address TEXT,
+      total_spaces INTEGER NOT NULL DEFAULT 0,
+      occupied_spaces INTEGER NOT NULL DEFAULT 0,
+      revenue_today REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK (status IN ('active','maintenance','offline')) DEFAULT 'active',
+      alarm_count INTEGER NOT NULL DEFAULT 0,
+      contact_person TEXT,
+      telephone TEXT,
+      fax TEXT,
+      country TEXT,
+      email TEXT,
+      season_pass_logo_url TEXT,
+      parking_site_type TEXT,
+      logo_url TEXT,
+      receipt_header TEXT,
+      receipt_footer TEXT,
+      primary_color TEXT NOT NULL DEFAULT '#3b82f6',
+      scope_free_minutes INTEGER,
+      scope_first_block_cents INTEGER,
+      scope_per_block_cents INTEGER,
+      scope_block_minutes INTEGER,
+      scope_daily_cap_cents INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // 2026-07-09: the cloud retired the vehicle-type concept — pricing is now
   // purely lane → rate policy → day/time/date. Drop the cached taxonomy tables
   // and the vehicle_type column on tariff_rules on installs that still have
   // them. All idempotent / best-effort (DROP COLUMN needs SQLite ≥ 3.35).
-  try { d.exec('DROP TABLE IF EXISTS vehicle_types'); } catch { /* ignore */ }
-  try { d.exec('DROP TABLE IF EXISTS vehicle_groups'); } catch { /* ignore */ }
-  try { d.exec('ALTER TABLE tariff_rules DROP COLUMN vehicle_type'); } catch { /* column absent or old SQLite */ }
+  try { db.exec('DROP TABLE IF EXISTS vehicle_types'); } catch { /* ignore */ }
+  try { db.exec('DROP TABLE IF EXISTS vehicle_groups'); } catch { /* ignore */ }
+  try { db.exec('ALTER TABLE tariff_rules DROP COLUMN vehicle_type'); } catch { /* column absent or old SQLite */ }
 
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
   // the column already exists, so wrap each in its own try/catch.
   for (const col of ['host TEXT', 'snapshot_url TEXT']) {
-    try { d.exec(`ALTER TABLE cameras ADD COLUMN ${col}`); } catch { /* already there */ }
+    try { db.exec(`ALTER TABLE cameras ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // Same pattern for sessions — older installs predate card_scheme /
   // payment_timestamp. Both feed the new finance columns on the cloud.
   for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT']) {
-    try { d.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
+    try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // One-shot correction for the W4G default port. Earlier dev builds
   // defaulted tngPort to 8080 (vendor docs don't specify, my initial guess
   // was wrong) — the actual test rig at 192.168.1.105 serves on plain
   // HTTP port 80. Wipe the persisted 8080 so the new default kicks in;
   // anyone who explicitly chose a different port keeps their value.
-  try { d.prepare(`DELETE FROM settings WHERE key='tngPort' AND value='8080'`).run(); } catch { /* ignore */ }
+  try { db.prepare(`DELETE FROM settings WHERE key='tngPort' AND value='8080'`).run(); } catch { /* ignore */ }
   // 2026-06-29: tngCallbackPort default moved 6002 → 80 because the W4G
   // device firmware hardcodes port 80 for its PayResult callback. Sites
   // running with the old 6002 default never receive PayResult; clear the
@@ -246,7 +282,7 @@ function applySchema(d: Database.Database) {
   // 80 AND whatever the operator explicitly sets, so a deliberate 6002
   // doesn't break callbacks — it just means the device must also send
   // to 6002 (rare).
-  try { d.prepare(`DELETE FROM settings WHERE key='tngCallbackPort' AND value='6002'`).run(); } catch { /* ignore */ }
+  try { db.prepare(`DELETE FROM settings WHERE key='tngCallbackPort' AND value='6002'`).run(); } catch { /* ignore */ }
 
   // Idempotent ALTERs for scopes — installs predating the 2026-06 schedule
   // expansion lack the policy + cutoff columns.
@@ -269,18 +305,18 @@ function applySchema(d: Database.Database) {
     // effective-rule mirror in daily_cap_cents. NULL = uncapped.
     'policy_daily_cap_cents INTEGER',
   ]) {
-    try { d.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
+    try { db.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // 2026-06-22: per-rule is_active flag — mirrors the Activations tab so
   // operators can see which rules are dimmed and the exit flow can skip
   // inactive rules even if they technically match the moment.
-  try { d.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
+  try { db.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
 
   // 2026-07-03: lane_type distinguishes car / motorcycle / mixed lanes.
   // Descriptive lane metadata mirrored from the cloud only — as of 2026-07-09
   // it has NO effect on pricing (fees are lane → rate policy → day/time/date;
   // the vehicle-type dimension was retired).
-  try { d.exec(`ALTER TABLE lanes ADD COLUMN lane_type TEXT NOT NULL DEFAULT 'car'`); } catch { /* already there */ }
+  try { db.exec(`ALTER TABLE lanes ADD COLUMN lane_type TEXT NOT NULL DEFAULT 'car'`); } catch { /* already there */ }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -306,30 +342,30 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export function getSettings(): AppSettings {
-  const d = getDb();
-  const rows = d.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
+  const db = getDb();
+  const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
   const result: AppSettings = { ...DEFAULT_SETTINGS };
   for (const row of rows) {
     if (row.key in result) {
-      const k = row.key as keyof AppSettings;
+      const key = row.key as keyof AppSettings;
       // Booleans/numbers come back as strings — coerce by the default's type.
-      const v = row.value;
-      const defType = typeof DEFAULT_SETTINGS[k];
-      if (defType === 'number') (result as any)[k] = Number(v);
-      else if (defType === 'boolean') (result as any)[k] = v === 'true' || v === '1';
-      else (result as any)[k] = v;
+      const storedValue = row.value;
+      const defaultType = typeof DEFAULT_SETTINGS[key];
+      if (defaultType === 'number') (result as any)[key] = Number(storedValue);
+      else if (defaultType === 'boolean') (result as any)[key] = storedValue === 'true' || storedValue === '1';
+      else (result as any)[key] = storedValue;
     }
   }
   return result;
 }
 
 export function saveSettings(patch: Partial<AppSettings>): AppSettings {
-  const d = getDb();
-  const stmt = d.prepare('INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-  const tx = d.transaction(() => {
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === undefined || v === null) continue;
-      stmt.run(k, String(v));
+  const db = getDb();
+  const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+  const tx = db.transaction(() => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined || value === null) continue;
+      stmt.run(key, String(value));
     }
   });
   tx();
@@ -338,12 +374,12 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
 
 // ─── terminals ─────────────────────────────────────────────────────────────
 
-function rowToTerminal(r: any): PaymentTerminal {
+function rowToTerminal(row: any): PaymentTerminal {
   return {
-    id: r.id, name: r.name, host: r.host, port: r.port, secretKey: r.secret_key,
-    plazaId: r.plaza_id, laneId: r.lane_id, laneType: r.lane_type, mode: r.mode,
-    operationMode: r.operation_mode, enabled: !!r.enabled,
-    createdAt: r.created_at, updatedAt: r.updated_at,
+    id: row.id, name: row.name, host: row.host, port: row.port, secretKey: row.secret_key,
+    plazaId: row.plaza_id, laneId: row.lane_id, laneType: row.lane_type, mode: row.mode,
+    operationMode: row.operation_mode, enabled: !!row.enabled,
+    createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
 
@@ -352,19 +388,19 @@ export function listTerminals(): PaymentTerminal[] {
 }
 
 export function getTerminal(id: number): PaymentTerminal | null {
-  const r = getDb().prepare('SELECT * FROM terminals WHERE id = ?').get(id) as any;
-  return r ? rowToTerminal(r) : null;
+  const row = getDb().prepare('SELECT * FROM terminals WHERE id = ?').get(id) as any;
+  return row ? rowToTerminal(row) : null;
 }
 
-export function upsertTerminal(t: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> & { id?: number }): PaymentTerminal {
-  const d = getDb();
-  if (t.id) {
-    d.prepare(`UPDATE terminals SET name=?, host=?, port=?, secret_key=?, plaza_id=?, lane_id=?, lane_type=?, mode=?, operation_mode=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(t.name, t.host, t.port, t.secretKey, t.plazaId, t.laneId, t.laneType, t.mode, t.operationMode, t.enabled ? 1 : 0, t.id);
-    return getTerminal(t.id)!;
+export function upsertTerminal(terminal: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> & { id?: number }): PaymentTerminal {
+  const db = getDb();
+  if (terminal.id) {
+    db.prepare(`UPDATE terminals SET name=?, host=?, port=?, secret_key=?, plaza_id=?, lane_id=?, lane_type=?, mode=?, operation_mode=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(terminal.name, terminal.host, terminal.port, terminal.secretKey, terminal.plazaId, terminal.laneId, terminal.laneType, terminal.mode, terminal.operationMode, terminal.enabled ? 1 : 0, terminal.id);
+    return getTerminal(terminal.id)!;
   }
-  const info = d.prepare(`INSERT INTO terminals (name, host, port, secret_key, plaza_id, lane_id, lane_type, mode, operation_mode, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(t.name, t.host, t.port, t.secretKey, t.plazaId, t.laneId, t.laneType, t.mode, t.operationMode, t.enabled ? 1 : 0);
+  const info = db.prepare(`INSERT INTO terminals (name, host, port, secret_key, plaza_id, lane_id, lane_type, mode, operation_mode, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(terminal.name, terminal.host, terminal.port, terminal.secretKey, terminal.plazaId, terminal.laneId, terminal.laneType, terminal.mode, terminal.operationMode, terminal.enabled ? 1 : 0);
   return getTerminal(Number(info.lastInsertRowid))!;
 }
 
@@ -381,13 +417,13 @@ export function logTerminal(terminalId: number, direction: 'send'|'recv'|'error'
 
 // ─── cameras ───────────────────────────────────────────────────────────────
 
-function rowToCamera(r: any): LprCamera {
+function rowToCamera(row: any): LprCamera {
   return {
-    id: r.id, name: r.name, laneId: r.lane_id, direction: r.direction,
-    ingestMode: r.ingest_mode, webhookSecret: r.webhook_secret,
-    host: r.host ?? null, snapshotUrl: r.snapshot_url ?? null,
-    pollUrl: r.poll_url, pollIntervalSeconds: r.poll_interval_seconds,
-    enabled: !!r.enabled, createdAt: r.created_at, updatedAt: r.updated_at,
+    id: row.id, name: row.name, laneId: row.lane_id, direction: row.direction,
+    ingestMode: row.ingest_mode, webhookSecret: row.webhook_secret,
+    host: row.host ?? null, snapshotUrl: row.snapshot_url ?? null,
+    pollUrl: row.poll_url, pollIntervalSeconds: row.poll_interval_seconds,
+    enabled: !!row.enabled, createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
 
@@ -396,19 +432,19 @@ export function listCameras(): LprCamera[] {
 }
 
 export function getCamera(id: number): LprCamera | null {
-  const r = getDb().prepare('SELECT * FROM cameras WHERE id = ?').get(id) as any;
-  return r ? rowToCamera(r) : null;
+  const row = getDb().prepare('SELECT * FROM cameras WHERE id = ?').get(id) as any;
+  return row ? rowToCamera(row) : null;
 }
 
-export function upsertCamera(c: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> & { id?: number }): LprCamera {
-  const d = getDb();
-  if (c.id) {
-    d.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(c.name, c.laneId, c.direction, c.ingestMode, c.host, c.snapshotUrl, c.webhookSecret, c.pollUrl, c.pollIntervalSeconds, c.enabled ? 1 : 0, c.id);
-    return getCamera(c.id)!;
+export function upsertCamera(camera: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> & { id?: number }): LprCamera {
+  const db = getDb();
+  if (camera.id) {
+    db.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0, camera.id);
+    return getCamera(camera.id)!;
   }
-  const info = d.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(c.name, c.laneId, c.direction, c.ingestMode, c.host, c.snapshotUrl, c.webhookSecret, c.pollUrl, c.pollIntervalSeconds, c.enabled ? 1 : 0);
+  const info = db.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0);
   return getCamera(Number(info.lastInsertRowid))!;
 }
 
@@ -418,12 +454,12 @@ export function deleteCamera(id: number) {
 
 // ─── lanes ─────────────────────────────────────────────────────────────────
 
-function rowToLane(r: any): ParkingLane {
+function rowToLane(row: any): ParkingLane {
   return {
-    id: r.id, name: r.name, direction: r.direction, scopeId: r.scope_id,
-    terminalId: r.terminal_id, gateRelayAddress: r.gate_relay_address,
-    enabled: !!r.enabled,
-    laneType: (r.lane_type ?? 'car') as ParkingLane['laneType'],
+    id: row.id, name: row.name, direction: row.direction, scopeId: row.scope_id,
+    terminalId: row.terminal_id, gateRelayAddress: row.gate_relay_address,
+    enabled: !!row.enabled,
+    laneType: (row.lane_type ?? 'car') as ParkingLane['laneType'],
   };
 }
 
@@ -432,20 +468,20 @@ export function listLanes(): ParkingLane[] {
 }
 
 export function getLane(id: number): ParkingLane | null {
-  const r = getDb().prepare('SELECT * FROM lanes WHERE id = ?').get(id) as any;
-  return r ? rowToLane(r) : null;
+  const row = getDb().prepare('SELECT * FROM lanes WHERE id = ?').get(id) as any;
+  return row ? rowToLane(row) : null;
 }
 
-export function upsertLane(l: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
-  const d = getDb();
-  const laneType = l.laneType ?? 'car';
-  if (l.id) {
-    d.prepare(`UPDATE lanes SET name=?, direction=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=?, lane_type=? WHERE id=?`)
-      .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, laneType, l.id);
-    return getLane(l.id)!;
+export function upsertLane(lane: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
+  const db = getDb();
+  const laneType = lane.laneType ?? 'car';
+  if (lane.id) {
+    db.prepare(`UPDATE lanes SET name=?, direction=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=?, lane_type=? WHERE id=?`)
+      .run(lane.name, lane.direction, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, laneType, lane.id);
+    return getLane(lane.id)!;
   }
-  const info = d.prepare(`INSERT INTO lanes (name, direction, scope_id, terminal_id, gate_relay_address, enabled, lane_type) VALUES (?,?,?,?,?,?,?)`)
-    .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, laneType);
+  const info = db.prepare(`INSERT INTO lanes (name, direction, scope_id, terminal_id, gate_relay_address, enabled, lane_type) VALUES (?,?,?,?,?,?,?)`)
+    .run(lane.name, lane.direction, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, laneType);
   return getLane(Number(info.lastInsertRowid))!;
 }
 
@@ -455,37 +491,37 @@ export function deleteLane(id: number) {
 
 // ─── sessions ──────────────────────────────────────────────────────────────
 
-function rowToSession(r: any): ParkingSession {
+function rowToSession(row: any): ParkingSession {
   return {
-    id: r.id, plate: r.plate,
-    entryAt: r.entry_at, entryLaneId: r.entry_lane_id, entryCameraId: r.entry_camera_id, entryImagePath: r.entry_image_path,
-    exitAt: r.exit_at, exitLaneId: r.exit_lane_id, exitCameraId: r.exit_camera_id, exitImagePath: r.exit_image_path,
-    durationMinutes: r.duration_minutes, feeCents: r.fee_cents,
-    paymentStatus: r.payment_status, terminalTxnId: r.terminal_txn_id,
-    cardScheme: r.card_scheme ?? null,
-    paymentTimestamp: r.payment_timestamp ?? null,
-    notes: r.notes,
-    createdAt: r.created_at, updatedAt: r.updated_at,
+    id: row.id, plate: row.plate,
+    entryAt: row.entry_at, entryLaneId: row.entry_lane_id, entryCameraId: row.entry_camera_id, entryImagePath: row.entry_image_path,
+    exitAt: row.exit_at, exitLaneId: row.exit_lane_id, exitCameraId: row.exit_camera_id, exitImagePath: row.exit_image_path,
+    durationMinutes: row.duration_minutes, feeCents: row.fee_cents,
+    paymentStatus: row.payment_status, terminalTxnId: row.terminal_txn_id,
+    cardScheme: row.card_scheme ?? null,
+    paymentTimestamp: row.payment_timestamp ?? null,
+    notes: row.notes,
+    createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
 
 /** Find the OPEN session for a plate (entry recorded, exit not yet). Used by
  *  the exit flow to look up entry time + fee calculation source. */
 export function findOpenSessionByPlate(plate: string): ParkingSession | null {
-  const r = getDb().prepare('SELECT * FROM sessions WHERE plate = ? AND exit_at IS NULL ORDER BY entry_at DESC LIMIT 1').get(plate) as any;
-  return r ? rowToSession(r) : null;
+  const row = getDb().prepare('SELECT * FROM sessions WHERE plate = ? AND exit_at IS NULL ORDER BY entry_at DESC LIMIT 1').get(plate) as any;
+  return row ? rowToSession(row) : null;
 }
 
 export function createEntrySession(plate: string, laneId: number | null, cameraId: number | null, imagePath: string | null): ParkingSession {
-  const d = getDb();
-  const info = d.prepare(`INSERT INTO sessions (plate, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?)`)
+  const db = getDb();
+  const info = db.prepare(`INSERT INTO sessions (plate, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?)`)
     .run(plate, laneId, cameraId, imagePath);
   return getSessionById(Number(info.lastInsertRowid))!;
 }
 
 export function getSessionById(id: number): ParkingSession | null {
-  const r = getDb().prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any;
-  return r ? rowToSession(r) : null;
+  const row = getDb().prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any;
+  return row ? rowToSession(row) : null;
 }
 
 export function recordExit(sessionId: number, patch: {
@@ -567,30 +603,30 @@ export interface SessionFilters {
   exitTo?: string | null;
 }
 
-function buildSessionFilters(f: SessionFilters): { clauses: string[]; args: any[] } {
+function buildSessionFilters(filters: SessionFilters): { clauses: string[]; args: any[] } {
   const clauses: string[] = [];
   const args: any[] = [];
-  if (f.plateSearch && f.plateSearch.trim()) {
+  if (filters.plateSearch && filters.plateSearch.trim()) {
     clauses.push('UPPER(plate) LIKE ?');
-    args.push(`%${f.plateSearch.trim().toUpperCase()}%`);
+    args.push(`%${filters.plateSearch.trim().toUpperCase()}%`);
   }
-  if (f.entryFrom) { clauses.push('entry_at >= ?'); args.push(f.entryFrom); }
-  if (f.entryTo)   { clauses.push('entry_at <= ?'); args.push(f.entryTo); }
-  if (f.exitFrom)  { clauses.push('exit_at >= ?');  args.push(f.exitFrom); }
-  if (f.exitTo)    { clauses.push('exit_at <= ?');  args.push(f.exitTo); }
+  if (filters.entryFrom) { clauses.push('entry_at >= ?'); args.push(filters.entryFrom); }
+  if (filters.entryTo)   { clauses.push('entry_at <= ?'); args.push(filters.entryTo); }
+  if (filters.exitFrom)  { clauses.push('exit_at >= ?');  args.push(filters.exitFrom); }
+  if (filters.exitTo)    { clauses.push('exit_at <= ?');  args.push(filters.exitTo); }
   return { clauses, args };
 }
 
 export function countSessions(filters: SessionFilters = {}): { open: number; total: number } {
-  const d = getDb();
+  const db = getDb();
   const { clauses, args } = buildSessionFilters(filters);
   const openClauses = ['exit_at IS NULL', ...clauses];
   const openSql = `SELECT COUNT(*) as c FROM sessions WHERE ${openClauses.join(' AND ')}`;
   const totalSql = clauses.length > 0
     ? `SELECT COUNT(*) as c FROM sessions WHERE ${clauses.join(' AND ')}`
     : 'SELECT COUNT(*) as c FROM sessions';
-  const open = d.prepare(openSql).get(...args) as any;
-  const total = d.prepare(totalSql).get(...args) as any;
+  const open = db.prepare(openSql).get(...args) as any;
+  const total = db.prepare(totalSql).get(...args) as any;
   return { open: open.c as number, total: total.c as number };
 }
 
@@ -605,14 +641,14 @@ export function listSessionsPage(opts: SessionFilters & {
   limit: number;
   offset: number;
 }): ParkingSession[] {
-  const d = getDb();
+  const db = getDb();
   const { clauses, args } = buildSessionFilters(opts);
   const whereClauses: string[] = [];
   if (opts.tab === 'open') whereClauses.push('exit_at IS NULL');
   whereClauses.push(...clauses);
   const where = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
   const sql = `SELECT * FROM sessions ${where} ORDER BY entry_at DESC LIMIT ? OFFSET ?`;
-  return (d.prepare(sql).all(...args, opts.limit, opts.offset) as any[]).map(rowToSession);
+  return (db.prepare(sql).all(...args, opts.limit, opts.offset) as any[]).map(rowToSession);
 }
 
 export function deleteSession(sessionId: number): boolean {
@@ -639,11 +675,11 @@ export interface SyncQueueRow {
   updatedAt: string;
 }
 
-function rowToSync(r: any): SyncQueueRow {
+function rowToSync(row: any): SyncQueueRow {
   return {
-    id: r.id, op: r.op as SyncOp, payload: JSON.parse(r.payload),
-    attempts: r.attempts, status: r.status, lastError: r.last_error,
-    nextAttemptAt: r.next_attempt_at, createdAt: r.created_at, updatedAt: r.updated_at,
+    id: row.id, op: row.op as SyncOp, payload: JSON.parse(row.payload),
+    attempts: row.attempts, status: row.status, lastError: row.last_error,
+    nextAttemptAt: row.next_attempt_at, createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
 
@@ -676,10 +712,10 @@ export function markSyncFailed(id: number, error: string): void {
 }
 
 export function syncQueueStats(): { pending: number; failed: number; oldestPending: string | null } {
-  const d = getDb();
-  const pending = (d.prepare(`SELECT COUNT(*) as c FROM sync_queue WHERE status = 'pending'`).get() as any).c;
-  const failed = (d.prepare(`SELECT COUNT(*) as c FROM sync_queue WHERE status = 'failed'`).get() as any).c;
-  const oldest = d.prepare(`SELECT created_at FROM sync_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1`).get() as any;
+  const db = getDb();
+  const pending = (db.prepare(`SELECT COUNT(*) as c FROM sync_queue WHERE status = 'pending'`).get() as any).c;
+  const failed = (db.prepare(`SELECT COUNT(*) as c FROM sync_queue WHERE status = 'failed'`).get() as any).c;
+  const oldest = db.prepare(`SELECT created_at FROM sync_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1`).get() as any;
   return { pending, failed, oldestPending: oldest?.created_at ?? null };
 }
 
@@ -704,67 +740,67 @@ export function clearFailedSync(): number {
  * for the "delete everything in this tab" use case.
  */
 export function deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): number {
-  const d = getDb();
+  const db = getDb();
   if (opts.ids && opts.ids.length > 0) {
     const placeholders = opts.ids.map(() => '?').join(',');
-    const info = d.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...opts.ids);
+    const info = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...opts.ids);
     return info.changes;
   }
   if (opts.tab === 'open') {
-    return d.prepare('DELETE FROM sessions WHERE exit_at IS NULL').run().changes;
+    return db.prepare('DELETE FROM sessions WHERE exit_at IS NULL').run().changes;
   }
   if (opts.tab === 'recent') {
     // "Recent" tab clears completed sessions only — never wipes open ones.
-    return d.prepare('DELETE FROM sessions WHERE exit_at IS NOT NULL').run().changes;
+    return db.prepare('DELETE FROM sessions WHERE exit_at IS NOT NULL').run().changes;
   }
   if (opts.tab === 'all') {
-    return d.prepare('DELETE FROM sessions').run().changes;
+    return db.prepare('DELETE FROM sessions').run().changes;
   }
   return 0;
 }
 
 // ─── scopes ────────────────────────────────────────────────────────────────
 
-function rowToScope(r: any, rules: TariffRule[] = []): ScopeRate {
+function rowToScope(row: any, rules: TariffRule[] = []): ScopeRate {
   return {
-    scopeId: r.scope_id, scopeName: r.scope_name, freeMinutes: r.free_minutes,
-    firstBlockCents: r.first_block_cents, perBlockCents: r.per_block_cents,
-    blockMinutes: r.block_minutes, dailyCapCents: r.daily_cap_cents,
-    currency: r.currency, fetchedAt: r.fetched_at,
-    policyId: r.policy_id ?? null,
-    policyName: r.policy_name ?? null,
-    policyDescription: r.policy_description ?? null,
-    graceExceededBehavior: (r.grace_exceeded_behavior ?? null) as any,
-    cutoffEnabled: !!r.cutoff_enabled,
-    cutoffTime: r.cutoff_time ?? null,
-    cutoffBehavior: r.cutoff_behavior ?? null,
-    newDayFixedFeeCents: r.new_day_fixed_fee_cents ?? null,
-    rateBasis: (r.rate_basis ?? null) as any,
-    flatMultiRate: (r.flat_multi_rate ?? null) as any,
-    firstBlockOncePerEntry: !!r.first_block_once_per_entry,
-    policyDailyCapCents: r.policy_daily_cap_cents ?? null,
+    scopeId: row.scope_id, scopeName: row.scope_name, freeMinutes: row.free_minutes,
+    firstBlockCents: row.first_block_cents, perBlockCents: row.per_block_cents,
+    blockMinutes: row.block_minutes, dailyCapCents: row.daily_cap_cents,
+    currency: row.currency, fetchedAt: row.fetched_at,
+    policyId: row.policy_id ?? null,
+    policyName: row.policy_name ?? null,
+    policyDescription: row.policy_description ?? null,
+    graceExceededBehavior: (row.grace_exceeded_behavior ?? null) as any,
+    cutoffEnabled: !!row.cutoff_enabled,
+    cutoffTime: row.cutoff_time ?? null,
+    cutoffBehavior: row.cutoff_behavior ?? null,
+    newDayFixedFeeCents: row.new_day_fixed_fee_cents ?? null,
+    rateBasis: (row.rate_basis ?? null) as any,
+    flatMultiRate: (row.flat_multi_rate ?? null) as any,
+    firstBlockOncePerEntry: !!row.first_block_once_per_entry,
+    policyDailyCapCents: row.policy_daily_cap_cents ?? null,
     rules,
   };
 }
 
-function rowToTariffRule(r: any): TariffRule {
+function rowToTariffRule(row: any): TariffRule {
   return {
-    ruleId: r.rule_id, name: r.name,
-    priority: r.priority,
-    daysOfWeek: r.days_of_week ? JSON.parse(r.days_of_week) : null,
-    timeFrom: r.time_from, timeTo: r.time_to,
-    validFrom: r.valid_from ?? null, validTo: r.valid_to ?? null,
-    ruleType: r.rule_type as 'flat_rate' | 'block_hourly',
-    flatAmountCents: r.flat_amount_cents,
-    firstBlockAmountCents: r.first_block_amount_cents,
-    firstBlockMinutes: r.first_block_minutes,
-    subsequentBlockAmountCents: r.subsequent_block_amount_cents,
-    subsequentBlockMinutes: r.subsequent_block_minutes,
-    dailyCapCents: r.daily_cap_cents,
-    isOvernight: !!r.is_overnight,
+    ruleId: row.rule_id, name: row.name,
+    priority: row.priority,
+    daysOfWeek: row.days_of_week ? JSON.parse(row.days_of_week) : null,
+    timeFrom: row.time_from, timeTo: row.time_to,
+    validFrom: row.valid_from ?? null, validTo: row.valid_to ?? null,
+    ruleType: row.rule_type as 'flat_rate' | 'block_hourly',
+    flatAmountCents: row.flat_amount_cents,
+    firstBlockAmountCents: row.first_block_amount_cents,
+    firstBlockMinutes: row.first_block_minutes,
+    subsequentBlockAmountCents: row.subsequent_block_amount_cents,
+    subsequentBlockMinutes: row.subsequent_block_minutes,
+    dailyCapCents: row.daily_cap_cents,
+    isOvernight: !!row.is_overnight,
     // Default true on legacy rows (DB column has DEFAULT 1) so an
     // unmigrated install doesn't suddenly treat every rule as inactive.
-    isActive: r.is_active === 0 ? false : true,
+    isActive: row.is_active === 0 ? false : true,
   };
 }
 
@@ -774,13 +810,54 @@ function listTariffRulesForScope(scopeId: string): TariffRule[] {
 
 export function listScopes(): ScopeRate[] {
   const rows = getDb().prepare('SELECT * FROM scopes ORDER BY scope_name').all() as any[];
-  return rows.map((r) => rowToScope(r, listTariffRulesForScope(r.scope_id)));
+  return rows.map((row) => rowToScope(row, listTariffRulesForScope(row.scope_id)));
 }
 
 export function getScope(id: string): ScopeRate | null {
-  const r = getDb().prepare('SELECT * FROM scopes WHERE scope_id = ?').get(id) as any;
-  if (!r) return null;
-  return rowToScope(r, listTariffRulesForScope(id));
+  const row = getDb().prepare('SELECT * FROM scopes WHERE scope_id = ?').get(id) as any;
+  if (!row) return null;
+  return rowToScope(row, listTariffRulesForScope(id));
+}
+
+
+/** Map a raw `sites` row (snake_case) to the camelCase Site shape. */
+function rowToSite(row: any): Site {
+  return {
+    id: row.id,
+    localServerApiKey: row.local_server_api_key ?? null,
+    companyId: row.company_id ?? null,
+    name: row.name,
+    address: row.address ?? null,
+    totalSpaces: row.total_spaces,
+    occupiedSpaces: row.occupied_spaces,
+    revenueToday: row.revenue_today,
+    status: row.status,
+    alarmCount: row.alarm_count,
+    contactPerson: row.contact_person ?? null,
+    telephone: row.telephone ?? null,
+    fax: row.fax ?? null,
+    country: row.country ?? null,
+    email: row.email ?? null,
+    seasonPassLogoUrl: row.season_pass_logo_url ?? null,
+    parkingSiteType: row.parking_site_type ?? null,
+    logoUrl: row.logo_url ?? null,
+    receiptHeader: row.receipt_header ?? null,
+    receiptFooter: row.receipt_footer ?? null,
+    primaryColor: row.primary_color,
+    scopeFreeMinutes: row.scope_free_minutes ?? null,
+    scopeFirstBlockCents: row.scope_first_block_cents ?? null,
+    scopePerBlockCents: row.scope_per_block_cents ?? null,
+    scopeBlockMinutes: row.scope_block_minutes ?? null,
+    scopeDailyCapCents: row.scope_daily_cap_cents ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getSite(id: string): Site | null {
+  const row = getDb().prepare('SELECT * FROM sites WHERE id = ?').get(id) as any;
+  if (!row) return null;
+  return rowToSite(row);
 }
 
 /**
@@ -788,10 +865,10 @@ export function getScope(id: string): ScopeRate | null {
  * call — the SaaS is the source of truth, so a rule removed in the cloud
  * UI should disappear locally on the very next poll.
  */
-export function upsertScope(s: ScopeRate): ScopeRate {
-  const d = getDb();
-  const tx = d.transaction(() => {
-    d.prepare(`INSERT INTO scopes (
+export function upsertScope(scope: ScopeRate): ScopeRate {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare(`INSERT INTO scopes (
         scope_id, scope_name, free_minutes, first_block_cents, per_block_cents,
         block_minutes, daily_cap_cents, currency, fetched_at,
         policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
@@ -820,42 +897,42 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         first_block_once_per_entry=excluded.first_block_once_per_entry,
         policy_daily_cap_cents=excluded.policy_daily_cap_cents`)
       .run(
-        s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents,
-        s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt,
-        s.policyId ?? null, s.policyName ?? null, s.graceExceededBehavior ?? null,
-        s.cutoffEnabled ? 1 : 0, s.cutoffTime ?? null, s.cutoffBehavior ?? null,
-        s.policyDescription ?? null, s.newDayFixedFeeCents ?? null,
-        s.rateBasis ?? null, s.flatMultiRate ?? null, s.firstBlockOncePerEntry ? 1 : 0,
-        s.policyDailyCapCents ?? null,
+        scope.scopeId, scope.scopeName, scope.freeMinutes, scope.firstBlockCents, scope.perBlockCents,
+        scope.blockMinutes, scope.dailyCapCents, scope.currency, scope.fetchedAt,
+        scope.policyId ?? null, scope.policyName ?? null, scope.graceExceededBehavior ?? null,
+        scope.cutoffEnabled ? 1 : 0, scope.cutoffTime ?? null, scope.cutoffBehavior ?? null,
+        scope.policyDescription ?? null, scope.newDayFixedFeeCents ?? null,
+        scope.rateBasis ?? null, scope.flatMultiRate ?? null, scope.firstBlockOncePerEntry ? 1 : 0,
+        scope.policyDailyCapCents ?? null,
       );
 
-    d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(s.scopeId);
-    const insertRule = d.prepare(`INSERT INTO tariff_rules (
+    db.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(scope.scopeId);
+    const insertRule = db.prepare(`INSERT INTO tariff_rules (
         rule_id, scope_id, name, priority, days_of_week,
         time_from, time_to, valid_from, valid_to, rule_type,
         flat_amount_cents, first_block_amount_cents, first_block_minutes,
         subsequent_block_amount_cents, subsequent_block_minutes,
         daily_cap_cents, is_overnight, is_active, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const r of s.rules ?? []) {
+    for (const rule of scope.rules ?? []) {
       insertRule.run(
-        r.ruleId, s.scopeId, r.name, r.priority,
-        r.daysOfWeek ? JSON.stringify(r.daysOfWeek) : null,
-        r.timeFrom, r.timeTo,
-        r.validFrom ?? null, r.validTo ?? null,
-        r.ruleType,
-        r.flatAmountCents, r.firstBlockAmountCents, r.firstBlockMinutes,
-        r.subsequentBlockAmountCents, r.subsequentBlockMinutes,
-        r.dailyCapCents,
-        r.isOvernight ? 1 : 0,
+        rule.ruleId, scope.scopeId, rule.name, rule.priority,
+        rule.daysOfWeek ? JSON.stringify(rule.daysOfWeek) : null,
+        rule.timeFrom, rule.timeTo,
+        rule.validFrom ?? null, rule.validTo ?? null,
+        rule.ruleType,
+        rule.flatAmountCents, rule.firstBlockAmountCents, rule.firstBlockMinutes,
+        rule.subsequentBlockAmountCents, rule.subsequentBlockMinutes,
+        rule.dailyCapCents,
+        rule.isOvernight ? 1 : 0,
         // Default true so older sync payloads that don't carry is_active keep
         // every rule live (matches the cloud's pre-2026-06-22 behavior).
-        r.isActive === false ? 0 : 1,
+        rule.isActive === false ? 0 : 1,
       );
     }
   });
   tx();
-  return getScope(s.scopeId)!;
+  return getScope(scope.scopeId)!;
 }
 
 /**
@@ -865,18 +942,18 @@ export function upsertScope(s: ScopeRate): ScopeRate {
  * still pointing at a stale scope would keep charging the retired rate.
  */
 export function pruneStaleScopes(keepIds: string[]): number {
-  const d = getDb();
-  const existing = d.prepare('SELECT scope_id FROM scopes').all() as { scope_id: string }[];
+  const db = getDb();
+  const existing = db.prepare('SELECT scope_id FROM scopes').all() as { scope_id: string }[];
   const stale = existing
-    .map((r) => r.scope_id)
+    .map((row) => row.scope_id)
     .filter((id) => !keepIds.includes(id));
   if (stale.length === 0) return 0;
-  const tx = d.transaction((ids: string[]) => {
-    const delRule = d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?');
-    const delScope = d.prepare('DELETE FROM scopes WHERE scope_id = ?');
+  const tx = db.transaction((ids: string[]) => {
+    const delRule = db.prepare('DELETE FROM tariff_rules WHERE scope_id = ?');
+    const delScope = db.prepare('DELETE FROM scopes WHERE scope_id = ?');
     // Any lane still bound to a stale scope loses its binding — it'll
     // fall back to the site-default policy on the next resolver call.
-    const clearLane = d.prepare('UPDATE lanes SET scope_id = NULL WHERE scope_id = ?');
+    const clearLane = db.prepare('UPDATE lanes SET scope_id = NULL WHERE scope_id = ?');
     for (const id of ids) {
       delRule.run(id);
       clearLane.run(id);
@@ -893,13 +970,13 @@ export function pruneStaleScopes(keepIds: string[]): number {
 // inbound plate here BEFORE driving the terminal — a match means "already
 // paid, just open the gate".
 
-function rowToActivePass(r: any): ActivePass {
+function rowToActivePass(row: any): ActivePass {
   return {
-    passId: r.pass_id, scopeId: r.scope_id, plateNumber: r.plate_number,
-    passType: r.pass_type, status: r.status,
-    startDate: r.start_date ?? null, endDate: r.end_date ?? null,
-    isFree: !!r.is_free, spaceNumber: r.space_number ?? null,
-    fetchedAt: r.fetched_at,
+    passId: row.pass_id, scopeId: row.scope_id, plateNumber: row.plate_number,
+    passType: row.pass_type, status: row.status,
+    startDate: row.start_date ?? null, endDate: row.end_date ?? null,
+    isFree: !!row.is_free, spaceNumber: row.space_number ?? null,
+    fetchedAt: row.fetched_at,
   };
 }
 
@@ -907,54 +984,47 @@ function rowToActivePass(r: any): ActivePass {
  *  uuid). Returns the longest-coverage pass first so a plate with a
  *  free_access + corporate match prefers the broader entitlement. */
 export function findActivePassByPlate(scopeId: string, plate: string): ActivePass | null {
-  const normalised = plate.toUpperCase().replace(/\s+/g, '');
-  const r = getDb().prepare(`
+  const normalisedPlate = plate.toUpperCase().replace(/\s+/g, '');
+  const row = getDb().prepare(`
     SELECT * FROM active_passes
     WHERE scope_id = ? AND plate_number = ? AND status = 'active'
     ORDER BY is_free DESC, end_date DESC
     LIMIT 1
-  `).get(scopeId, normalised) as any;
-  return r ? rowToActivePass(r) : null;
-}
-
-export function listActivePasses(scopeId?: string): ActivePass[] {
-  const sql = scopeId
-    ? 'SELECT * FROM active_passes WHERE scope_id = ? ORDER BY plate_number'
-    : 'SELECT * FROM active_passes ORDER BY scope_id, plate_number';
-  const rows = (scopeId
-    ? getDb().prepare(sql).all(scopeId)
-    : getDb().prepare(sql).all()) as any[];
-  return rows.map(rowToActivePass);
+  `).get(scopeId, normalisedPlate) as any;
+  return row ? rowToActivePass(row) : null;
 }
 
 /**
- * Read every cached active pass across all scopes. Used by the Passes
- * page in the local app to show every pass that the gate currently
+ * Cached active passes, optionally filtered to one scope. With no argument
+ * this is what the Passes page shows: every pass the gate currently
  * recognises (cached from `/api/v1/local-server/passes`).
  */
-export function listAllActivePasses(): ActivePass[] {
-  return (getDb().prepare('SELECT * FROM active_passes ORDER BY scope_id, plate_number').all() as any[]).map(rowToActivePass);
+export function listActivePasses(scopeId?: string): ActivePass[] {
+  const rows = (scopeId
+    ? getDb().prepare('SELECT * FROM active_passes WHERE scope_id = ? ORDER BY plate_number').all(scopeId)
+    : getDb().prepare('SELECT * FROM active_passes ORDER BY scope_id, plate_number').all()) as any[];
+  return rows.map(rowToActivePass);
 }
 
 // ─── parking spaces (mirror) ───────────────────────────────────────────────
 
-function rowToParkingSpace(r: any): ParkingSpace {
+function rowToParkingSpace(row: any): ParkingSpace {
   return {
-    id: r.id,
-    building: r.building ?? null,
-    level: r.level ?? null,
-    zone: r.zone ?? null,
-    spaceNumber: r.space_number ?? null,
-    spaceCode: r.space_code ?? null,
-    status: r.status ?? 'available',
-    customerName: r.customer_name ?? null,
-    vehiclePlate: r.vehicle_plate ?? null,
-    passType: r.pass_type ?? null,
-    passId: r.pass_id ?? null,
-    startDate: r.start_date ?? null,
-    endDate: r.end_date ?? null,
-    notes: r.notes ?? null,
-    fetchedAt: r.fetched_at,
+    id: row.id,
+    building: row.building ?? null,
+    level: row.level ?? null,
+    zone: row.zone ?? null,
+    spaceNumber: row.space_number ?? null,
+    spaceCode: row.space_code ?? null,
+    status: row.status ?? 'available',
+    customerName: row.customer_name ?? null,
+    vehiclePlate: row.vehicle_plate ?? null,
+    passType: row.pass_type ?? null,
+    passId: row.pass_id ?? null,
+    startDate: row.start_date ?? null,
+    endDate: row.end_date ?? null,
+    notes: row.notes ?? null,
+    fetchedAt: row.fetched_at,
   };
 }
 
@@ -964,19 +1034,19 @@ export function listParkingSpaces(): ParkingSpace[] {
 
 /** Replace the entire cached space inventory in one transaction. */
 export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
-  const d = getDb();
-  const tx = d.transaction(() => {
-    d.prepare('DELETE FROM parking_spaces').run();
-    const insert = d.prepare(`INSERT INTO parking_spaces (
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM parking_spaces').run();
+    const insert = db.prepare(`INSERT INTO parking_spaces (
         id, building, level, zone, space_number, space_code, status,
         customer_name, vehicle_plate, pass_type, pass_id,
         start_date, end_date, notes, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const s of spaces) {
+    for (const space of spaces) {
       insert.run(
-        s.id, s.building, s.level, s.zone, s.spaceNumber, s.spaceCode, s.status,
-        s.customerName, s.vehiclePlate, s.passType, s.passId,
-        s.startDate, s.endDate, s.notes,
+        space.id, space.building, space.level, space.zone, space.spaceNumber, space.spaceCode, space.status,
+        space.customerName, space.vehiclePlate, space.passType, space.passId,
+        space.startDate, space.endDate, space.notes,
       );
     }
   });
@@ -990,20 +1060,20 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
  * very next sync.
  */
 export function replaceActivePassesForScope(scopeId: string, passes: ActivePass[]): void {
-  const d = getDb();
-  const tx = d.transaction(() => {
-    d.prepare('DELETE FROM active_passes WHERE scope_id = ?').run(scopeId);
-    const insert = d.prepare(`INSERT INTO active_passes (
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM active_passes WHERE scope_id = ?').run(scopeId);
+    const insert = db.prepare(`INSERT INTO active_passes (
         pass_id, scope_id, plate_number, pass_type, status,
         start_date, end_date, is_free, space_number, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const p of passes) {
+    for (const pass of passes) {
       insert.run(
-        p.passId, p.scopeId, p.plateNumber.toUpperCase().replace(/\s+/g, ''),
-        p.passType, p.status,
-        p.startDate, p.endDate,
-        p.isFree ? 1 : 0,
-        p.spaceNumber,
+        pass.passId, pass.scopeId, pass.plateNumber.toUpperCase().replace(/\s+/g, ''),
+        pass.passType, pass.status,
+        pass.startDate, pass.endDate,
+        pass.isFree ? 1 : 0,
+        pass.spaceNumber,
       );
     }
   });

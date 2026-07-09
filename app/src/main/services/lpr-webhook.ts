@@ -22,6 +22,7 @@
  */
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
@@ -90,7 +91,7 @@ export function getActivePort() { return activePort; }
 
 async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) {
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  for await (const chunk of req) chunks.push(chunk as Buffer);
   const body = Buffer.concat(chunks).toString('utf-8');
 
   let payload: any;
@@ -111,8 +112,8 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
 
   if (!extracted.plate) { res.statusCode = 400; res.end(JSON.stringify({ error: 'plate_required' })); return; }
 
-  const cam = resolveCamera(extracted, payload);
-  if (!cam) {
+  const camera = resolveCamera(extracted);
+  if (!camera) {
     res.statusCode = 404;
     res.end(JSON.stringify({
       error: 'unknown_camera',
@@ -120,14 +121,14 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     }));
     return;
   }
-  if (!cam.enabled) { res.statusCode = 403; res.end(JSON.stringify({ error: 'camera_disabled' })); return; }
+  if (!camera.enabled) { res.statusCode = 403; res.end(JSON.stringify({ error: 'camera_disabled' })); return; }
 
   // Webhook secret check (skipped when camera has no secret set — useful for
   // dev / on-prem boxes behind a private VLAN). Vendor firmwares can't set
   // custom headers, so this only applies to apps using the generic shape.
-  if (cam.webhookSecret) {
+  if (camera.webhookSecret) {
     const supplied = req.headers['x-webhook-secret'];
-    if (supplied !== cam.webhookSecret) {
+    if (supplied !== camera.webhookSecret) {
       res.statusCode = 401; res.end(JSON.stringify({ error: 'bad_secret' })); return;
     }
   }
@@ -137,10 +138,10 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     ? await saveImage(plate, extracted.image).catch(() => null)
     : null;
 
-  const direction = (extracted.direction as PlateEvent['direction']) ?? cam.direction;
+  const direction = (extracted.direction as PlateEvent['direction']) ?? camera.direction;
 
   const event: PlateEvent = {
-    cameraId: cam.id,
+    cameraId: camera.id,
     plate,
     confidence: extracted.confidence,
     imagePath,
@@ -152,7 +153,7 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
 
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify({ ok: true, plate, cameraId: cam.id, direction }));
+  res.end(JSON.stringify({ ok: true, plate, cameraId: camera.id, direction }));
 }
 
 /**
@@ -206,19 +207,16 @@ function extractEvent(payload: any, remoteIp: string): {
  *   2. IP match against `cameras.host` (vendor shape — most real cameras)
  *   3. If only ONE camera is configured, use it (single-lane sites)
  */
-function resolveCamera(
-  e: { cameraId?: number; ipaddr?: string },
-  _raw: any
-): LprCamera | null {
-  if (e.cameraId) {
-    return getCamera(e.cameraId);
+function resolveCamera(extracted: { cameraId?: number; ipaddr?: string }): LprCamera | null {
+  if (extracted.cameraId) {
+    return getCamera(extracted.cameraId);
   }
-  const cams = listCameras();
-  if (e.ipaddr) {
-    const match = cams.find((c) => c.host && c.host.trim() === e.ipaddr!.trim());
+  const cameras = listCameras();
+  if (extracted.ipaddr) {
+    const match = cameras.find((camera) => camera.host && camera.host.trim() === extracted.ipaddr!.trim());
     if (match) return match;
   }
-  if (cams.length === 1) return cams[0];
+  if (cameras.length === 1) return cameras[0];
   return null;
 }
 
@@ -228,47 +226,47 @@ function resolveCamera(
  * values that look like identifiers (e.g. `license:Test` → `"license":"Test"`).
  * Leaves numbers, true/false/null, arrays, and already-quoted strings alone.
  */
-function loosenJson(s: string): string {
+function loosenJson(rawJson: string): string {
   // Quote keys:  {foo: ...   →   {"foo": ...
-  let out = s.replace(/([{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":');
+  let repaired = rawJson.replace(/([{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":');
   // Quote bare identifier values: : Test, → : "Test",   (skip numbers/bools/null)
-  out = out.replace(/:\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*([,}\]])/g, (_m, v, end) => {
-    if (v === 'true' || v === 'false' || v === 'null') return `:${v}${end}`;
-    return `:"${v}"${end}`;
+  repaired = repaired.replace(/:\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*([,}\]])/g, (_match, value, closer) => {
+    if (value === 'true' || value === 'false' || value === 'null') return `:${value}${closer}`;
+    return `:"${value}"${closer}`;
   });
-  return out;
+  return repaired;
 }
 
 /** Strip spaces, uppercase. Cameras have wildly inconsistent formatting and
  *  the same physical plate can come in as "vmm 1234" or "VMM-1234". */
-export function normalisePlate(s: string): string {
-  return s.replace(/[\s\-_]+/g, '').toUpperCase();
+export function normalisePlate(plate: string): string {
+  return plate.replace(/[\s\-_]+/g, '').toUpperCase();
 }
 
 /** Saves a base64 JPEG (with or without data: prefix) under userData/plates/<date>/<plate>-<ts>.jpg. */
-async function saveImage(plate: string, b64: string): Promise<string> {
-  const raw = b64.replace(/^data:image\/[a-z]+;base64,/i, '');
-  const buf = Buffer.from(raw, 'base64');
-  const day = new Date().toISOString().slice(0, 10);
-  const dir = path.join(app.getPath('userData'), 'plates', day);
-  await fs.promises.mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${plate}-${Date.now()}.jpg`);
-  await fs.promises.writeFile(file, buf);
-  return file;
+async function saveImage(plate: string, base64Image: string): Promise<string> {
+  const base64Payload = base64Image.replace(/^data:image\/[a-z]+;base64,/i, '');
+  const imageBuffer = Buffer.from(base64Payload, 'base64');
+  const dateFolder = new Date().toISOString().slice(0, 10);
+  const imageDir = path.join(app.getPath('userData'), 'plates', dateFolder);
+  await fs.promises.mkdir(imageDir, { recursive: true });
+  const filePath = path.join(imageDir, `${plate}-${Date.now()}.jpg`);
+  await fs.promises.writeFile(filePath, imageBuffer);
+  return filePath;
 }
 
 /** Simulate a plate detection — used by the UI test button and the renderer
  *  "simulate plate" feature when no camera is wired up yet. */
 export function simulatePlate(cameraId: number, plate: string) {
-  const cam = getCamera(cameraId);
-  if (!cam) throw new Error('unknown_camera');
+  const camera = getCamera(cameraId);
+  if (!camera) throw new Error('unknown_camera');
   const event: PlateEvent = {
     cameraId,
     plate: normalisePlate(plate),
     confidence: 1.0,
     imagePath: null,
     timestamp: new Date().toISOString(),
-    direction: cam.direction,
+    direction: camera.direction,
   };
   lprEvents.emit('plate', event);
 }
@@ -276,12 +274,10 @@ export function simulatePlate(cameraId: number, plate: string) {
 /** Used by the renderer to show whether the server is up + how cameras would
  *  reach it. We expose all the NICs so the operator can pick the right LAN IP. */
 export function diagnose() {
-  const os = require('os') as typeof import('node:os');
-  const nics = os.networkInterfaces();
   const addresses: string[] = [];
-  for (const ifaces of Object.values(nics)) {
-    for (const i of ifaces ?? []) {
-      if (i.family === 'IPv4' && !i.internal) addresses.push(i.address);
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const nic of interfaces ?? []) {
+      if (nic.family === 'IPv4' && !nic.internal) addresses.push(nic.address);
     }
   }
   return { port: activePort, addresses, cameras: listCameras().length };

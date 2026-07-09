@@ -457,7 +457,7 @@ export class EcpiTerminal extends EventEmitter {
     this._lastSeenAt = new Date().toISOString();
     let parsed: any;
     try { parsed = JSON.parse(raw); }
-    catch (e) {
+    catch {
       this.log('error', 'malformed frame', { raw });
       return;
     }
@@ -533,9 +533,10 @@ export class EcpiTerminal extends EventEmitter {
           this.emit('proceedExitStatus', parsed.body ?? {});
           return;
         case 'txnStatus':
+          // Already forwarded via the unconditional 'frame' emit above —
+          // just ack + clear the safety-net timer.
           this.ack(message, traceID);
           this.clearTxnTimeout();
-          this.emit('frame', parsed, raw);
           return;
         case 'cardRead':
           this.ack(message, traceID);

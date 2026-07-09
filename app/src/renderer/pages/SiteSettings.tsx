@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw } from 'lucide-react';
-import type { AppSettings } from '@shared/types';
+import type { AppSettings, ScopeRate } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 interface TngTestLine {
@@ -34,8 +34,9 @@ const PAY_TYPE_LABEL: Record<number, string> = {
   4: 'TNG e-wallet',
 };
 
-export function Settings() {
+export function SiteSettings() {
   const [s, setS] = useState<AppSettings | null>(null);
+  const [list, setList] = useState<ScopeRate | null>(null);
   const [saved, setSaved] = useState(false);
   const [faceGateTest, setFaceGateTest] = useState<string | null>(null);
   const [tngStatus, setTngStatus] = useState<TngStatus | null>(null);
@@ -43,8 +44,23 @@ export function Settings() {
   const [tngTestAmount, setTngTestAmount] = useState<number>(100);
   const [tngLastOrderId, setTngLastOrderId] = useState<string>('');
 
-  useEffect(() => { window.bridge.getSettings().then(setS); }, []);
 
+  // useEffect(() => { 
+  //   loadScope();
+  //  }, []);
+
+   
+//   const loadScope = async () => {
+//     try{
+//       const results = await window.bridge.getScope();
+//       setList(results);
+    
+//     }catch(e) {
+//     console.error('[SiteSettings] failed to load scopes', e);   // ← don't swallow
+//   }
+//   };
+  
+// console.log(list)
   // Live status poll — refreshes every 2s so the operator sees pending
   // orders and the last callback as soon as the device responds.
   useEffect(() => {
@@ -238,15 +254,6 @@ export function Settings() {
     }
   });
 
-  const handleSyncAll = async () => {
-    try{
-      const results = await window.bridge.syncAllNow();    
-      console.log(results);
-    }catch(e) {
-    console.error('[SiteSettings] failed to sync all', e);   // ← don't swallow
-  }
-  }
-
   if (!s) return <div className="p-10 text-center text-gray-500 text-sm">Loading…</div>;
 
   return (
@@ -255,17 +262,7 @@ export function Settings() {
       <p className="text-sm text-gray-500 mt-1">Server-wide configuration. Restart not required — most changes take effect immediately.</p>
 
       <section className="mt-5 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">qparking SaaS sync</h2>
-          <button
-            type="button"
-            onClick={handleSyncAll}
-            className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide"
-          >
-            <RefreshCw size={13} />
-            Sync now
-          </button>
-        </div>
+        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">qparking SaaS sync</h2>
         <Field label="qparking base URL">
           <input className="input" value={s.qparkingBaseUrl} onChange={(e) => setS({ ...s, qparkingBaseUrl: e.target.value })} placeholder="https://parking.qbot.now" />
         </Field>

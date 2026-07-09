@@ -83,6 +83,8 @@ const api = {
   // scopes
   listScopes: () => ipcRenderer.invoke('scopes:list'),
   syncScopesNow: () => ipcRenderer.invoke('scopes:sync'),
+  syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
+
 
   // Mirrored config from qparking SaaS (read-only locally)
   listSpaces: () => ipcRenderer.invoke('spaces:list'),
