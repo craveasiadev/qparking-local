@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Plus, Trash2, Camera as CamIcon, Zap, ZapOff, X, Copy, Check, Activity, RefreshCw, Eye, PlayCircle, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Camera as CamIcon, Zap, ZapOff, X, Copy, Check, Activity, PlayCircle, Loader2 } from 'lucide-react';
 import type { LprCamera, ParkingLane, LprIngestMode } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -13,6 +13,7 @@ export function Cameras() {
   const [list, setList] = useState<LprCamera[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [editing, setEditing] = useState<Partial<LprCamera> | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [diag, setDiag] = useState<{ port: number; addresses: string[] } | null>(null);
   const [simPlate, setSimPlate] = useState<Record<number, string>>({});
   const [simBusy, setSimBusy] = useState<Record<number, boolean>>({});
@@ -25,7 +26,8 @@ export function Cameras() {
   useEffect(() => { void refresh(); }, []);
 
   const [save, saving] = useAsyncAction(async () => {
-    if (!editing?.name) { alert('Name is required.'); return; }
+    setFormError(null);
+    if (!editing?.name) { setFormError('Name is required.'); return; }
     await window.bridge.saveCamera(editing as any);
     setEditing(null);
     await refresh();
@@ -48,7 +50,7 @@ export function Cameras() {
           <h1 className="text-2xl font-bold tracking-tight">LPR cameras</h1>
           <p className="text-sm text-gray-500 mt-1">Cameras POST plate detections to this server's webhook URL.</p>
         </div>
-        <button onClick={() => setEditing({ ...EMPTY })} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+        <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
           <Plus size={14} /> Add camera
         </button>
       </header>
@@ -119,7 +121,7 @@ export function Cameras() {
                     {simBusy[c.id] ? <ZapOff size={13} className="animate-pulse" /> : <PlayCircle size={13} />}
                     {simBusy[c.id] ? 'Running…' : 'Demo flow'}
                   </button>
-                  <button onClick={() => setEditing(c)} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
+                  <button onClick={() => { setFormError(null); setEditing(c); }} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
                   <button onClick={() => runDelete(c.id)} disabled={deleting}
                     className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center disabled:opacity-40">
                     {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
@@ -138,7 +140,7 @@ export function Cameras() {
         )}
       </div>
 
-      {editing && <CameraForm lanes={lanes} value={editing} onChange={setEditing} onCancel={() => setEditing(null)} onSave={save} saving={saving} />}
+      {editing && <CameraForm value={editing} onChange={setEditing} onCancel={() => { setFormError(null); setEditing(null); }} onSave={save} saving={saving} error={formError} />}
     </div>
   );
 }
@@ -198,8 +200,8 @@ function CameraPreview({ cam }: { cam: LprCamera }) {
   );
 }
 
-function CameraForm({ value, onChange, onCancel, onSave, lanes, saving }:
-  { value: Partial<LprCamera>; onChange: (v: Partial<LprCamera>) => void; onCancel: () => void; onSave: () => void; lanes: ParkingLane[]; saving: boolean }) {
+function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
+  { value: Partial<LprCamera>; onChange: (v: Partial<LprCamera>) => void; onCancel: () => void; onSave: () => void; saving: boolean; error: string | null }) {
   const set = (k: keyof LprCamera, v: any) => onChange({ ...value, [k]: v });
   const generateSecret = () => set('webhookSecret', Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
   const [pingResult, setPingResult] = useState<string | null>(null);
@@ -220,13 +222,10 @@ function CameraForm({ value, onChange, onCancel, onSave, lanes, saving }:
           <button onClick={onCancel} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500"><X size={18} /></button>
         </header>
         <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <p className="sm:col-span-2 text-xs text-gray-500">
+            Assign this camera to a lane from the <strong>Lanes</strong> page — a lane owns the cameras that cover it.
+          </p>
           <Field label="Display name"><input className="input" value={value.name ?? ''} onChange={(e) => set('name', e.target.value)} /></Field>
-          <Field label="Lane">
-            <select className="input" value={value.laneId ?? ''} onChange={(e) => set('laneId', e.target.value ? Number(e.target.value) : null)}>
-              <option value="">— none —</option>
-              {lanes.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.direction})</option>)}
-            </select>
-          </Field>
           <Field label="Direction">
             <select className="input" value={value.direction ?? 'entry'} onChange={(e) => set('direction', e.target.value)}>
               <option value="entry">Entry</option><option value="exit">Exit</option><option value="dual">Dual</option>
@@ -277,6 +276,9 @@ function CameraForm({ value, onChange, onCancel, onSave, lanes, saving }:
             <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={value.enabled ?? true} onChange={(e) => set('enabled', e.target.checked)} /> accept events</label>
           </Field>
         </div>
+        {error && (
+          <div className="mx-5 mb-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>
+        )}
         <footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
           <button onClick={onCancel} className="text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900 px-3">Cancel</button>
           <button onClick={onSave} disabled={saving}

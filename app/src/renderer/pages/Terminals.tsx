@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2, Power, PowerOff, Activity, RefreshCw, CreditCard, X, Wrench, Loader2 } from 'lucide-react';
-import type { PaymentTerminal, TerminalStatus, LaneType, LaneMode, OperationMode } from '@shared/types';
+import type { PaymentTerminal, TerminalStatus, LaneMode, OperationMode } from '@shared/types';
 import { TerminalTester } from './TerminalTester';
 
 const EMPTY: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> = {
@@ -191,18 +191,15 @@ function TerminalForm({ value, onChange, onCancel, onSave, error, busy }:
           <button onClick={onCancel} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500"><X size={18} /></button>
         </header>
         <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <p className="sm:col-span-2 text-xs text-gray-500">
+            The ECPI lane type follows the direction of the lane this terminal is wired to — set that on the <strong>Lanes</strong> page.
+          </p>
           <Field label="Display name"><input className="input" value={value.name ?? ''} onChange={(e) => set('name', e.target.value)} /></Field>
           <Field label="Host (LAN IP)"><input className="input" value={value.host ?? ''} onChange={(e) => set('host', e.target.value)} placeholder="192.168.1.199" /></Field>
           <Field label="Port"><input type="number" className="input" value={value.port ?? 5000} onChange={(e) => set('port', Number(e.target.value))} /></Field>
           <Field label="Secret key (optional)"><input className="input font-mono text-xs" value={value.secretKey ?? ''} onChange={(e) => set('secretKey', e.target.value)} placeholder="leave blank if reader has no shared secret" /></Field>
           <Field label="Plaza ID"><input className="input" value={value.plazaId ?? ''} onChange={(e) => set('plazaId', e.target.value)} /></Field>
           <Field label="Lane ID"><input className="input" value={value.laneId ?? ''} onChange={(e) => set('laneId', e.target.value)} /></Field>
-          <Field label="Lane type">
-            <select className="input" value={value.laneType ?? 'dual'} onChange={(e) => set('laneType', e.target.value as LaneType)}>
-              <option value="entry">Entry</option><option value="exit">Exit</option>
-              <option value="open">Open</option><option value="dual">Dual</option>
-            </select>
-          </Field>
           <Field label="Driver mode">
             <select className="input" value={value.mode ?? 'kiosk'} onChange={(e) => set('mode', e.target.value as LaneMode)}>
               <option value="kiosk">Kiosk (V3.9C — self-service)</option>

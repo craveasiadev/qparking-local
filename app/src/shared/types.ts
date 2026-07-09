@@ -85,11 +85,15 @@ export interface LprCamera {
 
 /** A parking lane = one entry or exit gate. Owns at least one LPR camera and
  *  optionally a payment terminal (exit lanes always have one; entry lanes
- *  usually don't — they just record the plate + open the gate). */
+ *  usually don't — they just record the plate + open the gate).
+ *
+ *  Direction (entry/exit/dual) is NOT stored on the lane — it's derived from
+ *  the directions of the cameras assigned to it (see db.deriveLaneDirection).
+ *  The camera is the single source of truth for direction because routing is
+ *  keyed to the camera that saw the plate. */
 export interface ParkingLane {
   id: number;
   name: string;
-  direction: 'entry' | 'exit';
   /** Scope from qparking SaaS — the rate config is fetched per scope. */
   scopeId: string | null;
   /** FK to PaymentTerminal — exit lanes have this set. */
@@ -97,13 +101,6 @@ export interface ParkingLane {
   /** Optional GPIO/relay address for the gate barrier. */
   gateRelayAddress: string | null;
   enabled: boolean;
-  /**
-   * Descriptive label for the physical lane (`car` default), mirrored to the
-   * cloud equipment map. As of 2026-07-09 it has NO effect on pricing — fees
-   * are driven solely by the lane's assigned rate plan and that plan's
-   * day/time/date rules (the vehicle-type dimension was retired cloud-side).
-   */
-  laneType: 'car' | 'motorcycle' | 'mixed';
 }
 
 /** One parking session = entry event → optional exit event. While the exit
@@ -398,7 +395,11 @@ export interface BridgeApi {
 
   // Lanes
   listLanes(): Promise<ParkingLane[]>;
-  saveLane(input: Omit<ParkingLane, 'id'> & { id?: number }): Promise<ParkingLane>;
+  /** The lane is the composition root: it owns which cameras cover it
+   *  (`cameraIds` → each camera's lane_id) and which payment terminal it
+   *  charges on (`terminalId`). Passing `cameraIds` reassigns exactly that
+   *  set of cameras to this lane and unassigns any others previously on it. */
+  saveLane(input: Omit<ParkingLane, 'id'> & { id?: number; cameraIds?: number[] }): Promise<ParkingLane>;
   deleteLane(id: number): Promise<void>;
 
   // Sessions

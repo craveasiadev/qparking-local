@@ -74,7 +74,7 @@ import {
   getDb, getSettings, saveSettings,
   listTerminals, getTerminal, upsertTerminal, deleteTerminal,
   listCameras, upsertCamera, deleteCamera,
-  listLanes, upsertLane, deleteLane, getLane,
+  listLanes, upsertLane, deleteLane, getLane, setLaneCameras, setTerminalLaneType, deriveLaneDirection,
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
@@ -480,12 +480,33 @@ ipcMain.handle('cameras:snapshot', (_e, cameraId: number) => fetchSnapshot(camer
 ipcMain.handle('cameras:ping', (_e, cameraId: number) => pingCamera(cameraId));
 
 ipcMain.handle('lanes:list', () => listLanes());
-ipcMain.handle('lanes:save', (_e, input) => {
-  const saved = upsertLane(input);
+ipcMain.handle('lanes:save', (_e, input: any) => {
+  // The lane is the composition root: it carries the camera set (`cameraIds`)
+  // and the terminal it charges on. Split the camera list off before the
+  // upsert — it lives on the cameras table, not the lanes row.
+  const { cameraIds, ...laneInput } = input ?? {};
+  const saved = upsertLane(laneInput);
+
+  // Persist the camera↔lane wiring from the lane side (cameras no longer
+  // pick their own lane on the camera form).
+  const changedCameras: number[] = Array.isArray(cameraIds) ? cameraIds.map(Number) : [];
+  if (Array.isArray(cameraIds)) setLaneCameras(saved.id, changedCameras);
+
+  // The wired terminal's ECPI laneType follows the lane's cameras (the single
+  // source of direction) — entry/exit/dual — instead of a hand-entered value.
+  // No cameras yet → leave the terminal's existing laneType untouched.
+  if (saved.terminalId) {
+    const dir = deriveLaneDirection(saved.id);
+    if (dir) setTerminalLaneType(saved.terminalId, dir);
+  }
+
   pushLane(saved.id).catch(() => null);
   // Lanes are how terminals get attributed to a cloud site (the lane's
   // scopeId), so re-push the terminal too whenever the lane changes.
   if (saved.terminalId) pushTerminal(saved.terminalId).catch(() => null);
+  // Re-mirror any cameras whose lane assignment we just changed so the cloud
+  // registry reflects the new coverage.
+  for (const cid of changedCameras) pushCamera(cid).catch(() => null);
   return saved;
 });
 ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));

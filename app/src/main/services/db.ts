@@ -63,7 +63,6 @@ function applySchema(d: Database.Database) {
     CREATE TABLE IF NOT EXISTS lanes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('entry','exit')) DEFAULT 'entry',
       scope_id TEXT,
       terminal_id INTEGER,
       gate_relay_address TEXT,
@@ -221,6 +220,14 @@ function applySchema(d: Database.Database) {
   try { d.exec('DROP TABLE IF EXISTS vehicle_types'); } catch { /* ignore */ }
   try { d.exec('DROP TABLE IF EXISTS vehicle_groups'); } catch { /* ignore */ }
   try { d.exec('ALTER TABLE tariff_rules DROP COLUMN vehicle_type'); } catch { /* column absent or old SQLite */ }
+  // The lane-level car/motorcycle/mixed descriptor was part of the same
+  // retired vehicle-type concept — it never affected pricing. Drop it.
+  try { d.exec('ALTER TABLE lanes DROP COLUMN lane_type'); } catch { /* column absent or old SQLite */ }
+  // Lane direction is no longer stored either — it's derived from the
+  // directions of the cameras assigned to the lane (deriveLaneDirection).
+  // The camera is the single source of truth, so the lanes row is now pure
+  // wiring (rate plan + terminal + gate relay). Drop the stale column.
+  try { d.exec('ALTER TABLE lanes DROP COLUMN direction'); } catch { /* column absent or old SQLite */ }
 
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
@@ -275,12 +282,6 @@ function applySchema(d: Database.Database) {
   // operators can see which rules are dimmed and the exit flow can skip
   // inactive rules even if they technically match the moment.
   try { d.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
-
-  // 2026-07-03: lane_type distinguishes car / motorcycle / mixed lanes.
-  // Descriptive lane metadata mirrored from the cloud only — as of 2026-07-09
-  // it has NO effect on pricing (fees are lane → rate policy → day/time/date;
-  // the vehicle-type dimension was retired).
-  try { d.exec(`ALTER TABLE lanes ADD COLUMN lane_type TEXT NOT NULL DEFAULT 'car'`); } catch { /* already there */ }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -372,6 +373,18 @@ export function deleteTerminal(id: number) {
   getDb().prepare('DELETE FROM terminals WHERE id = ?').run(id);
 }
 
+/**
+ * Sync a terminal's ECPI `laneType` from the lane it's wired to. The lane's
+ * direction is now the single source of truth — the terminal form no longer
+ * asks the operator to re-enter it. entry→'entry', exit→'exit'; both are
+ * valid values for the wire-level `laneType` the reader expects at
+ * initTerminal (see ecpi-terminal.ts:laneTypeCode).
+ */
+export function setTerminalLaneType(terminalId: number, laneType: PaymentTerminal['laneType']): void {
+  getDb().prepare(`UPDATE terminals SET lane_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .run(laneType, terminalId);
+}
+
 export function logTerminal(terminalId: number, direction: 'send'|'recv'|'error'|'info', message: string, payload?: unknown) {
   try {
     getDb().prepare('INSERT INTO terminal_log (terminal_id, direction, message, payload) VALUES (?,?,?,?)')
@@ -420,10 +433,9 @@ export function deleteCamera(id: number) {
 
 function rowToLane(r: any): ParkingLane {
   return {
-    id: r.id, name: r.name, direction: r.direction, scopeId: r.scope_id,
+    id: r.id, name: r.name, scopeId: r.scope_id,
     terminalId: r.terminal_id, gateRelayAddress: r.gate_relay_address,
     enabled: !!r.enabled,
-    laneType: (r.lane_type ?? 'car') as ParkingLane['laneType'],
   };
 }
 
@@ -438,19 +450,69 @@ export function getLane(id: number): ParkingLane | null {
 
 export function upsertLane(l: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
   const d = getDb();
-  const laneType = l.laneType ?? 'car';
   if (l.id) {
-    d.prepare(`UPDATE lanes SET name=?, direction=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=?, lane_type=? WHERE id=?`)
-      .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, laneType, l.id);
+    d.prepare(`UPDATE lanes SET name=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`)
+      .run(l.name, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, l.id);
     return getLane(l.id)!;
   }
-  const info = d.prepare(`INSERT INTO lanes (name, direction, scope_id, terminal_id, gate_relay_address, enabled, lane_type) VALUES (?,?,?,?,?,?,?)`)
-    .run(l.name, l.direction, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0, laneType);
+  const info = d.prepare(`INSERT INTO lanes (name, scope_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?)`)
+    .run(l.name, l.scopeId, l.terminalId, l.gateRelayAddress, l.enabled ? 1 : 0);
   return getLane(Number(info.lastInsertRowid))!;
 }
 
 export function deleteLane(id: number) {
   getDb().prepare('DELETE FROM lanes WHERE id = ?').run(id);
+}
+
+/**
+ * Set exactly which cameras cover a lane. The lane owns the camera↔lane
+ * wiring now (cameras no longer pick their own lane on the camera form):
+ *   - every camera in `cameraIds` gets lane_id = laneId (moving it off any
+ *     other lane it was previously on)
+ *   - every camera previously on THIS lane but not in `cameraIds` is
+ *     unassigned (lane_id = NULL)
+ * Runs in one transaction so a half-applied reassignment can't leave a
+ * camera pointing at a lane the operator just cleared.
+ */
+export function setLaneCameras(laneId: number, cameraIds: number[]): void {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    if (cameraIds.length > 0) {
+      const placeholders = cameraIds.map(() => '?').join(',');
+      // Detach cameras that used to be on this lane but were deselected.
+      d.prepare(`UPDATE cameras SET lane_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ? AND id NOT IN (${placeholders})`)
+        .run(laneId, ...cameraIds);
+      // Attach the selected set (also steals any that were on another lane).
+      d.prepare(`UPDATE cameras SET lane_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`)
+        .run(laneId, ...cameraIds);
+    } else {
+      // Nothing selected → this lane covers no cameras.
+      d.prepare(`UPDATE cameras SET lane_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ?`)
+        .run(laneId);
+    }
+  });
+  tx();
+}
+
+/**
+ * Derive a lane's direction from the cameras assigned to it — the camera is
+ * the single source of truth (routing is keyed to the camera that saw the
+ * plate, so direction physically belongs to the camera, not the lane).
+ *   - all cameras entry-facing          → 'entry'
+ *   - all exit-facing                   → 'exit'
+ *   - any dual cam, OR both entry+exit  → 'dual'
+ *   - no cameras yet                    → null (caller decides the fallback)
+ * The three non-null results map 1:1 onto the ECPI terminal laneType, so this
+ * also feeds setTerminalLaneType for the terminal wired to the lane.
+ */
+export function deriveLaneDirection(laneId: number): 'entry' | 'exit' | 'dual' | null {
+  const rows = getDb().prepare('SELECT DISTINCT direction FROM cameras WHERE lane_id = ?').all(laneId) as { direction: string }[];
+  if (rows.length === 0) return null;
+  const dirs = new Set(rows.map((r) => r.direction));
+  if (dirs.has('dual') || (dirs.has('entry') && dirs.has('exit'))) return 'dual';
+  if (dirs.has('entry')) return 'entry';
+  if (dirs.has('exit')) return 'exit';
+  return null;
 }
 
 // ─── sessions ──────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ export function Dashboard() {
   const [statuses, setStatuses] = useState<Record<number, TerminalStatus>>({});
   const [recentPlates, setRecentPlates] = useState<PlateEvent[]>([]);
   const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
 
   async function refresh() {
     const [o, r, t, c, syncStatus] = await Promise.all([
@@ -48,8 +49,9 @@ export function Dashboard() {
   });
   const [backfillSessions, backfilling] = useAsyncAction(async () => {
     const r = await window.bridge.backfillSessions();
-    alert(`Queued ${r.entries} entry record(s) and ${r.exits} exit record(s) for sync to qparking SaaS. Watch the panel for progress.`);
+    setBackfillMsg(`Queued ${r.entries} entry + ${r.exits} exit record(s) for sync. Watch the panel for progress.`);
     setSync(await window.bridge.getSyncStatus());
+    setTimeout(() => setBackfillMsg(null), 6000);
   });
 
   useEffect(() => {
@@ -99,6 +101,9 @@ export function Dashboard() {
           operator notices a broken link before reconciliation hell sets in. */}
       {sync && <SyncPanel sync={sync} retrying={retrying} draining={draining} backfilling={backfilling}
         onRetry={() => retrySync()} onDrain={() => drainSync()} onBackfill={() => backfillSessions()} />}
+      {backfillMsg && (
+        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs px-3 py-2">{backfillMsg}</div>
+      )}
 
       <div className="mt-5 grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Tile icon={Car}      label="Cars inside"      value={String(open.length)} sub="open sessions" />
