@@ -69,6 +69,14 @@ export interface LprCamera {
    *  the UI and periodic upload to the cloud mirror. Most IP cameras expose
    *  something like http://<ip>/snapshot.jpg or http://<ip>/cgi-bin/snapshot.cgi. */
   snapshotUrl: string | null;
+  /** Vendor-SDK login for pulling live H.264 video directly off the device
+   *  (VzLPRSDK). `host` is the camera IP; `devicePort` is the SDK control port
+   *  (default 80). When user + password are set, the main process connects via
+   *  the SDK and grabs a JPEG frame ~1×/sec into the live-frame cache that the
+   *  Live display reads — a clean video feed with no web page / token. */
+  deviceUser: string | null;
+  devicePassword: string | null;
+  devicePort: number | null;
   /** Webhook secret — cameras POSTing /lpr/event must include this header. */
   webhookSecret: string | null;
   /** For poll mode — vendor REST URL we hit every N seconds. */
@@ -87,11 +95,15 @@ export interface LprCamera {
 
 /** A parking lane = one entry or exit gate. Owns at least one LPR camera and
  *  optionally a payment terminal (exit lanes always have one; entry lanes
- *  usually don't — they just record the plate + open the gate). */
+ *  usually don't — they just record the plate + open the gate).
+ *
+ *  Direction (entry/exit/dual) is NOT stored on the lane — it's derived from
+ *  the directions of the cameras assigned to it (see db.deriveLaneDirection).
+ *  The camera is the single source of truth for direction because routing is
+ *  keyed to the camera that saw the plate. */
 export interface ParkingLane {
   id: number;
   name: string;
-  direction: 'entry' | 'exit';
   /** Scope from qparking SaaS — the rate config is fetched per scope. */
   scopeId: string | null;
   /** FK to PaymentTerminal — exit lanes have this set. */
@@ -99,13 +111,6 @@ export interface ParkingLane {
   /** Optional GPIO/relay address for the gate barrier. */
   gateRelayAddress: string | null;
   enabled: boolean;
-  /**
-   * Descriptive label for the physical lane (`car` default), mirrored to the
-   * cloud equipment map. As of 2026-07-09 it has NO effect on pricing — fees
-   * are driven solely by the lane's assigned rate plan and that plan's
-   * day/time/date rules (the vehicle-type dimension was retired cloud-side).
-   */
-  laneType: 'car' | 'motorcycle' | 'mixed';
 }
 
 // ─── sessions ────────────────────────────────────────────────────────────────
@@ -354,6 +359,11 @@ export interface AppSettings {
    *  to wait for duration > freeMinutes, OR for sites with a flat minimum
    *  charge regardless of how briefly the car was parked. */
   minimumChargeCents: number;
+
+  /** Dev/QA mode — unlocks hidden testing tools (currently the Sessions lane
+   *  simulator). Off by default; toggled by tapping the sidebar build version
+   *  7×. Purely gates UI — it has no effect on the live parking flow. */
+  devMode: boolean;
 
   // ─── Touch'n'Go W4G IO-controller integration ─────────────────────────
   /** Master switch. When ON, every paid exit ALSO fires a PayRequest at the

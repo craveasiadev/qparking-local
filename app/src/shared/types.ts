@@ -107,12 +107,20 @@ export interface BridgeApi {
   simulateFullFlow(cameraId: number, plate: string, holdMs?: number): Promise<{ ok: boolean }>;
   /** Fetch a single live snapshot from the camera's HTTP endpoint. Returns JPEG as base64. */
   fetchCameraSnapshot(cameraId: number): Promise<{ ok: boolean; contentType?: string; base64?: string; fetchedAt?: string; status?: number; error?: string }>;
+  /** Latest frame the camera PUSHED with a plate event (base64 JPEG). Live
+   *  display fallback for WebSocket/RTSP-only cameras with no snapshot URL.
+   *  Null until the camera has pushed at least one frame. */
+  getCameraLatestFrame(cameraId: number): Promise<{ base64: string; contentType: string; at: string } | null>;
   /** Probe TCP/HTTP reachability — used by the "Test connection" button. */
   pingCamera(cameraId: number): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
 
   // Lanes
   listLanes(): Promise<ParkingLane[]>;
-  saveLane(input: Omit<ParkingLane, 'id'> & { id?: number }): Promise<ParkingLane>;
+  /** The lane is the composition root: it owns which cameras cover it
+   *  (`cameraIds` → each camera's lane_id) and which payment terminal it
+   *  charges on (`terminalId`). Passing `cameraIds` reassigns exactly that
+   *  set of cameras to this lane and unassigns any others previously on it. */
+  saveLane(input: Omit<ParkingLane, 'id'> & { id?: number; cameraIds?: number[] }): Promise<ParkingLane>;
   deleteLane(id: number): Promise<void>;
 
   // Sessions
@@ -140,6 +148,10 @@ export interface BridgeApi {
    *  terminal wired to the session's lane. Returns immediately; the actual
    *  card tap resolves asynchronously through the normal parking-flow. */
   retriggerSessionPayment(id: number): Promise<{ ok: boolean; error?: string }>;
+  /** DEV/QA: fire a synthetic plate event on a lane (resolving an enabled
+   *  camera on it) with a forced direction, exercising the real parking flow
+   *  end-to-end. Backs the hidden Sessions lane simulator. */
+  simulateLaneEvent(laneId: number, plate: string, direction: 'entry' | 'exit'): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
   deleteSession(id: number): Promise<boolean>;
   deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
   manualReleaseSession(id: number, reason: string): Promise<void>;

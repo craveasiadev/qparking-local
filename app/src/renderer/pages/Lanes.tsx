@@ -1,33 +1,45 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Map as MapIcon, X, Car, Bike, Layers } from 'lucide-react';
-import type { ParkingLane, PaymentTerminal, ScopeRate } from '@shared/types';
+import { Plus, Trash2, Map as MapIcon, X } from 'lucide-react';
+import type { ParkingLane, PaymentTerminal, ScopeRate, LprCamera } from '@shared/types';
+import { useConfirm } from '../hooks/useConfirm';
 
 const EMPTY: Omit<ParkingLane, 'id'> = {
-  name: '', direction: 'entry', scopeId: null, terminalId: null, gateRelayAddress: null, enabled: true,
-  laneType: 'car',
+  name: '', scopeId: null, terminalId: null, gateRelayAddress: null, enabled: true,
 };
 
-const LANE_TYPE_LABEL: Record<ParkingLane['laneType'], string> = {
-  car: 'Car',
-  motorcycle: 'Motorcycle',
-  mixed: 'Mixed',
-};
+/** A lane's direction is derived from its cameras (the single source of
+ *  truth) — mirrors db.deriveLaneDirection for the read-only list display. */
+function laneDirectionLabel(cams: LprCamera[]): string {
+  if (cams.length === 0) return 'no cameras';
+  const dirs = new Set(cams.map((c) => c.direction));
+  if (dirs.has('dual') || (dirs.has('entry') && dirs.has('exit'))) return 'dual';
+  if (dirs.has('entry')) return 'entry';
+  if (dirs.has('exit')) return 'exit';
+  return '—';
+}
 
 export function Lanes() {
   const [list, setList] = useState<ParkingLane[]>([]);
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
   const [scopes, setScopes] = useState<ScopeRate[]>([]);
-  const [editing, setEditing] = useState<Partial<ParkingLane> | null>(null);
+  const [cameras, setCameras] = useState<LprCamera[]>([]);
+  // `cameraIds` rides alongside the lane fields — it's the set of cameras this
+  // lane covers, persisted server-side against each camera's lane_id.
+  const [editing, setEditing] = useState<(Partial<ParkingLane> & { cameraIds?: number[] }) | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirm();
 
   async function refresh() {
     setList(await window.bridge.listLanes());
     setTerminals(await window.bridge.listTerminals());
     setScopes(await window.bridge.listScopes());
+    setCameras(await window.bridge.listCameras());
   }
   useEffect(() => { void refresh(); }, []);
 
   async function save() {
-    if (!editing?.name) { alert('Name required'); return; }
+    setFormError(null);
+    if (!editing?.name) { setFormError('Name is required.'); return; }
     await window.bridge.saveLane(editing as any);
     setEditing(null);
     refresh();
@@ -35,12 +47,13 @@ export function Lanes() {
 
   return (
     <div className="p-5 sm:p-8 max-w-5xl mx-auto">
+      {confirmDialog}
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Lanes</h1>
           <p className="text-sm text-gray-500 mt-1">Entry and exit gates. Each lane links cameras + a payment terminal + a scope rate.</p>
         </div>
-        <button onClick={() => setEditing({ ...EMPTY })} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+        <button onClick={() => { setFormError(null); setEditing({ ...EMPTY, cameraIds: [] }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
           <Plus size={14} /> Add lane
         </button>
       </header>
@@ -55,16 +68,15 @@ export function Lanes() {
                 <div className="flex items-center gap-2">
                   <MapIcon size={16} className="text-gray-400" />
                   <h3 className="font-semibold">{l.name}</h3>
-                  <LaneTypeBadge type={l.laneType} />
                 </div>
                 <div className="mt-1 text-xs text-gray-500 font-mono">
-                  {l.direction} · plan: {s?.scopeName ?? 'site default'} · terminal: {t?.name ?? '—'}
+                  {laneDirectionLabel(cameras.filter((c) => c.laneId === l.id))} · plan: {s?.scopeName ?? 'site default'} · terminal: {t?.name ?? '—'}
                   {!l.enabled && ' · DISABLED'}
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => setEditing(l)} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
-                <button onClick={async () => { if (confirm('Delete?')) { await window.bridge.deleteLane(l.id); refresh(); } }}
+                <button onClick={() => { setFormError(null); setEditing({ ...l, cameraIds: cameras.filter((c) => c.laneId === l.id).map((c) => c.id) }); }} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
+                <button onClick={async () => { if (await confirm({ title: 'Delete lane', message: `Delete lane "${l.name}"?`, danger: true, confirmLabel: 'Delete' })) { await window.bridge.deleteLane(l.id); refresh(); } }}
                   className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center"><Trash2 size={14} /></button>
               </div>
             </div>
@@ -82,22 +94,6 @@ export function Lanes() {
             </header>
             <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Display name"><input className="input" value={editing.name ?? ''} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
-              <Field label="Direction">
-                <select className="input" value={editing.direction ?? 'entry'} onChange={(e) => setEditing({ ...editing, direction: e.target.value as 'entry'|'exit' })}>
-                  <option value="entry">Entry</option><option value="exit">Exit</option>
-                </select>
-              </Field>
-              <Field label="Lane type">
-                {/* Descriptive label for the physical lane only (mirrored to
-                    the cloud equipment map). It does NOT affect pricing —
-                    fees are driven solely by the assigned rate plan's
-                    day/time/date rules. */}
-                <select className="input" value={editing.laneType ?? 'car'} onChange={(e) => setEditing({ ...editing, laneType: e.target.value as ParkingLane['laneType'] })}>
-                  <option value="car">Car</option>
-                  <option value="motorcycle">Motorcycle</option>
-                  <option value="mixed">Mixed</option>
-                </select>
-              </Field>
               <Field label="Rate plan">
                 {/* Points at a scope_id which now corresponds to a cloud
                     RatePolicy — different lanes can bind to different
@@ -119,11 +115,47 @@ export function Lanes() {
                   {terminals.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </Field>
+              <div className="sm:col-span-2">
+                {/* The lane owns the cameras that cover it. Ticking a camera
+                    sets its lane_id to this lane (moving it off any other
+                    lane). Each camera's entry/exit/dual direction is still
+                    set per-camera on the Cameras page — that's what routes a
+                    plate scan to entry vs exit. */}
+                <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">Cameras</label>
+                <div className="rounded-lg border border-gray-200 divide-y divide-gray-100 max-h-40 overflow-auto">
+                  {cameras.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-gray-400">No cameras yet — add them on the Cameras page first.</p>
+                  )}
+                  {cameras.map((c) => {
+                    const sel = editing.cameraIds ?? [];
+                    const checked = sel.includes(c.id);
+                    const onOtherLane = c.laneId != null && c.laneId !== editing.id;
+                    return (
+                      <label key={c.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked ? [...sel, c.id] : sel.filter((x) => x !== c.id);
+                            setEditing({ ...editing, cameraIds: next });
+                          }}
+                        />
+                        <span className="font-mono text-[10px] uppercase text-gray-400 w-10">{c.direction}</span>
+                        <span className="flex-1 truncate">{c.name}</span>
+                        {onOtherLane && !checked && <span className="text-[10px] text-amber-600">on another lane</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
               <Field label="Gate relay (optional)"><input className="input font-mono" value={editing.gateRelayAddress ?? ''} onChange={(e) => setEditing({ ...editing, gateRelayAddress: e.target.value })} placeholder="GPIO addr / relay URL" /></Field>
               <Field label="Enabled">
                 <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={editing.enabled ?? true} onChange={(e) => setEditing({ ...editing, enabled: e.target.checked })} /> active</label>
               </Field>
             </div>
+            {formError && (
+              <div className="mx-5 mb-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{formError}</div>
+            )}
             <footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
               <button onClick={() => setEditing(null)} className="text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900 px-3">Cancel</button>
               <button onClick={save} className="h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">Save</button>
@@ -142,20 +174,5 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
       {children}
     </div>
-  );
-}
-
-function LaneTypeBadge({ type }: { type: ParkingLane['laneType'] }) {
-  const map: Record<ParkingLane['laneType'], { Icon: any; cls: string }> = {
-    car:        { Icon: Car,    cls: 'bg-blue-100 text-blue-800 border-blue-200' },
-    motorcycle: { Icon: Bike,   cls: 'bg-orange-100 text-orange-800 border-orange-200' },
-    mixed:      { Icon: Layers, cls: 'bg-gray-100 text-gray-700 border-gray-200' },
-  };
-  const t = type ?? 'car';
-  const { Icon, cls } = map[t];
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${cls}`}>
-      <Icon size={10} /> {LANE_TYPE_LABEL[t]}
-    </span>
   );
 }

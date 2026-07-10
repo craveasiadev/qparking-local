@@ -8,7 +8,7 @@
  * matches the lane.scopeId. Terminals don't have their own scopeId, so we
  * resolve site via the lane that references them.
  */
-import { getLane, getTerminal, listLanes, listTerminals } from './db';
+import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection } from './db';
 import { getCloudApi, describeRequestError } from './cloud-api';
 
 interface PushResult { ok: boolean; error?: string }
@@ -56,8 +56,8 @@ export async function pushLane(laneId: number): Promise<PushResult> {
   return postToCloud('/lanes', {
     external_id: `local-${lane.id}`,
     name: lane.name,
-    direction: lane.direction,
-    lane_type: lane.laneType ?? 'car',
+    // Derived from the lane's cameras (may be 'dual', or null if none wired).
+    direction: deriveLaneDirection(lane.id),
     terminal_external_id: terminal ? `local-${terminal.id}` : null,
     gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,

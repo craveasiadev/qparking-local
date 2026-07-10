@@ -63,7 +63,6 @@ function applySchema(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS lanes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('entry','exit')) DEFAULT 'entry',
       scope_id TEXT,
       terminal_id INTEGER,
       gate_relay_address TEXT,
@@ -256,6 +255,19 @@ function applySchema(db: Database.Database) {
   try { db.exec('DROP TABLE IF EXISTS vehicle_types'); } catch { /* ignore */ }
   try { db.exec('DROP TABLE IF EXISTS vehicle_groups'); } catch { /* ignore */ }
   try { db.exec('ALTER TABLE tariff_rules DROP COLUMN vehicle_type'); } catch { /* column absent or old SQLite */ }
+  // The lane-level car/motorcycle/mixed descriptor was part of the same
+  // retired vehicle-type concept — it never affected pricing. Drop it.
+  try { db.exec('ALTER TABLE lanes DROP COLUMN lane_type'); } catch { /* column absent or old SQLite */ }
+  // Lane direction is no longer stored either — it's derived from the
+  // directions of the cameras assigned to the lane (deriveLaneDirection).
+  // The camera is the single source of truth, so the lanes row is now pure
+  // wiring (rate plan + terminal + gate relay). Drop the stale column.
+  try { db.exec('ALTER TABLE lanes DROP COLUMN direction'); } catch { /* column absent or old SQLite */ }
+
+  // Live video now comes from the device SDK (device_user/password/port), not a
+  // stream/RTSP URL. Drop the vestigial cameras.stream_url column left over from
+  // the old RTSP attempt (best-effort; no-op on old SQLite or if already gone).
+  try { db.exec('ALTER TABLE cameras DROP COLUMN stream_url'); } catch { /* column absent or old SQLite */ }
 
   // 2026-07-10: the site page was slimmed to identity / occupancy / contact,
   // so receipt-branding, season-pass logo and scope-override columns are no
@@ -278,7 +290,7 @@ function applySchema(db: Database.Database) {
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
   // the column already exists, so wrap each in its own try/catch.
-  for (const col of ['host TEXT', 'snapshot_url TEXT']) {
+  for (const col of ['host TEXT', 'snapshot_url TEXT', 'device_user TEXT', 'device_password TEXT', 'device_port INTEGER']) {
     try { db.exec(`ALTER TABLE cameras ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // Same pattern for sessions — older installs predate card_scheme /
@@ -321,6 +333,9 @@ function applySchema(db: Database.Database) {
     // 2026-07-09: true policy-level daily cap, distinct from the legacy
     // effective-rule mirror in daily_cap_cents. NULL = uncapped.
     'policy_daily_cap_cents INTEGER',
+    // Site-wide default plan flag (cloud RatePolicy.is_site_default). Used as
+    // the pricing fallback when a lane/session has no scope of its own.
+    'is_site_default INTEGER NOT NULL DEFAULT 0',
   ]) {
     try { db.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
@@ -328,12 +343,6 @@ function applySchema(db: Database.Database) {
   // operators can see which rules are dimmed and the exit flow can skip
   // inactive rules even if they technically match the moment.
   try { db.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
-
-  // 2026-07-03: lane_type distinguishes car / motorcycle / mixed lanes.
-  // Descriptive lane metadata mirrored from the cloud only — as of 2026-07-09
-  // it has NO effect on pricing (fees are lane → rate policy → day/time/date;
-  // the vehicle-type dimension was retired).
-  try { db.exec(`ALTER TABLE lanes ADD COLUMN lane_type TEXT NOT NULL DEFAULT 'car'`); } catch { /* already there */ }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -351,6 +360,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   entryCameraHandlesExit: false,
   faceGateEnabled: true,
   minimumChargeCents: 0,
+  devMode: false,
   tngEnabled: false,
   tngHost: '192.168.1.105',
   tngPort: 80,
@@ -425,6 +435,18 @@ export function deleteTerminal(id: number) {
   getDb().prepare('DELETE FROM terminals WHERE id = ?').run(id);
 }
 
+/**
+ * Sync a terminal's ECPI `laneType` from the lane it's wired to. The lane's
+ * direction is now the single source of truth — the terminal form no longer
+ * asks the operator to re-enter it. entry→'entry', exit→'exit'; both are
+ * valid values for the wire-level `laneType` the reader expects at
+ * initTerminal (see ecpi-terminal.ts:laneTypeCode).
+ */
+export function setTerminalLaneType(terminalId: number, laneType: PaymentTerminal['laneType']): void {
+  getDb().prepare(`UPDATE terminals SET lane_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .run(laneType, terminalId);
+}
+
 export function logTerminal(terminalId: number, direction: 'send'|'recv'|'error'|'info', message: string, payload?: unknown) {
   try {
     getDb().prepare('INSERT INTO terminal_log (terminal_id, direction, message, payload) VALUES (?,?,?,?)')
@@ -439,6 +461,8 @@ function rowToCamera(row: any): LprCamera {
     id: row.id, name: row.name, laneId: row.lane_id, direction: row.direction,
     ingestMode: row.ingest_mode, webhookSecret: row.webhook_secret,
     host: row.host ?? null, snapshotUrl: row.snapshot_url ?? null,
+    deviceUser: row.device_user ?? null, devicePassword: row.device_password ?? null,
+    devicePort: row.device_port ?? null,
     pollUrl: row.poll_url, pollIntervalSeconds: row.poll_interval_seconds,
     enabled: !!row.enabled, createdAt: row.created_at, updatedAt: row.updated_at,
   };
@@ -456,12 +480,12 @@ export function getCamera(id: number): LprCamera | null {
 export function upsertCamera(camera: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> & { id?: number }): LprCamera {
   const db = getDb();
   if (camera.id) {
-    db.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0, camera.id);
+    db.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0, camera.id);
     return getCamera(camera.id)!;
   }
-  const info = db.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0);
+  const info = db.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, device_user, device_password, device_port, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0);
   return getCamera(Number(info.lastInsertRowid))!;
 }
 
@@ -473,10 +497,9 @@ export function deleteCamera(id: number) {
 
 function rowToLane(row: any): ParkingLane {
   return {
-    id: row.id, name: row.name, direction: row.direction, scopeId: row.scope_id,
+    id: row.id, name: row.name, scopeId: row.scope_id,
     terminalId: row.terminal_id, gateRelayAddress: row.gate_relay_address,
     enabled: !!row.enabled,
-    laneType: (row.lane_type ?? 'car') as ParkingLane['laneType'],
   };
 }
 
@@ -491,19 +514,69 @@ export function getLane(id: number): ParkingLane | null {
 
 export function upsertLane(lane: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
   const db = getDb();
-  const laneType = lane.laneType ?? 'car';
   if (lane.id) {
-    db.prepare(`UPDATE lanes SET name=?, direction=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=?, lane_type=? WHERE id=?`)
-      .run(lane.name, lane.direction, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, laneType, lane.id);
+    db.prepare(`UPDATE lanes SET name=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`)
+      .run(lane.name, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, lane.id);
     return getLane(lane.id)!;
   }
-  const info = db.prepare(`INSERT INTO lanes (name, direction, scope_id, terminal_id, gate_relay_address, enabled, lane_type) VALUES (?,?,?,?,?,?,?)`)
-    .run(lane.name, lane.direction, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, laneType);
+  const info = db.prepare(`INSERT INTO lanes (name, scope_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?)`)
+    .run(lane.name, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0);
   return getLane(Number(info.lastInsertRowid))!;
 }
 
 export function deleteLane(id: number) {
   getDb().prepare('DELETE FROM lanes WHERE id = ?').run(id);
+}
+
+/**
+ * Set exactly which cameras cover a lane. The lane owns the camera↔lane
+ * wiring now (cameras no longer pick their own lane on the camera form):
+ *   - every camera in `cameraIds` gets lane_id = laneId (moving it off any
+ *     other lane it was previously on)
+ *   - every camera previously on THIS lane but not in `cameraIds` is
+ *     unassigned (lane_id = NULL)
+ * Runs in one transaction so a half-applied reassignment can't leave a
+ * camera pointing at a lane the operator just cleared.
+ */
+export function setLaneCameras(laneId: number, cameraIds: number[]): void {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    if (cameraIds.length > 0) {
+      const placeholders = cameraIds.map(() => '?').join(',');
+      // Detach cameras that used to be on this lane but were deselected.
+      d.prepare(`UPDATE cameras SET lane_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ? AND id NOT IN (${placeholders})`)
+        .run(laneId, ...cameraIds);
+      // Attach the selected set (also steals any that were on another lane).
+      d.prepare(`UPDATE cameras SET lane_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`)
+        .run(laneId, ...cameraIds);
+    } else {
+      // Nothing selected → this lane covers no cameras.
+      d.prepare(`UPDATE cameras SET lane_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ?`)
+        .run(laneId);
+    }
+  });
+  tx();
+}
+
+/**
+ * Derive a lane's direction from the cameras assigned to it — the camera is
+ * the single source of truth (routing is keyed to the camera that saw the
+ * plate, so direction physically belongs to the camera, not the lane).
+ *   - all cameras entry-facing          → 'entry'
+ *   - all exit-facing                   → 'exit'
+ *   - any dual cam, OR both entry+exit  → 'dual'
+ *   - no cameras yet                    → null (caller decides the fallback)
+ * The three non-null results map 1:1 onto the ECPI terminal laneType, so this
+ * also feeds setTerminalLaneType for the terminal wired to the lane.
+ */
+export function deriveLaneDirection(laneId: number): 'entry' | 'exit' | 'dual' | null {
+  const rows = getDb().prepare('SELECT DISTINCT direction FROM cameras WHERE lane_id = ?').all(laneId) as { direction: string }[];
+  if (rows.length === 0) return null;
+  const dirs = new Set(rows.map((r) => r.direction));
+  if (dirs.has('dual') || (dirs.has('entry') && dirs.has('exit'))) return 'dual';
+  if (dirs.has('entry')) return 'entry';
+  if (dirs.has('exit')) return 'exit';
+  return null;
 }
 
 // ─── sessions ──────────────────────────────────────────────────────────────
@@ -531,8 +604,13 @@ export function findOpenSessionByPlate(plate: string): ParkingSession | null {
 
 export function createEntrySession(plate: string, laneId: number | null, cameraId: number | null, imagePath: string | null): ParkingSession {
   const db = getDb();
-  const info = db.prepare(`INSERT INTO sessions (plate, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?)`)
-    .run(plate, laneId, cameraId, imagePath);
+  // Store entry_at as an explicit UTC ISO string (…Z), NOT SQLite's
+  // CURRENT_TIMESTAMP: the latter is UTC but carries no zone marker, so JS
+  // Date.parse mis-reads it as LOCAL time — an 8h skew vs exit_at (which uses
+  // toISOString). Keeping both ends in the same UTC-with-Z format is what
+  // makes the duration + fee math correct.
+  const info = db.prepare(`INSERT INTO sessions (plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?,?)`)
+    .run(plate, new Date().toISOString(), laneId, cameraId, imagePath);
   return getSessionById(Number(info.lastInsertRowid))!;
 }
 
@@ -788,6 +866,7 @@ function rowToScope(row: any, rules: TariffRule[] = []): ScopeRate {
     flatMultiRate: (row.flat_multi_rate ?? null) as any,
     firstBlockOncePerEntry: !!row.first_block_once_per_entry,
     policyDailyCapCents: row.policy_daily_cap_cents ?? null,
+    isSiteDefault: !!row.is_site_default,
     rules,
   };
 }
@@ -900,6 +979,15 @@ export function upsertSite(site: Site): Site {
   return getSite(site.id)!;
 }
 
+/** The site-wide default rate plan (cloud RatePolicy flagged is_site_default).
+ *  Used as the pricing fallback when neither the entry nor exit lane carries a
+ *  scope. Null if the cloud hasn't flagged a default. */
+export function getSiteDefaultScope(): ScopeRate | null {
+  const r = getDb().prepare('SELECT * FROM scopes WHERE is_site_default = 1 LIMIT 1').get() as any;
+  if (!r) return null;
+  return rowToScope(r, listTariffRulesForScope(r.scope_id));
+}
+
 /**
  * Idempotent upsert. Replaces the full rule set for this scope on every
  * call — the SaaS is the source of truth, so a rule removed in the cloud
@@ -913,8 +1001,8 @@ export function upsertScope(scope: ScopeRate): ScopeRate {
         block_minutes, daily_cap_cents, currency, fetched_at,
         policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
         policy_description, new_day_fixed_fee_cents,
-        rate_basis, flat_multi_rate, first_block_once_per_entry, policy_daily_cap_cents
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        rate_basis, flat_multi_rate, first_block_once_per_entry, policy_daily_cap_cents, is_site_default
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_id) DO UPDATE SET
         scope_name=excluded.scope_name,
         free_minutes=excluded.free_minutes,
@@ -935,7 +1023,8 @@ export function upsertScope(scope: ScopeRate): ScopeRate {
         rate_basis=excluded.rate_basis,
         flat_multi_rate=excluded.flat_multi_rate,
         first_block_once_per_entry=excluded.first_block_once_per_entry,
-        policy_daily_cap_cents=excluded.policy_daily_cap_cents`)
+        policy_daily_cap_cents=excluded.policy_daily_cap_cents,
+        is_site_default=excluded.is_site_default`)
       .run(
         scope.scopeId, scope.scopeName, scope.freeMinutes, scope.firstBlockCents, scope.perBlockCents,
         scope.blockMinutes, scope.dailyCapCents, scope.currency, scope.fetchedAt,
@@ -944,6 +1033,7 @@ export function upsertScope(scope: ScopeRate): ScopeRate {
         scope.policyDescription ?? null, scope.newDayFixedFeeCents ?? null,
         scope.rateBasis ?? null, scope.flatMultiRate ?? null, scope.firstBlockOncePerEntry ? 1 : 0,
         scope.policyDailyCapCents ?? null,
+        scope.isSiteDefault ? 1 : 0,
       );
 
     db.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(scope.scopeId);
