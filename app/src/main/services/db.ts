@@ -49,12 +49,8 @@ function applySchema(db: Database.Database) {
       name TEXT NOT NULL,
       lane_id INTEGER,
       direction TEXT NOT NULL CHECK (direction IN ('entry','exit','dual')) DEFAULT 'entry',
-      ingest_mode TEXT NOT NULL CHECK (ingest_mode IN ('webhook','poll')) DEFAULT 'webhook',
       host TEXT,
-      snapshot_url TEXT,
       webhook_secret TEXT,
-      poll_url TEXT,
-      poll_interval_seconds INTEGER,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -268,6 +264,12 @@ function applySchema(db: Database.Database) {
   // stream/RTSP URL. Drop the vestigial cameras.stream_url column left over from
   // the old RTSP attempt (best-effort; no-op on old SQLite or if already gone).
   try { db.exec('ALTER TABLE cameras DROP COLUMN stream_url'); } catch { /* column absent or old SQLite */ }
+  // HTTP snapshot URL retired — live view + captures come from the device SDK.
+  try { db.exec('ALTER TABLE cameras DROP COLUMN snapshot_url'); } catch { /* column absent or old SQLite */ }
+  // Ingest-mode + poll fields retired — cameras only ever push to the webhook.
+  try { db.exec('ALTER TABLE cameras DROP COLUMN ingest_mode'); } catch { /* column absent or old SQLite */ }
+  try { db.exec('ALTER TABLE cameras DROP COLUMN poll_url'); } catch { /* column absent or old SQLite */ }
+  try { db.exec('ALTER TABLE cameras DROP COLUMN poll_interval_seconds'); } catch { /* column absent or old SQLite */ }
 
   // 2026-07-10: the site page was slimmed to identity / occupancy / contact,
   // so receipt-branding, season-pass logo and scope-override columns are no
@@ -290,7 +292,7 @@ function applySchema(db: Database.Database) {
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
   // the column already exists, so wrap each in its own try/catch.
-  for (const col of ['host TEXT', 'snapshot_url TEXT', 'device_user TEXT', 'device_password TEXT', 'device_port INTEGER']) {
+  for (const col of ['host TEXT', 'device_user TEXT', 'device_password TEXT', 'device_port INTEGER']) {
     try { db.exec(`ALTER TABLE cameras ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // Same pattern for sessions — older installs predate card_scheme /
@@ -459,11 +461,10 @@ export function logTerminal(terminalId: number, direction: 'send'|'recv'|'error'
 function rowToCamera(row: any): LprCamera {
   return {
     id: row.id, name: row.name, laneId: row.lane_id, direction: row.direction,
-    ingestMode: row.ingest_mode, webhookSecret: row.webhook_secret,
-    host: row.host ?? null, snapshotUrl: row.snapshot_url ?? null,
+    webhookSecret: row.webhook_secret,
+    host: row.host ?? null,
     deviceUser: row.device_user ?? null, devicePassword: row.device_password ?? null,
     devicePort: row.device_port ?? null,
-    pollUrl: row.poll_url, pollIntervalSeconds: row.poll_interval_seconds,
     enabled: !!row.enabled, createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
@@ -480,12 +481,12 @@ export function getCamera(id: number): LprCamera | null {
 export function upsertCamera(camera: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> & { id?: number }): LprCamera {
   const db = getDb();
   if (camera.id) {
-    db.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0, camera.id);
+    db.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(camera.name, camera.laneId, camera.direction, camera.host, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.enabled ? 1 : 0, camera.id);
     return getCamera(camera.id)!;
   }
-  const info = db.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, device_user, device_password, device_port, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(camera.name, camera.laneId, camera.direction, camera.ingestMode, camera.host, camera.snapshotUrl, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.pollUrl, camera.pollIntervalSeconds, camera.enabled ? 1 : 0);
+  const info = db.prepare(`INSERT INTO cameras (name, lane_id, direction, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(camera.name, camera.laneId, camera.direction, camera.host, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.enabled ? 1 : 0);
   return getCamera(Number(info.lastInsertRowid))!;
 }
 

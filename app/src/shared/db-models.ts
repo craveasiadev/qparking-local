@@ -51,10 +51,8 @@ export interface PaymentTerminal {
 
 // ─── cameras ─────────────────────────────────────────────────────────────────
 
-/** Per-camera config. We support two ingest modes: WEBHOOK (camera POSTs a
- *  plate event to our HTTP server) and POLL (we hit a vendor URL on a timer). */
-export type LprIngestMode = 'webhook' | 'poll';
-
+/** Per-camera config. Cameras POST plate events to our HTTP webhook
+ *  (/lpr/event); live video comes from the device SDK. */
 export interface LprCamera {
   id: number;
   name: string;
@@ -62,13 +60,8 @@ export interface LprCamera {
   laneId: number | null;
   /** entry / exit / dual — overrides lane's default if present. */
   direction: 'entry' | 'exit' | 'dual';
-  ingestMode: LprIngestMode;
   /** Camera's LAN IP/host — needed for ping/test-connection. e.g. 192.168.1.50 */
   host: string | null;
-  /** HTTP(S) URL that returns a JPEG snapshot. Used for live preview in
-   *  the UI and periodic upload to the cloud mirror. Most IP cameras expose
-   *  something like http://<ip>/snapshot.jpg or http://<ip>/cgi-bin/snapshot.cgi. */
-  snapshotUrl: string | null;
   /** Vendor-SDK login for pulling live H.264 video directly off the device
    *  (VzLPRSDK). `host` is the camera IP; `devicePort` is the SDK control port
    *  (default 80). When user + password are set, the main process connects via
@@ -79,9 +72,6 @@ export interface LprCamera {
   devicePort: number | null;
   /** Webhook secret — cameras POSTing /lpr/event must include this header. */
   webhookSecret: string | null;
-  /** For poll mode — vendor REST URL we hit every N seconds. */
-  pollUrl: string | null;
-  pollIntervalSeconds: number | null;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;

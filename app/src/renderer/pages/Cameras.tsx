@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { Plus, Trash2, Camera as CamIcon, Zap, ZapOff, X, Copy, Check, Activity, PlayCircle, Loader2 } from 'lucide-react';
-import type { LprCamera, ParkingLane, LprIngestMode } from '@shared/types';
+import { useEffect, useState } from 'react';
+import { Plus, Trash2, Camera as CamIcon, X, Copy, Check, Activity, Loader2 } from 'lucide-react';
+import type { LprCamera, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 
 const EMPTY: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> = {
-  name: '', laneId: null, direction: 'entry', ingestMode: 'webhook',
-  host: '', snapshotUrl: '', deviceUser: '', devicePassword: '', devicePort: 80,
-  webhookSecret: '', pollUrl: null, pollIntervalSeconds: null, enabled: true,
+  name: '', laneId: null, direction: 'entry',
+  host: '', deviceUser: '', devicePassword: '', devicePort: 80,
+  webhookSecret: '', enabled: true,
 };
 
 export function Cameras() {
@@ -17,8 +17,6 @@ export function Cameras() {
   const [formError, setFormError] = useState<string | null>(null);
   const [confirm, confirmDialog] = useConfirm();
   const [diag, setDiag] = useState<{ port: number; addresses: string[] } | null>(null);
-  const [simPlate, setSimPlate] = useState<Record<number, string>>({});
-  const [simBusy, setSimBusy] = useState<Record<number, boolean>>({});
 
   async function refresh() {
     setList(await window.bridge.listCameras());
@@ -33,10 +31,6 @@ export function Cameras() {
     await window.bridge.saveCamera(editing as any);
     setEditing(null);
     await refresh();
-  });
-
-  const [runSim, simRunningSingle] = useAsyncAction(async (cameraId: number, plate: string) => {
-    await window.bridge.simulatePlate(cameraId, plate);
   });
 
   const [runDelete, deleting] = useAsyncAction(async (id: number) => {
@@ -81,7 +75,7 @@ export function Cameras() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2"><CamIcon size={16} className="text-gray-400" /><h3 className="font-semibold">{c.name}</h3></div>
                   <div className="mt-1 text-xs text-gray-500 font-mono break-all">
-                    {c.direction} · {c.ingestMode}
+                    {c.direction}
                     {c.host && <> · {c.host}</>}
                     {lane ? ` · lane: ${lane.name}` : ' · no lane assigned'}
                     {!c.enabled && ' · DISABLED'}
@@ -89,40 +83,6 @@ export function Cameras() {
                   {c.webhookSecret && <div className="mt-1 text-[11px] text-gray-400">webhook secret: <span className="font-mono">{c.webhookSecret.slice(0, 6)}…</span></div>}
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <input
-                    placeholder="VMM1234"
-                    value={simPlate[c.id] ?? ''}
-                    onChange={(e) => setSimPlate({ ...simPlate, [c.id]: e.target.value })}
-                    className="h-9 w-32 px-2 rounded-lg border border-gray-200 text-xs font-mono"
-                  />
-                  <button
-                    onClick={() => simPlate[c.id] && runSim(c.id, simPlate[c.id])}
-                    disabled={simRunningSingle || !simPlate[c.id]}
-                    title="Fire ONE plate event (entry first time, exit if a session is already open)"
-                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-                    {simRunningSingle ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
-                    {simRunningSingle ? 'Sending…' : 'Simulate'}
-                  </button>
-                  <button
-                    onClick={async () => {
-                      const plate = simPlate[c.id];
-                      if (!plate) return;
-                      setSimBusy((b) => ({ ...b, [c.id]: true }));
-                      try {
-                        // Full flow: entry → 3s hold → exit. Same camera fires
-                        // both halves, so the camera should be direction=dual
-                        // (otherwise only the matching half hits the flow).
-                        await window.bridge.simulateFullFlow(c.id, plate, 3000);
-                      } finally {
-                        setSimBusy((b) => ({ ...b, [c.id]: false }));
-                      }
-                    }}
-                    disabled={!simPlate[c.id] || simBusy[c.id]}
-                    title="Run full entry → 3s wait → exit flow. Watch Sessions tab + gate window."
-                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-                    {simBusy[c.id] ? <ZapOff size={13} className="animate-pulse" /> : <PlayCircle size={13} />}
-                    {simBusy[c.id] ? 'Running…' : 'Demo flow'}
-                  </button>
                   <button onClick={() => { setFormError(null); setEditing(c); }} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
                   <button onClick={() => runDelete(c.id)} disabled={deleting}
                     className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center disabled:opacity-40">
@@ -130,8 +90,6 @@ export function Cameras() {
                   </button>
                 </div>
               </div>
-              {/* Live preview pane — only renders if snapshotUrl is set */}
-              {c.snapshotUrl && <CameraPreview cam={c} />}
             </div>
           );
         })}
@@ -144,61 +102,6 @@ export function Cameras() {
 
       {editing && <CameraForm value={editing} onChange={setEditing} onCancel={() => { setFormError(null); setEditing(null); }} onSave={save} saving={saving} error={formError} />}
       {confirmDialog}
-    </div>
-  );
-}
-
-/**
- * Auto-refreshing live snapshot pane. Fetches the camera's JPEG every
- * REFRESH_MS via the main process (which has direct LAN access), decodes
- * the base64 in the renderer, and renders it as a data: URL. Cheap because
- * IP cameras' snapshot endpoints return well under 100KB JPEGs.
- */
-function CameraPreview({ cam }: { cam: LprCamera }) {
-  const REFRESH_MS = 2_000;
-  const [src, setSrc] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
-  const aliveRef = useRef(true);
-
-  useEffect(() => {
-    aliveRef.current = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      const r = await window.bridge.fetchCameraSnapshot(cam.id);
-      if (!aliveRef.current) return;
-      if (r.ok && r.base64) {
-        setSrc(`data:${r.contentType ?? 'image/jpeg'};base64,${r.base64}`);
-        setError(null);
-        setFetchedAt(r.fetchedAt ?? new Date().toISOString());
-      } else {
-        setError(r.error ?? `status ${r.status}`);
-      }
-      timer = window.setTimeout(tick, REFRESH_MS);
-    }
-    void tick();
-    return () => { aliveRef.current = false; if (timer) clearTimeout(timer); };
-  }, [cam.id]);
-
-  return (
-    <div className="border-t border-gray-100 bg-gray-950 relative">
-      {src ? (
-        <img src={src} alt={`${cam.name} live`} className="w-full max-h-72 object-contain bg-black" />
-      ) : (
-        <div className="aspect-video flex items-center justify-center text-white/50 text-sm">
-          {error ? `× ${error}` : 'loading snapshot…'}
-        </div>
-      )}
-      <div className="absolute top-2 left-2 inline-flex items-center gap-1.5 bg-black/60 text-white text-[10px] uppercase tracking-widest font-bold px-2 py-1 rounded">
-        <span className={`w-1.5 h-1.5 rounded-full ${error ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`} />
-        LIVE · {cam.name}
-      </div>
-      {fetchedAt && !error && (
-        <div className="absolute top-2 right-2 text-[10px] text-white/60 font-mono bg-black/60 px-2 py-1 rounded">
-          {new Date(fetchedAt).toLocaleTimeString()}
-        </div>
-      )}
     </div>
   );
 }
@@ -234,19 +137,10 @@ function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
               <option value="entry">Entry</option><option value="exit">Exit</option><option value="dual">Dual</option>
             </select>
           </Field>
-          <Field label="Ingest mode">
-            <select className="input" value={value.ingestMode ?? 'webhook'} onChange={(e) => set('ingestMode', e.target.value as LprIngestMode)}>
-              <option value="webhook">Webhook (camera POSTs to us)</option>
-              <option value="poll">Poll (we pull on a timer)</option>
-            </select>
-          </Field>
-          {/* LAN-side wiring — needed for ping + live preview. Both the local
-              app and the user are on the same LAN as the camera at the branch. */}
+          {/* Camera LAN IP — used for the ping / test-connection check and as the
+              SDK connect host for live video. */}
           <Field label="Camera host / LAN IP">
             <input className="input font-mono" value={value.host ?? ''} onChange={(e) => set('host', e.target.value)} placeholder="192.168.1.50" />
-          </Field>
-          <Field label="Snapshot URL (live preview)">
-            <input className="input font-mono text-xs" value={value.snapshotUrl ?? ''} onChange={(e) => set('snapshotUrl', e.target.value)} placeholder="http://192.168.1.50/snapshot.jpg" />
           </Field>
           {/* Device login for pulling live video off the camera via the VZ SDK.
               host (above) = camera IP; these feed VzLPRClient_OpenV2. */}
@@ -272,20 +166,12 @@ function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
               }`}>{pingResult}</div>
             )}
           </div>
-          {value.ingestMode === 'webhook' && (
-            <Field label="Webhook secret">
-              <div className="flex gap-2">
-                <input className="input font-mono text-xs" value={value.webhookSecret ?? ''} onChange={(e) => set('webhookSecret', e.target.value)} />
-                <button onClick={generateSecret} className="text-[11px] uppercase tracking-wide font-bold text-gray-600 px-2 hover:text-gray-900">Generate</button>
-              </div>
-            </Field>
-          )}
-          {value.ingestMode === 'poll' && (
-            <>
-              <Field label="Poll URL"><input className="input font-mono text-xs" value={value.pollUrl ?? ''} onChange={(e) => set('pollUrl', e.target.value)} placeholder="http://192.168.1.50/lpr/latest" /></Field>
-              <Field label="Interval (s)"><input type="number" className="input" value={value.pollIntervalSeconds ?? 5} onChange={(e) => set('pollIntervalSeconds', Number(e.target.value))} /></Field>
-            </>
-          )}
+          <Field label="Webhook secret">
+            <div className="flex gap-2">
+              <input className="input font-mono text-xs" value={value.webhookSecret ?? ''} onChange={(e) => set('webhookSecret', e.target.value)} />
+              <button onClick={generateSecret} className="text-[11px] uppercase tracking-wide font-bold text-gray-600 px-2 hover:text-gray-900">Generate</button>
+            </div>
+          </Field>
           <Field label="Enabled">
             <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={value.enabled ?? true} onChange={(e) => set('enabled', e.target.checked)} /> accept events</label>
           </Field>

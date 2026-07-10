@@ -42,9 +42,6 @@ const api: BridgeApi = {
   listCameras: () => ipcRenderer.invoke('cameras:list'),
   saveCamera: (input: unknown) => ipcRenderer.invoke('cameras:save', input),
   deleteCamera: (id: number) => ipcRenderer.invoke('cameras:delete', id),
-  simulatePlate: (cameraId: number, plate: string) => ipcRenderer.invoke('cameras:simulate', cameraId, plate),
-  simulateFullFlow: (cameraId: number, plate: string, holdMs?: number) => ipcRenderer.invoke('cameras:simulateFullFlow', cameraId, plate, holdMs ?? 3000),
-  fetchCameraSnapshot: (cameraId: number) => ipcRenderer.invoke('cameras:snapshot', cameraId),
   getCameraLatestFrame: (cameraId: number) => ipcRenderer.invoke('cameras:latest-frame', cameraId),
   pingCamera: (cameraId: number) => ipcRenderer.invoke('cameras:ping', cameraId),
 
@@ -74,6 +71,7 @@ const api: BridgeApi = {
   simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
   simulateEntry: (laneId: number, plate: string, entryIso: string) => ipcRenderer.invoke('sessions:simulate-entry', laneId, plate, entryIso),
   simulateExit: (laneId: number, plate: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-exit', laneId, plate, exitIso),
+  readSessionImage: (filePath: string) => ipcRenderer.invoke('sessions:image', filePath),
   deleteSession: (id: number) => ipcRenderer.invoke('sessions:delete', id),
   deleteSessionsBulk: (opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) =>
     ipcRenderer.invoke('sessions:delete-bulk', opts),

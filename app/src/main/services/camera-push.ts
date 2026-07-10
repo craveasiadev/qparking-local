@@ -26,9 +26,9 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
       name: camera.name,
       direction: camera.direction,
       host: camera.host,
-      snapshot_url: camera.snapshotUrl ? '(see /snapshot)' : null, // never share LAN URL with cloud
+      snapshot_url: null, // HTTP snapshot URL retired — live view comes from the device SDK
       enabled: camera.enabled,
-      has_snapshot: !!camera.snapshotUrl,
+      has_snapshot: false,
       // Which lane this camera watches — cloud resolves to a UUID so
       // per-camera Open Barrier commands carry the target lane_id.
       lane_external_id: `local-${lane.id}`,

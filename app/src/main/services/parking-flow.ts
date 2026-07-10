@@ -27,7 +27,7 @@ import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getScope, getSiteDefaultScope, getSettings, getTerminal,
   listLanes, listCameras, recordExit, updateSessionFields, findActivePassByPlate, getSessionById,
 } from './db';
-import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
+import { lprEvents, normalisePlate, captureFrameToFile, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
 import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId } from './w4g-tng';
 
@@ -1168,12 +1168,12 @@ export function simulateLaneEvent(
  * window. It stays LOCAL — no terminal, no gate, no cloud push. Gated behind
  * devMode in the UI.
  */
-export function simulateCompletedSession(
+export async function simulateCompletedSession(
   laneId: number,
   plate: string,
   entryIso: string,
   exitIso: string,
-): { ok: boolean; error?: string; sessionId?: number; durationMinutes?: number; feeCents?: number; scopeName?: string; currency?: string; paymentStatus?: string } {
+): Promise<{ ok: boolean; error?: string; sessionId?: number; durationMinutes?: number; feeCents?: number; scopeName?: string; currency?: string; paymentStatus?: string }> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'lane_not_found' };
   const norm = normalisePlate(plate);
@@ -1190,15 +1190,18 @@ export function simulateCompletedSession(
   const feeCents = computeFee(durationMinutes, scope, entryIso, exitIso);
   const paymentStatus: ParkingSession['paymentStatus'] = feeCents > 0 ? 'paid' : 'free';
 
-  // Reuse the live-flow DB primitives: open a session, backdate its entry, then
-  // close it with the computed values. No terminal, no gate, no cloud push.
-  const session = createEntrySession(norm, laneId, null, null);
+  // Snapshot off the lane camera's live SDK feed (if any) so the record shows a
+  // real capture. Reuse the live-flow DB primitives: open a session, backdate
+  // its entry, then close it. No terminal, no gate, no cloud push.
+  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
+  const imagePath = cam ? await captureFrameToFile(cam.id, norm) : null;
+  const session = createEntrySession(norm, laneId, cam?.id ?? null, imagePath);
   updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString(), notes: 'Simulated (dev tool)' });
   recordExit(session.id, {
     exitAt: new Date(exitMs).toISOString(),
     exitLaneId: laneId,
-    exitCameraId: null,
-    exitImagePath: null,
+    exitCameraId: cam?.id ?? null,
+    exitImagePath: imagePath,
     durationMinutes,
     feeCents,
     paymentStatus,
@@ -1206,7 +1209,7 @@ export function simulateCompletedSession(
     cardScheme: null,
     paymentTimestamp: paymentStatus === 'paid' ? new Date(exitMs).toISOString() : null,
   });
-  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min scope=${scope?.scopeName ?? 'NONE'} → fee=${feeCents}c status=${paymentStatus}`);
+  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min scope=${scope?.scopeName ?? 'NONE'} img=${imagePath ? 'yes' : 'none'} → fee=${feeCents}c status=${paymentStatus}`);
   return { ok: true, sessionId: session.id, durationMinutes, feeCents, scopeName: scope?.scopeName, currency: scope?.currency, paymentStatus };
 }
 
@@ -1216,9 +1219,9 @@ export function simulateCompletedSession(
  * session (no gate/turnstile side effects) — the point is just to "store" the
  * entry. Gated behind devMode in the UI.
  */
-export function simulateEntryAt(
+export async function simulateEntryAt(
   laneId: number, plate: string, entryIso: string,
-): { ok: boolean; error?: string; sessionId?: number } {
+): Promise<{ ok: boolean; error?: string; sessionId?: number }> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'lane_not_found' };
   const norm = normalisePlate(plate);
@@ -1229,9 +1232,12 @@ export function simulateEntryAt(
     return { ok: false, error: 'already_inside — this plate has an open session; press Exit first' };
   }
   const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
-  const session = createEntrySession(norm, laneId, cam?.id ?? null, null);
+  // Grab a snapshot off the camera's live SDK feed (if any) so the session has a
+  // real capture image, not just a placeholder.
+  const imagePath = cam ? await captureFrameToFile(cam.id, norm) : null;
+  const session = createEntrySession(norm, laneId, cam?.id ?? null, imagePath);
   updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString() });
-  flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} session=${session.id}`);
+  flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} img=${imagePath ? 'yes' : 'none'} session=${session.id}`);
   return { ok: true, sessionId: session.id };
 }
 
@@ -1242,9 +1248,9 @@ export function simulateEntryAt(
  * Requires an open session for the plate (press Entry first). Gated behind
  * devMode in the UI.
  */
-export function simulateExitAt(
+export async function simulateExitAt(
   laneId: number, plate: string, exitIso: string,
-): { ok: boolean; error?: string; cameraId?: number } {
+): Promise<{ ok: boolean; error?: string; cameraId?: number }> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'lane_not_found' };
   const norm = normalisePlate(plate);
@@ -1256,16 +1262,18 @@ export function simulateExitAt(
   }
   const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
   if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one so the flow can route to this lane` };
+  // Snapshot the exit off the camera's live SDK feed (if any).
+  const imagePath = await captureFrameToFile(cam.id, norm);
   const event: PlateEvent = {
     cameraId: cam.id,
     plate: norm,
     confidence: 1.0,
-    imagePath: null,
+    imagePath,
     timestamp: exitIso,
     direction: 'exit',
     exitAtOverride: new Date(exitMs).toISOString(),
   };
-  flog(`DEV SIMULATE EXIT: lane="${lane.name}" plate=${norm} exitAt=${exitIso} via camera=${cam.id}`);
+  flog(`DEV SIMULATE EXIT: lane="${lane.name}" plate=${norm} exitAt=${exitIso} img=${imagePath ? 'yes' : 'none'} via camera=${cam.id}`);
   lprEvents.emit('plate', event);
   return { ok: true, cameraId: cam.id };
 }

@@ -62,6 +62,16 @@ export function setLatestFrame(cameraId: number, frame: { base64: string; conten
   latestFrames.set(cameraId, frame);
 }
 
+/** Capture a camera's current live frame (from the SDK grabber's cache) to a
+ *  JPEG under userData/plates and return its path — or null if there's no frame
+ *  yet. Lets the parking flow attach a real snapshot when the plate event itself
+ *  carries no image (SDK cameras / the dev simulator). */
+export async function captureFrameToFile(cameraId: number, plate: string): Promise<string | null> {
+  const frame = latestFrames.get(cameraId);
+  if (!frame?.base64) return null;
+  try { return await saveImage(plate, frame.base64); } catch { return null; }
+}
+
 /**
  * MJPEG fan-out for the Live display. A GET /live/<id> response is an
  * `multipart/x-mixed-replace` stream; the SDK grabber (camera-stream.ts) calls
@@ -345,22 +355,6 @@ async function saveImage(plate: string, base64Image: string): Promise<string> {
   const filePath = path.join(imageDir, `${plate}-${Date.now()}.jpg`);
   await fs.promises.writeFile(filePath, imageBuffer);
   return filePath;
-}
-
-/** Simulate a plate detection — used by the UI test button and the renderer
- *  "simulate plate" feature when no camera is wired up yet. */
-export function simulatePlate(cameraId: number, plate: string) {
-  const camera = getCamera(cameraId);
-  if (!camera) throw new Error('unknown_camera');
-  const event: PlateEvent = {
-    cameraId,
-    plate: normalisePlate(plate),
-    confidence: 1.0,
-    imagePath: null,
-    timestamp: new Date().toISOString(),
-    direction: camera.direction,
-  };
-  lprEvents.emit('plate', event);
 }
 
 /** Used by the renderer to show whether the server is up + how cameras would

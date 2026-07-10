@@ -89,7 +89,7 @@ import { computeFee, retriggerSessionExit, simulateScopeFee, simulateLaneEvent, 
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './services/ecpi-terminal';
-import { startLprServer, lprEvents, simulatePlate, getLatestFrame } from './services/lpr-webhook';
+import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncScopes, pushScopeRate, syncSpaces,
@@ -107,7 +107,7 @@ import {
 import {
   listFailedSync, retryAllFailedSync, clearFailedSync,
 } from './services/db';
-import { fetchSnapshot, pingCamera, startSnapshotUploader } from './services/camera-snapshots';
+import { pingCamera } from './services/camera-snapshots';
 import { pushCamera, pushAllCameras } from './services/camera-push';
 import { startStreamGrabbers, stopStreamGrabbers, resync as resyncStreamGrabbers } from './services/camera-stream';
 import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
@@ -145,7 +145,6 @@ app.whenReady().then(async () => {
   startLprServer(lprPort);
   startParkingFlow();
   startBackgroundSync();
-  startSnapshotUploader();
   startSyncDrain();
   // Remote gate-open poll — checks cloud for pending gate commands every 20s
   // and dispatches to the local gate simulator + face-auth turnstile.
@@ -474,25 +473,6 @@ ipcMain.handle('cameras:save', async (_e, input) => {
   return saved;
 });
 ipcMain.handle('cameras:delete', (_e, id: number) => { deleteCamera(id); resyncStreamGrabbers(); });
-ipcMain.handle('cameras:simulate', (_e, cameraId: number, plate: string) => simulatePlate(cameraId, plate));
-
-/**
- * Demo-mode helper: fire entry now, wait `holdMs`, fire exit. Lets an
- * operator click a single button on the Cameras page and watch the entire
- * parking flow end-to-end (gate opens for entry → session stored → fee
- * computed at exit → gate opens again → session closed → cloud mirror).
- *
- * Note: the same camera handles BOTH halves, so it must be direction=dual
- * (or the camera must be explicitly tagged dual). For entry-only or
- * exit-only cameras, only the matching half will fire.
- */
-ipcMain.handle('cameras:simulateFullFlow', async (_e, cameraId: number, plate: string, holdMs = 3000) => {
-  simulatePlate(cameraId, plate); // first call → opens a session (entry)
-  await new Promise((r) => setTimeout(r, Math.max(500, holdMs)));
-  simulatePlate(cameraId, plate); // second call → matches open session → closes it (exit)
-  return { ok: true };
-});
-ipcMain.handle('cameras:snapshot', (_e, cameraId: number) => fetchSnapshot(cameraId));
 // Latest frame the camera pushed with a plate event — Live display fallback
 // for WebSocket/RTSP-only cameras with no pullable HTTP snapshot URL.
 ipcMain.handle('cameras:latest-frame', (_e, cameraId: number) => getLatestFrame(cameraId));
@@ -596,6 +576,19 @@ ipcMain.handle('sessions:simulate-entry', (_e, laneId: number, plate: string, en
   simulateEntryAt(laneId, plate, entryIso));
 ipcMain.handle('sessions:simulate-exit', (_e, laneId: number, plate: string, exitIso: string) =>
   simulateExitAt(laneId, plate, exitIso));
+// Read a session capture off disk for the renderer as base64 — the renderer
+// runs over http(s)/app:// so a raw file:// <img> is blocked. Constrained to
+// the plates dir; returns null if missing.
+ipcMain.handle('sessions:image', (_e, filePath: string) => {
+  try {
+    if (!filePath) return null;
+    const platesRoot = path.join(app.getPath('userData'), 'plates');
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(platesRoot)) return null;
+    if (!fs.existsSync(resolved)) return null;
+    return { base64: fs.readFileSync(resolved).toString('base64'), contentType: 'image/jpeg' };
+  } catch { return null; }
+});
 
 /**
  * Admin session editor — recalculates duration + fee whenever entry/exit

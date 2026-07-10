@@ -100,13 +100,6 @@ export interface BridgeApi {
   listCameras(): Promise<LprCamera[]>;
   saveCamera(input: Omit<LprCamera, 'id' | 'createdAt' | 'updatedAt'> & { id?: number }): Promise<LprCamera>;
   deleteCamera(id: number): Promise<void>;
-  /** Manually simulate a plate detection — used to test entry/exit flow without real hardware. */
-  simulatePlate(cameraId: number, plate: string): Promise<void>;
-  /** Demo helper — fire entry, wait holdMs (default 3s), fire exit so the
-   *  operator can watch the full flow end-to-end with a single click. */
-  simulateFullFlow(cameraId: number, plate: string, holdMs?: number): Promise<{ ok: boolean }>;
-  /** Fetch a single live snapshot from the camera's HTTP endpoint. Returns JPEG as base64. */
-  fetchCameraSnapshot(cameraId: number): Promise<{ ok: boolean; contentType?: string; base64?: string; fetchedAt?: string; status?: number; error?: string }>;
   /** Latest frame the camera PUSHED with a plate event (base64 JPEG). Live
    *  display fallback for WebSocket/RTSP-only cameras with no snapshot URL.
    *  Null until the camera has pushed at least one frame. */
@@ -163,6 +156,9 @@ export interface BridgeApi {
   simulateEntry(laneId: number, plate: string, entryIso: string): Promise<{ ok: boolean; error?: string; sessionId?: number }>;
   /** DEV/QA: run the real exit flow (fee + terminal) at a chosen exit time. */
   simulateExit(laneId: number, plate: string, exitIso: string): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
+  /** Read a session capture (entry/exit image) off disk as base64 for display —
+   *  the renderer can't load the raw file:// path over its http/app origin. */
+  readSessionImage(filePath: string): Promise<{ base64: string; contentType: string } | null>;
   deleteSession(id: number): Promise<boolean>;
   deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
   manualReleaseSession(id: number, reason: string): Promise<void>;

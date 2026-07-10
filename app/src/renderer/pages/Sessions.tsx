@@ -756,9 +756,28 @@ function RangeInput({
   );
 }
 
+/** Load a session capture (stored as a file path) as a base64 data URL via the
+ *  main process — the renderer can't load a raw file:// path over its origin. */
+function useSessionImage(path: string | null): string | null {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setSrc(null);
+    if (!path) return;
+    window.bridge.readSessionImage(path)
+      .then((r: any) => { if (alive) setSrc(r?.base64 ? `data:${r.contentType ?? 'image/jpeg'};base64,${r.base64}` : null); })
+      .catch(() => { if (alive) setSrc(null); });
+    return () => { alive = false; };
+  }, [path]);
+  return src;
+}
+
 function ThumbCell({
   path, kind, plate, onOpen,
 }: { path: string | null; kind: 'entry' | 'exit'; plate: string; onOpen: (url: string) => void }) {
+  const src = useSessionImage(path);
+  const Icon = kind === 'entry' ? ArrowDown : ArrowUp;
+  const accent = kind === 'entry' ? 'bg-emerald-600' : 'bg-blue-600';
   if (!path) {
     return (
       <div
@@ -769,25 +788,15 @@ function ThumbCell({
       </div>
     );
   }
-  const url = `file://${path.replace(/\\/g, '/')}`;
-  const Icon = kind === 'entry' ? ArrowDown : ArrowUp;
-  const accent = kind === 'entry' ? 'bg-emerald-600' : 'bg-blue-600';
   return (
     <button
-      onClick={() => onOpen(url)}
-      className="relative w-10 h-10 rounded overflow-hidden border border-gray-200 hover:ring-2 hover:ring-gray-400 focus:outline-none"
+      onClick={() => src && onOpen(src)}
+      className="relative w-10 h-10 rounded overflow-hidden border border-gray-200 bg-gray-100 hover:ring-2 hover:ring-gray-400 focus:outline-none"
       title={`${kind === 'entry' ? 'Entry' : 'Exit'} capture — click to enlarge · ${plate}`}
     >
-      <img
-        src={url}
-        alt={`${kind} ${plate}`}
-        className="w-full h-full object-cover"
-        onError={(e) => {
-          const img = e.currentTarget as HTMLImageElement;
-          img.style.display = 'none';
-          img.parentElement?.classList.add('bg-red-50');
-        }}
-      />
+      {src && (
+        <img src={src} alt={`${kind} ${plate}`} className="w-full h-full object-cover" />
+      )}
       <span className={`absolute bottom-0 left-0 inline-flex items-center justify-center w-4 h-4 ${accent} text-white text-[8px]`}>
         <Icon size={8} strokeWidth={3} />
       </span>
@@ -978,16 +987,17 @@ function CaptureBlock({
   label, kind, path, plate, onOpen,
 }: { label: string; kind: 'entry' | 'exit'; path: string | null; plate: string; onOpen: (url: string) => void }) {
   const accent = kind === 'entry' ? 'text-emerald-700' : 'text-blue-700';
+  const src = useSessionImage(path);
   return (
     <div>
       <div className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${accent}`}>{label}</div>
-      {path ? (
+      {path && src ? (
         <button
-          onClick={() => onOpen(`file://${path.replace(/\\/g, '/')}`)}
+          onClick={() => onOpen(src)}
           className="w-full aspect-video rounded-lg overflow-hidden border border-gray-200 hover:ring-2 hover:ring-gray-400 focus:outline-none block"
         >
           <img
-            src={`file://${path.replace(/\\/g, '/')}`}
+            src={src}
             alt={`${label} ${plate}`}
             className="w-full h-full object-cover"
           />

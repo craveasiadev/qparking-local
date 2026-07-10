@@ -106,15 +106,9 @@ function PollTile({ cam }: { cam: LprCamera }) {
     let timer: number | null = null;
     async function tick() {
       let b64: string | undefined, ct: string | undefined, at: string | undefined, err: string | undefined;
-      if (cam.snapshotUrl) {
-        const r = await window.bridge.fetchCameraSnapshot(cam.id);
-        if (r.ok && r.base64) { b64 = r.base64; ct = r.contentType; at = r.fetchedAt; }
-        else err = r.error ?? (r.status ? `status ${r.status}` : 'no image');
-      } else {
-        const f = await window.bridge.getCameraLatestFrame(cam.id);
-        if (f?.base64) { b64 = f.base64; ct = f.contentType; at = f.at; }
-        else err = 'waiting for first capture…';
-      }
+      const f = await window.bridge.getCameraLatestFrame(cam.id);
+      if (f?.base64) { b64 = f.base64; ct = f.contentType; at = f.at; }
+      else err = 'waiting for first capture…';
       if (!aliveRef.current) return;
       if (b64) {
         setSrc(`data:${ct ?? 'image/jpeg'};base64,${b64}`);
@@ -127,7 +121,7 @@ function PollTile({ cam }: { cam: LprCamera }) {
     }
     void tick();
     return () => { aliveRef.current = false; if (timer) clearTimeout(timer); };
-  }, [cam.id, cam.snapshotUrl]);
+  }, [cam.id]);
 
   return (
     <div className="rounded-xl border border-gray-200 bg-gray-950 overflow-hidden shadow-sm">
