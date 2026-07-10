@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 import type {
   ActivePass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
-  ParkingSpace, Site,
+  ParkingSpace, Site, SyncOp, SyncQueueRow,
 } from '../../shared/types';
 
 let db: Database.Database | null = null;
@@ -662,18 +662,10 @@ export function deleteSession(sessionId: number): boolean {
 // the sync-queue module drains the queue with exponential backoff. A
 // process restart finds these rows still pending — nothing is lost.
 
-export type SyncOp = 'session.entry' | 'session.exit' | 'session.update' | 'session.delete';
-export interface SyncQueueRow {
-  id: number;
-  op: SyncOp;
-  payload: Record<string, unknown>;
-  attempts: number;
-  status: 'pending' | 'failed';
-  lastError: string | null;
-  nextAttemptAt: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// Row shape + op union live in shared/db-models.ts (single source of truth,
+// also used by BridgeApi.listFailedSync); re-exported so `from './db'`
+// imports keep working.
+export type { SyncOp, SyncQueueRow };
 
 function rowToSync(row: any): SyncQueueRow {
   return {
