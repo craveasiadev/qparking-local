@@ -73,20 +73,33 @@ function mapApiRowToTariffRules(scopeRow: any): TariffRule[] {
 /** Map one cloud scope row (snake_case API fields) to a local ScopeRate. */
 function mapApiRowToScope(scopeRow: any, fetchedAt: string): ScopeRate {
   const scopeId = String(scopeRow.scope_id ?? scopeRow.scopeId ?? scopeRow.id ?? '');
+  const rules = mapApiRowToTariffRules(scopeRow);
+
+  // The /rate-policies endpoint doesn't send the legacy flat mirrors
+  // (first_block_cents …) — those are computed on /scopes from the effective
+  // rule. Mirror that here from the highest-priority active rule so the Scopes
+  // overview shows a real headline rate instead of RM 0.00 + a false "zero
+  // rate" warning. Fee math itself always reads rules[] per-moment, so these
+  // three fields are display-only.
+  const topRule = [...rules]
+    .filter((rule) => rule.isActive)
+    .sort((a, b) => b.priority - a.priority)[0];
+
   return {
     scopeId,
     scopeName: String(scopeRow.scope_name ?? scopeRow.scopeName ?? scopeRow.name ?? scopeId),
     freeMinutes: Number(scopeRow.grace_minutes ?? scopeRow.free_minutes ?? scopeRow.freeMinutes ?? 0),
-    firstBlockCents: Number(scopeRow.first_block_cents ?? scopeRow.firstBlockCents ?? 0),
-    perBlockCents: Number(scopeRow.per_block_cents ?? scopeRow.perBlockCents ?? 0),
-    blockMinutes: Number(scopeRow.block_minutes ?? scopeRow.blockMinutes ?? 60),
+    firstBlockCents: Number(scopeRow.first_block_cents ?? scopeRow.firstBlockCents ?? topRule?.firstBlockAmountCents ?? 0),
+    perBlockCents: Number(scopeRow.per_block_cents ?? scopeRow.perBlockCents ?? topRule?.subsequentBlockAmountCents ?? topRule?.firstBlockAmountCents ?? 0),
+    blockMinutes: Number(scopeRow.block_minutes ?? scopeRow.blockMinutes ?? topRule?.subsequentBlockMinutes ?? topRule?.firstBlockMinutes ?? 60),
     dailyCapCents: Number(scopeRow.daily_cap_cents ?? scopeRow.dailyCapCents ?? 0),
     currency: String(scopeRow.currency ?? 'MYR'),
     fetchedAt,
-    rules: mapApiRowToTariffRules(scopeRow),
-    policyId: scopeRow.policy_id ?? null,
-    policyName: scopeRow.policy_name ?? null,
-    policyDescription: scopeRow.policy_description ?? null,
+    rules,
+    // /rate-policies sends id/name/description (not policy_*). Fall back to them.
+    policyId: scopeRow.policy_id ?? scopeRow.id ?? null,
+    policyName: scopeRow.policy_name ?? scopeRow.name ?? null,
+    policyDescription: scopeRow.policy_description ?? scopeRow.description ?? null,
     isSiteDefault: !!scopeRow.is_site_default,
     graceExceededBehavior: scopeRow.grace_exceeded_behavior ?? null,
     cutoffEnabled: !!scopeRow.cutoff_enabled,
@@ -98,8 +111,11 @@ function mapApiRowToScope(scopeRow: any, fetchedAt: string): ScopeRate {
     rateBasis: (scopeRow.rate_basis ?? scopeRow.rateBasis ?? null) as any,
     flatMultiRate: (scopeRow.flat_multi_rate ?? scopeRow.flatMultiRate ?? null) as any,
     firstBlockOncePerEntry: !!(scopeRow.first_block_once_per_entry ?? scopeRow.firstBlockOncePerEntry ?? false),
-    policyDailyCapCents: (scopeRow.policy_daily_cap_cents ?? scopeRow.policyDailyCapCents) != null
-      ? Number(scopeRow.policy_daily_cap_cents ?? scopeRow.policyDailyCapCents)
+    // /rate-policies sends the true policy cap as `daily_cap_cents` (not
+    // policy_daily_cap_cents). Without this fallback the fee engine reads null
+    // and leaves daily capping silently OFF.
+    policyDailyCapCents: (scopeRow.policy_daily_cap_cents ?? scopeRow.policyDailyCapCents ?? scopeRow.daily_cap_cents) != null
+      ? Number(scopeRow.policy_daily_cap_cents ?? scopeRow.policyDailyCapCents ?? scopeRow.daily_cap_cents)
       : null,
   };
 }
@@ -111,14 +127,25 @@ export async function syncScopes(): Promise<SyncResult> {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
-    const { data: responseBody } = await cloud.get<CloudListBody>('/scopes');
+    const { data: responseBody } = await cloud.get<CloudListBody>('/rate-policies');
     const scopeRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
+    const scopes = scopeRows
+      .map((scopeRow: any) => mapApiRowToScope(scopeRow, fetchedAt))
+      .filter((scope: ScopeRate) => !!scope.scopeId);
+
+    // /rate-policies doesn't send is_site_default. The backend returns policies
+    // ordered by name and treats the FIRST as the site default — the plan a lane
+    // falls back to when it has no scope of its own. Mirror that here: without a
+    // default, getSiteDefaultScope() returns null and unassigned lanes stop
+    // charging. (Respects the flag if a future payload ever carries it.)
+    if (scopes.length && !scopes.some((scope) => scope.isSiteDefault)) {
+      scopes[0].isSiteDefault = true;
+    }
+
     let savedCount = 0;
-    for (const scopeRow of scopeRows) {
-      const scope = mapApiRowToScope(scopeRow, fetchedAt);
-      if (!scope.scopeId) continue;
+    for (const scope of scopes) {
       upsertScope(scope);
       savedCount++;
     }
@@ -132,6 +159,10 @@ export async function syncScopes(): Promise<SyncResult> {
 
     return { ok: true, fetched: savedCount };
   } catch (error) {
+    // 404 = this site has no active rate policies yet (RatePolicyController
+    // returns 404, not an empty list). Treat as a benign no-op like the other
+    // syncs, rather than surfacing an error in the sync report.
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
     return toFailedSyncResult(error);
   }
 }
