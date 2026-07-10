@@ -41,6 +41,7 @@ const api = {
   simulatePlate: (cameraId: number, plate: string) => ipcRenderer.invoke('cameras:simulate', cameraId, plate),
   simulateFullFlow: (cameraId: number, plate: string, holdMs?: number) => ipcRenderer.invoke('cameras:simulateFullFlow', cameraId, plate, holdMs ?? 3000),
   fetchCameraSnapshot: (cameraId: number) => ipcRenderer.invoke('cameras:snapshot', cameraId),
+  getCameraLatestFrame: (cameraId: number) => ipcRenderer.invoke('cameras:latest-frame', cameraId),
   pingCamera: (cameraId: number) => ipcRenderer.invoke('cameras:ping', cameraId),
 
   // lanes
@@ -65,6 +66,7 @@ const api = {
    *  Sessions page when the exit LPR misread the plate or the operator
    *  needs to close a stuck session by asking the driver to tap again. */
   retriggerSessionPayment: (id: number) => ipcRenderer.invoke('sessions:retrigger-payment', id),
+  simulateLaneEvent: (laneId: number, plate: string, direction: 'entry'|'exit') => ipcRenderer.invoke('sessions:simulate-lane', laneId, plate, direction),
   deleteSession: (id: number) => ipcRenderer.invoke('sessions:delete', id),
   deleteSessionsBulk: (opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) =>
     ipcRenderer.invoke('sessions:delete-bulk', opts),

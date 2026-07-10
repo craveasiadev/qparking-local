@@ -5,6 +5,9 @@
  * stopping the parking flow. Re-opening the window just reconnects to the
  * already-running services.
  */
+// MUST be first — pins the fee-calc timezone to the site's zone (GMT+8)
+// before any other module loads or any Date runs. See ./tz.
+import './tz';
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -78,14 +81,14 @@ import {
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
-  listScopes, getScope,
+  listScopes, getScope, getSiteDefaultScope,
   listParkingSpaces, listAllActivePasses,
 } from './services/db';
-import { computeFee, retriggerSessionExit, simulateScopeFee } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, simulateScopeFee, simulateLaneEvent } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './services/ecpi-terminal';
-import { startLprServer, lprEvents, simulatePlate } from './services/lpr-webhook';
+import { startLprServer, lprEvents, simulatePlate, getLatestFrame } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncScopes, pushScopeRate, syncSpaces,
@@ -103,6 +106,7 @@ import {
 } from './services/db';
 import { fetchSnapshot, pingCamera, startSnapshotUploader } from './services/camera-snapshots';
 import { pushCamera, pushAllCameras } from './services/camera-push';
+import { startStreamGrabbers, stopStreamGrabbers, resync as resyncStreamGrabbers } from './services/camera-stream';
 import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
@@ -203,6 +207,11 @@ app.whenReady().then(async () => {
   pushAllCameras().catch(() => null);
   pushAllDevices().catch(() => null);
 
+  // Start the live-video grabbers for the Live display wall — one per camera
+  // with device credentials. They pull JPEG frames off the device via the VZ
+  // SDK and fan them out as MJPEG, independent of the webhook record snaps.
+  startStreamGrabbers();
+
   // Stream parking + lpr events to renderer.
   wireRendererEvents();
 
@@ -214,6 +223,8 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 });
+
+app.on('before-quit', () => { stopStreamGrabbers(); });
 
 app.on('window-all-closed', () => {
   // Keep the process alive on Windows so the background services keep running.
@@ -455,9 +466,11 @@ ipcMain.handle('cameras:save', async (_e, input) => {
   const saved = upsertCamera(input);
   // Mirror to cloud — best-effort, doesn't block the local save.
   pushCamera(saved.id).catch(() => null);
+  // Start/stop/refresh the SDK live-video grabber if the device creds changed.
+  resyncStreamGrabbers();
   return saved;
 });
-ipcMain.handle('cameras:delete', (_e, id: number) => deleteCamera(id));
+ipcMain.handle('cameras:delete', (_e, id: number) => { deleteCamera(id); resyncStreamGrabbers(); });
 ipcMain.handle('cameras:simulate', (_e, cameraId: number, plate: string) => simulatePlate(cameraId, plate));
 
 /**
@@ -477,6 +490,9 @@ ipcMain.handle('cameras:simulateFullFlow', async (_e, cameraId: number, plate: s
   return { ok: true };
 });
 ipcMain.handle('cameras:snapshot', (_e, cameraId: number) => fetchSnapshot(cameraId));
+// Latest frame the camera pushed with a plate event — Live display fallback
+// for WebSocket/RTSP-only cameras with no pullable HTTP snapshot URL.
+ipcMain.handle('cameras:latest-frame', (_e, cameraId: number) => getLatestFrame(cameraId));
 ipcMain.handle('cameras:ping', (_e, cameraId: number) => pingCamera(cameraId));
 
 ipcMain.handle('lanes:list', () => listLanes());
@@ -565,6 +581,9 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string) => {
   if (session) enqueueUpdate(session);
   return session;
 });
+// DEV/QA lane simulator — drives the real parking flow for a lane+plate.
+ipcMain.handle('sessions:simulate-lane', (_e, laneId: number, plate: string, direction: 'entry'|'exit') =>
+  simulateLaneEvent(laneId, plate, direction));
 
 /**
  * Admin session editor — recalculates duration + fee whenever entry/exit
@@ -595,23 +614,24 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   });
   if (!working) throw new Error('update_failed');
 
-  // Recompute duration + fee if BOTH ends are set. Pick the scope from:
-  //   1. caller-supplied override (admin "what if" mode)
-  //   2. the session's exit lane (production case)
-  //   3. the session's entry lane (fallback if exit lane isn't set yet)
+  // Recompute duration + fee if BOTH ends are set. Rate resolution mirrors the
+  // live exit flow (parking-flow.handleExit): the ENTRY lane governs the rate,
+  // then the exit lane, then the site-default plan. A caller override wins for
+  // admin "what would this cost under plan X" exploration.
   if (working.exitAt) {
     const entryMs = Date.parse(working.entryAt);
     const exitMs  = Date.parse(working.exitAt);
     const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
 
-    let scopeId: string | null = patch.scopeIdOverride ?? null;
-    if (!scopeId) {
-      const lane = working.exitLaneId
-        ? getLane(working.exitLaneId)
-        : (working.entryLaneId ? getLane(working.entryLaneId) : null);
-      scopeId = lane?.scopeId ?? null;
+    let scope = patch.scopeIdOverride ? getScope(patch.scopeIdOverride) : null;
+    if (!scope) {
+      const entryLane = working.entryLaneId ? getLane(working.entryLaneId) : null;
+      const exitLane  = working.exitLaneId ? getLane(working.exitLaneId) : null;
+      scope =
+        (entryLane?.scopeId ? getScope(entryLane.scopeId) : null)
+        ?? (exitLane?.scopeId ? getScope(exitLane.scopeId) : null)
+        ?? getSiteDefaultScope();
     }
-    const scope = scopeId ? getScope(scopeId) : null;
     const feeCents = computeFee(durationMinutes, scope, working.entryAt);
 
     working = updateSessionFields(id, { durationMinutes, feeCents });

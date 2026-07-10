@@ -69,6 +69,14 @@ export interface LprCamera {
    *  the UI and periodic upload to the cloud mirror. Most IP cameras expose
    *  something like http://<ip>/snapshot.jpg or http://<ip>/cgi-bin/snapshot.cgi. */
   snapshotUrl: string | null;
+  /** Vendor-SDK login for pulling live H.264 video directly off the device
+   *  (VzLPRSDK). `host` is the camera IP; `devicePort` is the SDK control port
+   *  (default 80). When user + password are set, the main process connects via
+   *  the SDK and grabs a JPEG frame ~1×/sec into the live-frame cache that the
+   *  Live display reads — a clean video feed with no web page / token. */
+  deviceUser: string | null;
+  devicePassword: string | null;
+  devicePort: number | null;
   /** Webhook secret — cameras POSTing /lpr/event must include this header. */
   webhookSecret: string | null;
   /** For poll mode — vendor REST URL we hit every N seconds. */
@@ -318,6 +326,11 @@ export interface AppSettings {
    *  charge regardless of how briefly the car was parked. */
   minimumChargeCents: number;
 
+  /** Dev/QA mode — unlocks hidden testing tools (currently the Sessions lane
+   *  simulator). Off by default; toggled by tapping the sidebar build version
+   *  7×. Purely gates UI — it has no effect on the live parking flow. */
+  devMode: boolean;
+
   // ─── Touch'n'Go W4G IO-controller integration ─────────────────────────
   /** Master switch. When ON, every paid exit ALSO fires a PayRequest at the
    *  W4G IO controller — Touch'n'Go card / e-wallet / Visa / Master / MCCS
@@ -390,6 +403,10 @@ export interface BridgeApi {
   simulateFullFlow(cameraId: number, plate: string, holdMs?: number): Promise<{ ok: boolean }>;
   /** Fetch a single live snapshot from the camera's HTTP endpoint. Returns JPEG as base64. */
   fetchCameraSnapshot(cameraId: number): Promise<{ ok: boolean; contentType?: string; base64?: string; fetchedAt?: string; status?: number; error?: string }>;
+  /** Latest frame the camera PUSHED with a plate event (base64 JPEG). Live
+   *  display fallback for WebSocket/RTSP-only cameras with no snapshot URL.
+   *  Null until the camera has pushed at least one frame. */
+  getCameraLatestFrame(cameraId: number): Promise<{ base64: string; contentType: string; at: string } | null>;
   /** Probe TCP/HTTP reachability — used by the "Test connection" button. */
   pingCamera(cameraId: number): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
 
@@ -427,6 +444,10 @@ export interface BridgeApi {
    *  terminal wired to the session's lane. Returns immediately; the actual
    *  card tap resolves asynchronously through the normal parking-flow. */
   retriggerSessionPayment(id: number): Promise<{ ok: boolean; error?: string }>;
+  /** DEV/QA: fire a synthetic plate event on a lane (resolving an enabled
+   *  camera on it) with a forced direction, exercising the real parking flow
+   *  end-to-end. Backs the hidden Sessions lane simulator. */
+  simulateLaneEvent(laneId: number, plate: string, direction: 'entry' | 'exit'): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
   deleteSession(id: number): Promise<boolean>;
   deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
   manualReleaseSession(id: number, reason: string): Promise<void>;

@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Plus, Trash2, Camera as CamIcon, Zap, ZapOff, X, Copy, Check, Activity, PlayCircle, Loader2 } from 'lucide-react';
 import type { LprCamera, ParkingLane, LprIngestMode } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useConfirm } from '../hooks/useConfirm';
 
 const EMPTY: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> = {
   name: '', laneId: null, direction: 'entry', ingestMode: 'webhook',
-  host: '', snapshotUrl: '',
+  host: '', snapshotUrl: '', deviceUser: '', devicePassword: '', devicePort: 80,
   webhookSecret: '', pollUrl: null, pollIntervalSeconds: null, enabled: true,
 };
 
@@ -14,6 +15,7 @@ export function Cameras() {
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [editing, setEditing] = useState<Partial<LprCamera> | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirm();
   const [diag, setDiag] = useState<{ port: number; addresses: string[] } | null>(null);
   const [simPlate, setSimPlate] = useState<Record<number, string>>({});
   const [simBusy, setSimBusy] = useState<Record<number, boolean>>({});
@@ -38,7 +40,7 @@ export function Cameras() {
   });
 
   const [runDelete, deleting] = useAsyncAction(async (id: number) => {
-    if (!confirm('Delete this camera?')) return;
+    if (!(await confirm({ title: 'Delete camera', message: 'Delete this camera?', danger: true, confirmLabel: 'Delete' }))) return;
     await window.bridge.deleteCamera(id);
     await refresh();
   });
@@ -141,6 +143,7 @@ export function Cameras() {
       </div>
 
       {editing && <CameraForm value={editing} onChange={setEditing} onCancel={() => { setFormError(null); setEditing(null); }} onSave={save} saving={saving} error={formError} />}
+      {confirmDialog}
     </div>
   );
 }
@@ -244,6 +247,17 @@ function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
           </Field>
           <Field label="Snapshot URL (live preview)">
             <input className="input font-mono text-xs" value={value.snapshotUrl ?? ''} onChange={(e) => set('snapshotUrl', e.target.value)} placeholder="http://192.168.1.50/snapshot.jpg" />
+          </Field>
+          {/* Device login for pulling live video off the camera via the VZ SDK.
+              host (above) = camera IP; these feed VzLPRClient_OpenV2. */}
+          <Field label="Device username (live video)">
+            <input className="input" value={value.deviceUser ?? ''} onChange={(e) => set('deviceUser', e.target.value)} placeholder="admin" />
+          </Field>
+          <Field label="Device password">
+            <input type="password" className="input" value={value.devicePassword ?? ''} onChange={(e) => set('devicePassword', e.target.value)} placeholder="camera login password" />
+          </Field>
+          <Field label="Device port">
+            <input type="number" className="input" value={value.devicePort ?? 80} onChange={(e) => set('devicePort', Number(e.target.value))} />
           </Field>
           <div className="sm:col-span-2">
             <button type="button" onClick={testConnection}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2, Map as MapIcon, X } from 'lucide-react';
 import type { ParkingLane, PaymentTerminal, ScopeRate, LprCamera } from '@shared/types';
+import { useConfirm } from '../hooks/useConfirm';
 
 const EMPTY: Omit<ParkingLane, 'id'> = {
   name: '', scopeId: null, terminalId: null, gateRelayAddress: null, enabled: true,
@@ -26,6 +27,7 @@ export function Lanes() {
   // lane covers, persisted server-side against each camera's lane_id.
   const [editing, setEditing] = useState<(Partial<ParkingLane> & { cameraIds?: number[] }) | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirm();
 
   async function refresh() {
     setList(await window.bridge.listLanes());
@@ -45,6 +47,7 @@ export function Lanes() {
 
   return (
     <div className="p-5 sm:p-8 max-w-5xl mx-auto">
+      {confirmDialog}
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Lanes</h1>
@@ -73,7 +76,7 @@ export function Lanes() {
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={() => { setFormError(null); setEditing({ ...l, cameraIds: cameras.filter((c) => c.laneId === l.id).map((c) => c.id) }); }} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
-                <button onClick={async () => { if (confirm('Delete?')) { await window.bridge.deleteLane(l.id); refresh(); } }}
+                <button onClick={async () => { if (await confirm({ title: 'Delete lane', message: `Delete lane "${l.name}"?`, danger: true, confirmLabel: 'Delete' })) { await window.bridge.deleteLane(l.id); refresh(); } }}
                   className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center"><Trash2 size={14} /></button>
               </div>
             </div>

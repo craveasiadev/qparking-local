@@ -24,10 +24,10 @@ import { EventEmitter } from 'node:events';
 import { app } from 'electron';
 import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../../shared/types';
 import {
-  createEntrySession, findOpenSessionByPlate, getLane, getScope, getSettings, getTerminal,
+  createEntrySession, findOpenSessionByPlate, getLane, getScope, getSiteDefaultScope, getSettings, getTerminal,
   listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,
 } from './db';
-import { lprEvents, type PlateEvent } from './lpr-webhook';
+import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
 import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId } from './w4g-tng';
 
@@ -171,10 +171,15 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
-  // Compute fee from the lane's scope rate. Pricing is lane-based only —
-  // the lane binds to a rate policy (scope) whose rules are scoped by
-  // day/time/date. There is no vehicle-type dimension.
-  const scope = lane.scopeId ? getScope(lane.scopeId) : null;
+  // Rate is governed by where the car ENTERED (then this exit lane, then the
+  // site-default plan) — NOT by which exit gate it uses. This matches
+  // previewFee and keeps the charge deterministic no matter which exit lane
+  // the driver picks. The exit is still RECORDED against this lane below.
+  const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
+  const scope =
+    (entryLane?.scopeId ? getScope(entryLane.scopeId) : null)
+    ?? (lane.scopeId ? getScope(lane.scopeId) : null)
+    ?? getSiteDefaultScope();
   const entryMs = Date.parse(session.entryAt);
   const exitMs = Date.now();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
@@ -186,7 +191,10 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // payment (monthly/quarterly/yearly pre-paid, or VIP/staff/free_access
   // explicitly waived). Skip the charge and open the gate — but still
   // record the exit so the audit row exists.
-  const activePass = lane.scopeId ? findActivePassByPlate(lane.scopeId, event.plate) : null;
+  // Look the plate up under the SAME scope that governs pricing (entry/site
+  // context), not the exit gate's scope.
+  const passScopeId = scope?.scopeId ?? null;
+  const activePass = passScopeId ? findActivePassByPlate(passScopeId, event.plate) : null;
   if (activePass) {
     flog(`PASS MATCH: plate=${event.plate} pass=${activePass.passType} id=${activePass.passId} → free exit (skip terminal)`);
     recordExit(session.id, {
@@ -1064,7 +1072,7 @@ export function previewFee(plate: string): { found: boolean; sessionId?: number;
   const session = findOpenSessionByPlate(plate);
   if (!session) return { found: false };
   const lane = listLanes().find((l) => l.id === session.entryLaneId);
-  const scope = lane?.scopeId ? getScope(lane.scopeId) : null;
+  const scope = (lane?.scopeId ? getScope(lane.scopeId) : null) ?? getSiteDefaultScope();
   const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
   const feeCents = computeFee(durationMinutes, scope, session.entryAt);
   return { found: true, sessionId: session.id, durationMinutes, feeCents, scope };
@@ -1134,4 +1142,36 @@ export function retriggerSessionExit(sessionId: number): { ok: boolean; error?: 
   };
   lprEvents.emit('plate', event);
   return { ok: true };
+}
+
+/**
+ * DEV/QA helper — fire a synthetic plate event on a LANE (not a camera) with
+ * a forced direction, so a developer can exercise the real parking flow
+ * end-to-end from the Sessions page without touching hardware. It resolves an
+ * enabled camera on the lane (the flow routes camera → lane), so it genuinely
+ * tests the wiring: routing, fee calc, gate, and terminal. Gated behind
+ * devMode in the UI; harmless if called otherwise.
+ */
+export function simulateLaneEvent(
+  laneId: number,
+  plate: string,
+  direction: 'entry' | 'exit',
+): { ok: boolean; error?: string; cameraId?: number } {
+  const lane = getLane(laneId);
+  if (!lane) return { ok: false, error: 'lane_not_found' };
+  const norm = normalisePlate(plate);
+  if (!norm) return { ok: false, error: 'plate_required' };
+  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
+  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one on the Cameras page so the flow can route to this lane` };
+  const event: PlateEvent = {
+    cameraId: cam.id,
+    plate: norm,
+    confidence: 1.0,
+    imagePath: null,
+    timestamp: new Date().toISOString(),
+    direction,
+  };
+  flog(`DEV SIMULATE: lane="${lane.name}" plate=${norm} direction=${direction} via camera=${cam.id}`);
+  lprEvents.emit('plate', event);
+  return { ok: true, cameraId: cam.id };
 }

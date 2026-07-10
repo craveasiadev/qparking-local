@@ -39,6 +39,84 @@ export interface PlateEvent {
 
 export const lprEvents = new EventEmitter();
 
+/**
+ * In-memory cache of the most recent frame each camera PUSHED with a plate
+ * event (base64 JPEG). Cameras that only stream video over WebSocket/RTSP
+ * expose no pullable HTTP snapshot, so the Live display falls back to this —
+ * it refreshes on every plate the camera reads. Lost on restart (repopulates
+ * on the next detection); that's fine for a live view.
+ */
+const latestFrames = new Map<number, { base64: string; contentType: string; at: string }>();
+export function getLatestFrame(cameraId: number): { base64: string; contentType: string; at: string } | null {
+  return latestFrames.get(cameraId) ?? null;
+}
+/** Set the latest frame for a camera — used by the SDK stream grabber
+ *  (camera-stream.ts) to feed a continuous CCTV feed into the same cache the
+ *  Live display already reads. */
+export function setLatestFrame(cameraId: number, frame: { base64: string; contentType: string; at: string }): void {
+  latestFrames.set(cameraId, frame);
+}
+
+/**
+ * MJPEG fan-out for the Live display. A GET /live/<id> response is an
+ * `multipart/x-mixed-replace` stream; the SDK grabber (camera-stream.ts) calls
+ * pushJpegFrame() as fast as it grabs, and every viewer of that camera gets the
+ * frame pushed. No polling, no base64, no per-frame IPC — the browser renders
+ * each part natively, which is what makes the wall smooth instead of a 1 fps
+ * slideshow.
+ */
+const MJPEG_BOUNDARY = 'qpframe';
+const MJPEG_TRAILER = Buffer.from('\r\n');
+const mjpegClients = new Map<number, Set<http.ServerResponse>>();
+
+/** How many Live-display viewers are currently streaming this camera. The
+ *  grabber uses this to grab at full rate only when someone is watching. */
+export function liveClientCount(cameraId: number): number {
+  return mjpegClients.get(cameraId)?.size ?? 0;
+}
+
+/** Broadcast one JPEG frame to every open MJPEG viewer of a camera. */
+export function pushJpegFrame(cameraId: number, jpeg: Buffer): void {
+  const set = mjpegClients.get(cameraId);
+  if (!set || set.size === 0) return;
+  const head = Buffer.from(
+    `--${MJPEG_BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`,
+  );
+  for (const res of set) {
+    // A viewer that has gone away (rapid Refresh, closed window) can still be in
+    // the set for a tick before its close handler runs — never write to a dead
+    // socket, and never let a failed write bubble up (it would kill the grabber).
+    if (res.destroyed || res.writableEnded) { set.delete(res); continue; }
+    // Drop frames for a viewer that can't keep up rather than buffering without
+    // bound (a stalled socket would otherwise grow memory forever).
+    if (res.writableLength > 4 * 1024 * 1024) continue;
+    try { res.write(head); res.write(jpeg); res.write(MJPEG_TRAILER); }
+    catch { set.delete(res); try { res.destroy(); } catch { /* ignore */ } }
+  }
+}
+
+function handleLiveStream(cameraId: number, req: http.IncomingMessage, res: http.ServerResponse) {
+  res.writeHead(200, {
+    'Content-Type': `multipart/x-mixed-replace; boundary=${MJPEG_BOUNDARY}`,
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Connection': 'close',
+  });
+  let set = mjpegClients.get(cameraId);
+  if (!set) { set = new Set(); mjpegClients.set(cameraId, set); }
+  // A reconnect (the Refresh button remounts the tile) supersedes any existing
+  // stream for this camera: close the old one(s) so connections don't pile up
+  // against the browser's ~6-per-host limit when Refresh is pressed repeatedly.
+  // Single operator screen → one viewer per camera, so closing stale ones is safe.
+  for (const old of set) { try { old.end(); } catch { /* ignore */ } }
+  set.clear();
+  set.add(res);
+  const cleanup = () => { set!.delete(res); try { res.end(); } catch { /* ignore */ } };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
 let server: http.Server | null = null;
 let activePort = 0;
 
@@ -53,6 +131,9 @@ export function startLprServer(port: number) {
       });
       return;
     }
+    // Live-display MJPEG stream: GET /live/<cameraId>
+    const live = req.method === 'GET' && req.url ? /^\/live\/(\d+)/.exec(req.url) : null;
+    if (live) { handleLiveStream(Number(live[1]), req, res); return; }
     res.statusCode = 404;
     res.end('not found');
   });
@@ -136,6 +217,13 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
   const imagePath = extracted.image
     ? await saveImage(plate, extracted.image).catch(() => null)
     : null;
+
+  // Cache the pushed frame so the Live display can show a near-live view for
+  // WebSocket/RTSP-only cameras that have no HTTP snapshot URL.
+  if (extracted.image) {
+    const raw = extracted.image.replace(/^data:image\/[a-z]+;base64,/i, '');
+    latestFrames.set(cam.id, { base64: raw, contentType: 'image/jpeg', at: new Date().toISOString() });
+  }
 
   const direction = (extracted.direction as PlateEvent['direction']) ?? cam.direction;
 

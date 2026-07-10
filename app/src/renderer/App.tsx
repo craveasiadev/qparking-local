@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown,
-  Ticket, Grid3x3,
+  Ticket, Grid3x3, MonitorPlay,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -10,12 +10,13 @@ import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
 import { Scopes } from './pages/Scopes';
 import { Sessions } from './pages/Sessions';
+import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
 import { Passes } from './pages/Passes';
 import { Spaces } from './pages/Spaces';
 
 type Page =
-  | 'dashboard' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
+  | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
   // Parking Management
   | 'spaces' | 'passes'
   // Pricing & Tariffs
@@ -35,6 +36,7 @@ const SECTIONS: NavSection[] = [
     key: 'ops', label: 'Operations',
     items: [
       { id: 'dashboard',        label: 'Dashboard',         icon: LayoutDashboard },
+      { id: 'live',             label: 'Live display',      icon: MonitorPlay },
       { id: 'sessions',         label: 'Sessions',          icon: ListOrdered },
       { id: 'cameras',          label: 'LPR cameras',       icon: Camera },
       { id: 'terminals',        label: 'Payment terminals', icon: CreditCard },
@@ -73,6 +75,10 @@ export function App() {
   const [debugLog, setDebugLog] = useState<DebugLogEntry[]>([]);
   const [debugOpen, setDebugOpen] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const [devMode, setDevMode] = useState(false);
+  const [devHint, setDevHint] = useState<string | null>(null);
+  const devTapCount = useRef(0);
+  const devTapTimer = useRef<number | null>(null);
 
   useEffect(() => {
     window.bridge.getAppVersion()
@@ -96,6 +102,27 @@ export function App() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [debugLog]);
+
+  useEffect(() => {
+    window.bridge.getSettings().then((s: any) => setDevMode(!!s.devMode)).catch(() => null);
+  }, []);
+
+  // Hidden dev-mode toggle: tap the build-version stamp 7× within ~2s. Kept
+  // obscure so operators never stumble into it, but trivial for a developer
+  // who knows the gesture. Persisted via settings so it survives reloads.
+  function tapVersion() {
+    devTapCount.current += 1;
+    if (devTapTimer.current) window.clearTimeout(devTapTimer.current);
+    devTapTimer.current = window.setTimeout(() => { devTapCount.current = 0; }, 2000);
+    if (devTapCount.current >= 7) {
+      devTapCount.current = 0;
+      const next = !devMode;
+      setDevMode(next);
+      window.bridge.saveSettings({ devMode: next }).catch(() => null);
+      setDevHint(next ? 'Dev mode ON' : 'Dev mode OFF');
+      window.setTimeout(() => setDevHint(null), 2500);
+    }
+  }
 
   return (
     <div className="min-h-full flex bg-gray-50">
@@ -140,31 +167,42 @@ export function App() {
             which. */}
         <div className="p-3 border-t border-white/10">
           <div className="flex items-center justify-between gap-2">
-            <div>
+            <div onClick={tapVersion} className="cursor-default select-none">
               <div className="text-[9px] uppercase tracking-widest text-white/40 font-semibold">Build</div>
               <div className="text-sm font-bold font-mono text-white/90">
                 v{buildInfo?.version ?? '…'}
               </div>
             </div>
-            {buildInfo && (
-              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
-                buildInfo.isPackaged
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
-                  : 'bg-amber-500/20 text-amber-300 border border-amber-400/40'
-              }`}>
-                {buildInfo.isPackaged ? 'installed' : 'dev'}
-              </span>
-            )}
+            <div className="flex items-center gap-1.5">
+              {devMode && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-400/40">
+                  QA
+                </span>
+              )}
+              {buildInfo && (
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
+                  buildInfo.isPackaged
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                    : 'bg-amber-500/20 text-amber-300 border border-amber-400/40'
+                }`}>
+                  {buildInfo.isPackaged ? 'installed' : 'dev'}
+                </span>
+              )}
+            </div>
           </div>
+          {devHint && (
+            <div className="mt-2 text-[10px] font-bold uppercase tracking-wider text-fuchsia-300">{devHint}</div>
+          )}
         </div>
       </aside>
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <div className="flex-1 min-h-0 overflow-y-auto">
           {page === 'dashboard' && <Dashboard />}
+          {page === 'live' && <LiveDisplay />}
           {page === 'cameras' && <Cameras />}
           {page === 'terminals' && <Terminals />}
           {page === 'lanes' && <Lanes />}
-          {page === 'sessions' && <Sessions />}
+          {page === 'sessions' && <Sessions devMode={devMode} />}
           {page === 'spaces' && <Spaces />}
           {page === 'passes' && <Passes />}
           {page === 'scopes' && <Scopes />}

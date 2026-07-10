@@ -229,10 +229,15 @@ function applySchema(d: Database.Database) {
   // wiring (rate plan + terminal + gate relay). Drop the stale column.
   try { d.exec('ALTER TABLE lanes DROP COLUMN direction'); } catch { /* column absent or old SQLite */ }
 
+  // Live video now comes from the device SDK (device_user/password/port), not a
+  // stream/RTSP URL. Drop the vestigial cameras.stream_url column left over from
+  // the old RTSP attempt (best-effort; no-op on old SQLite or if already gone).
+  try { d.exec('ALTER TABLE cameras DROP COLUMN stream_url'); } catch { /* column absent or old SQLite */ }
+
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
   // the column already exists, so wrap each in its own try/catch.
-  for (const col of ['host TEXT', 'snapshot_url TEXT']) {
+  for (const col of ['host TEXT', 'snapshot_url TEXT', 'device_user TEXT', 'device_password TEXT', 'device_port INTEGER']) {
     try { d.exec(`ALTER TABLE cameras ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // Same pattern for sessions — older installs predate card_scheme /
@@ -275,6 +280,9 @@ function applySchema(d: Database.Database) {
     // 2026-07-09: true policy-level daily cap, distinct from the legacy
     // effective-rule mirror in daily_cap_cents. NULL = uncapped.
     'policy_daily_cap_cents INTEGER',
+    // Site-wide default plan flag (cloud RatePolicy.is_site_default). Used as
+    // the pricing fallback when a lane/session has no scope of its own.
+    'is_site_default INTEGER NOT NULL DEFAULT 0',
   ]) {
     try { d.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
   }
@@ -299,6 +307,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   entryCameraHandlesExit: false,
   faceGateEnabled: true,
   minimumChargeCents: 0,
+  devMode: false,
   tngEnabled: false,
   tngHost: '192.168.1.105',
   tngPort: 80,
@@ -399,6 +408,8 @@ function rowToCamera(r: any): LprCamera {
     id: r.id, name: r.name, laneId: r.lane_id, direction: r.direction,
     ingestMode: r.ingest_mode, webhookSecret: r.webhook_secret,
     host: r.host ?? null, snapshotUrl: r.snapshot_url ?? null,
+    deviceUser: r.device_user ?? null, devicePassword: r.device_password ?? null,
+    devicePort: r.device_port ?? null,
     pollUrl: r.poll_url, pollIntervalSeconds: r.poll_interval_seconds,
     enabled: !!r.enabled, createdAt: r.created_at, updatedAt: r.updated_at,
   };
@@ -416,12 +427,12 @@ export function getCamera(id: number): LprCamera | null {
 export function upsertCamera(c: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> & { id?: number }): LprCamera {
   const d = getDb();
   if (c.id) {
-    d.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(c.name, c.laneId, c.direction, c.ingestMode, c.host, c.snapshotUrl, c.webhookSecret, c.pollUrl, c.pollIntervalSeconds, c.enabled ? 1 : 0, c.id);
+    d.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, ingest_mode=?, host=?, snapshot_url=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, poll_url=?, poll_interval_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(c.name, c.laneId, c.direction, c.ingestMode, c.host, c.snapshotUrl, c.deviceUser, c.devicePassword, c.devicePort, c.webhookSecret, c.pollUrl, c.pollIntervalSeconds, c.enabled ? 1 : 0, c.id);
     return getCamera(c.id)!;
   }
-  const info = d.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(c.name, c.laneId, c.direction, c.ingestMode, c.host, c.snapshotUrl, c.webhookSecret, c.pollUrl, c.pollIntervalSeconds, c.enabled ? 1 : 0);
+  const info = d.prepare(`INSERT INTO cameras (name, lane_id, direction, ingest_mode, host, snapshot_url, device_user, device_password, device_port, webhook_secret, poll_url, poll_interval_seconds, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(c.name, c.laneId, c.direction, c.ingestMode, c.host, c.snapshotUrl, c.deviceUser, c.devicePassword, c.devicePort, c.webhookSecret, c.pollUrl, c.pollIntervalSeconds, c.enabled ? 1 : 0);
   return getCamera(Number(info.lastInsertRowid))!;
 }
 
@@ -540,8 +551,13 @@ export function findOpenSessionByPlate(plate: string): ParkingSession | null {
 
 export function createEntrySession(plate: string, laneId: number | null, cameraId: number | null, imagePath: string | null): ParkingSession {
   const d = getDb();
-  const info = d.prepare(`INSERT INTO sessions (plate, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?)`)
-    .run(plate, laneId, cameraId, imagePath);
+  // Store entry_at as an explicit UTC ISO string (…Z), NOT SQLite's
+  // CURRENT_TIMESTAMP: the latter is UTC but carries no zone marker, so JS
+  // Date.parse mis-reads it as LOCAL time — an 8h skew vs exit_at (which uses
+  // toISOString). Keeping both ends in the same UTC-with-Z format is what
+  // makes the duration + fee math correct.
+  const info = d.prepare(`INSERT INTO sessions (plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?,?)`)
+    .run(plate, new Date().toISOString(), laneId, cameraId, imagePath);
   return getSessionById(Number(info.lastInsertRowid))!;
 }
 
@@ -805,6 +821,7 @@ function rowToScope(r: any, rules: TariffRule[] = []): ScopeRate {
     flatMultiRate: (r.flat_multi_rate ?? null) as any,
     firstBlockOncePerEntry: !!r.first_block_once_per_entry,
     policyDailyCapCents: r.policy_daily_cap_cents ?? null,
+    isSiteDefault: !!r.is_site_default,
     rules,
   };
 }
@@ -845,6 +862,15 @@ export function getScope(id: string): ScopeRate | null {
   return rowToScope(r, listTariffRulesForScope(id));
 }
 
+/** The site-wide default rate plan (cloud RatePolicy flagged is_site_default).
+ *  Used as the pricing fallback when neither the entry nor exit lane carries a
+ *  scope. Null if the cloud hasn't flagged a default. */
+export function getSiteDefaultScope(): ScopeRate | null {
+  const r = getDb().prepare('SELECT * FROM scopes WHERE is_site_default = 1 LIMIT 1').get() as any;
+  if (!r) return null;
+  return rowToScope(r, listTariffRulesForScope(r.scope_id));
+}
+
 /**
  * Idempotent upsert. Replaces the full rule set for this scope on every
  * call — the SaaS is the source of truth, so a rule removed in the cloud
@@ -858,8 +884,8 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         block_minutes, daily_cap_cents, currency, fetched_at,
         policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
         policy_description, new_day_fixed_fee_cents,
-        rate_basis, flat_multi_rate, first_block_once_per_entry, policy_daily_cap_cents
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        rate_basis, flat_multi_rate, first_block_once_per_entry, policy_daily_cap_cents, is_site_default
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_id) DO UPDATE SET
         scope_name=excluded.scope_name,
         free_minutes=excluded.free_minutes,
@@ -880,7 +906,8 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         rate_basis=excluded.rate_basis,
         flat_multi_rate=excluded.flat_multi_rate,
         first_block_once_per_entry=excluded.first_block_once_per_entry,
-        policy_daily_cap_cents=excluded.policy_daily_cap_cents`)
+        policy_daily_cap_cents=excluded.policy_daily_cap_cents,
+        is_site_default=excluded.is_site_default`)
       .run(
         s.scopeId, s.scopeName, s.freeMinutes, s.firstBlockCents, s.perBlockCents,
         s.blockMinutes, s.dailyCapCents, s.currency, s.fetchedAt,
@@ -889,6 +916,7 @@ export function upsertScope(s: ScopeRate): ScopeRate {
         s.policyDescription ?? null, s.newDayFixedFeeCents ?? null,
         s.rateBasis ?? null, s.flatMultiRate ?? null, s.firstBlockOncePerEntry ? 1 : 0,
         s.policyDailyCapCents ?? null,
+        s.isSiteDefault ? 1 : 0,
       );
 
     d.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(s.scopeId);

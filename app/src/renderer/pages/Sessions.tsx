@@ -18,7 +18,114 @@ interface DateRangeFilters {
 
 const EMPTY_RANGE: DateRangeFilters = { entryFrom: '', entryTo: '', exitFrom: '', exitTo: '' };
 
-export function Sessions() {
+/**
+ * Hidden dev/QA tool (rendered only when devMode is on): manually inject a
+ * plate + lane into the REAL parking flow and watch the resulting actions —
+ * entry (barrier), payment-pending (fee), exit (barrier/outcome) — stream in
+ * live. It fires through an enabled camera on the lane, so it exercises the
+ * actual routing → fee → gate → terminal chain, not a mock.
+ */
+function DevSimulator({ lanes }: { lanes: ParkingLane[] }) {
+  const [plate, setPlate] = useState('');
+  const [laneId, setLaneId] = useState<number | ''>('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [log, setLog] = useState<{ ts: number; tone: 'in'|'pay'|'out'|'warn'|'info'; text: string }[]>([]);
+
+  const push = (tone: 'in'|'pay'|'out'|'warn'|'info', text: string) =>
+    setLog((cur) => [{ ts: Date.now(), tone, text }, ...cur].slice(0, 25));
+
+  // Translate the real parking-flow event stream (index.ts fans these out on
+  // the 'session' channel) into a readable action timeline.
+  useEffect(() => {
+    const off = window.bridge.onEvent('session', (p: any) => {
+      const kind = p?.kind; const d = p?.payload ?? {};
+      if (kind === 'entry') push('in', `Entry recorded — barrier OPEN (${d?.session?.plate ?? '?'})`);
+      else if (kind === 'rescan-ignored') push('info', 'Re-scan ignored — plate already inside');
+      else if (kind === 'exit-pending') push('pay', `Payment pending — RM ${((d?.feeCents ?? 0) / 100).toFixed(2)} · ${d?.durationMinutes ?? '?'} min`);
+      else if (kind === 'exit-completed') {
+        const opened = ['paid','free','manual_release'].includes(d?.outcome);
+        push('out', `Exit ${String(d?.outcome ?? '?').toUpperCase()} — barrier ${opened ? 'OPEN' : 'stays CLOSED'}`);
+      } else if (kind === 'warning') push('warn', `⚠ ${d?.kind ?? 'warning'}${d?.connState ? ` (${d.connState})` : ''}`);
+    });
+    return off;
+  }, []);
+
+  async function fire(mode: 'entry' | 'exit' | 'full') {
+    if (!plate.trim()) { push('warn', '✗ Enter a plate first'); return; }
+    if (laneId === '') { push('warn', '✗ Select a lane first'); return; }
+    setBusy(mode);
+    const lid = Number(laneId);
+    const run = async (dir: 'entry' | 'exit') => {
+      const r = await window.bridge.simulateLaneEvent(lid, plate.trim(), dir);
+      if (!r?.ok) push('warn', `✗ ${dir}: ${r?.error ?? 'failed'}`);
+    };
+    try {
+      if (mode === 'full') { await run('entry'); await new Promise((res) => setTimeout(res, 3000)); await run('exit'); }
+      else { await run(mode); }
+    } finally { setBusy(null); }
+  }
+
+  const toneCls: Record<string, string> = {
+    in: 'text-emerald-700', pay: 'text-blue-700', out: 'text-emerald-700',
+    warn: 'text-red-700', info: 'text-gray-500',
+  };
+
+  return (
+    <div className="mb-4 rounded-xl border-2 border-dashed border-fuchsia-300 bg-fuchsia-50/40 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Zap size={14} className="text-fuchsia-600" />
+        <h3 className="text-sm font-bold text-fuchsia-800 uppercase tracking-wide">Dev simulator</h3>
+        <span className="text-[10px] font-bold uppercase tracking-wider text-fuchsia-500">QA only</span>
+      </div>
+      <p className="text-[11px] text-gray-500 mb-3">
+        Injects a plate into the <strong>real</strong> parking flow for the chosen lane. A wired, connected terminal
+        will actually prompt for a card tap on <strong>Exit</strong>.
+      </p>
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Plate</label>
+          <input value={plate} onChange={(e) => setPlate(e.target.value)} placeholder="VMM1234"
+            className="h-9 w-36 px-2 rounded-lg border border-gray-300 text-sm font-mono uppercase" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Lane</label>
+          <select value={laneId} onChange={(e) => setLaneId(e.target.value ? Number(e.target.value) : '')}
+            className="h-9 px-2 rounded-lg border border-gray-300 text-sm min-w-[10rem]">
+            <option value="">— select lane —</option>
+            {lanes.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </div>
+        <button onClick={() => fire('entry')} disabled={!!busy}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+          {busy === 'entry' ? <Loader2 size={13} className="animate-spin" /> : <ArrowDown size={13} />} Entry
+        </button>
+        <button onClick={() => fire('exit')} disabled={!!busy}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+          {busy === 'exit' ? <Loader2 size={13} className="animate-spin" /> : <ArrowUp size={13} />} Exit
+        </button>
+        <button onClick={() => fire('full')} disabled={!!busy}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+          {busy === 'full' ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Full flow
+        </button>
+        {log.length > 0 && (
+          <button onClick={() => setLog([])} className="h-9 px-2 text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900">Clear</button>
+        )}
+      </div>
+      {log.length > 0 && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 max-h-52 overflow-auto">
+          {log.map((e, i) => (
+            <div key={i} className="flex items-baseline gap-2 px-3 py-1.5 text-xs font-mono">
+              <span className="text-gray-400 tabular-nums">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className={toneCls[e.tone]}>{e.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [tab, setTab] = useState<'open' | 'recent'>('open');
   const [rows, setRows] = useState<ParkingSession[]>([]);
   const [counts, setCounts] = useState({ open: 0, total: 0 });
@@ -281,6 +388,8 @@ export function Sessions() {
           )}
         </div>
       )}
+
+      {devMode && <DevSimulator lanes={lanes} />}
 
       {retriggerNotice && (
         <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${
@@ -887,7 +996,10 @@ function EditSessionModal({
 }: { session: ParkingSession; scopes: ScopeRate[]; defaultScope: ScopeRate | null; onClose: () => void; onSaved: () => void }) {
   const [plate, setPlate] = useState(session.plate);
   const [entryAt, setEntryAt] = useState(toLocalInput(session.entryAt));
-  const [exitAt, setExitAt] = useState(session.exitAt ? toLocalInput(session.exitAt) : toLocalInput(new Date().toISOString()));
+  // Default exit BLANK when the session is still open — so an operator can't
+  // accidentally stamp an exit just by opening the editor. The "Now" button
+  // next to the field sets it deliberately.
+  const [exitAt, setExitAt] = useState(session.exitAt ? toLocalInput(session.exitAt) : '');
   const [paymentStatus, setPaymentStatus] = useState<ParkingSession['paymentStatus']>(session.paymentStatus);
   const [notes, setNotes] = useState(session.notes ?? '');
   const [scopeOverride, setScopeOverride] = useState('');
@@ -956,7 +1068,21 @@ function EditSessionModal({
               <input type="datetime-local" className="input" value={entryAt} onChange={(e) => setEntryAt(e.target.value)} step="1" />
             </Field>
             <Field label="Exit time (blank = still inside)">
-              <input type="datetime-local" className="input" value={exitAt} onChange={(e) => setExitAt(e.target.value)} step="1" />
+              <div className="flex gap-2">
+                <input type="datetime-local" className="input" value={exitAt} onChange={(e) => setExitAt(e.target.value)} step="1" />
+                <button type="button" onClick={() => setExitAt(toLocalInput(new Date().toISOString()))}
+                  title="Set exit time to now"
+                  className="shrink-0 h-[38px] px-3 rounded-lg border border-gray-300 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700">
+                  Now
+                </button>
+                {exitAt && (
+                  <button type="button" onClick={() => setExitAt('')}
+                    title="Clear exit time (mark still inside)"
+                    className="shrink-0 h-[38px] px-3 rounded-lg border border-gray-300 hover:border-red-300 text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-red-600">
+                    Clear
+                  </button>
+                )}
+              </div>
             </Field>
             <Field label={`Scope (default: ${defaultScope?.scopeName ?? 'lane has no scope'})`}>
               <select className="input" value={scopeOverride} onChange={(e) => setScopeOverride(e.target.value)}>

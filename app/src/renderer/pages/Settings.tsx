@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useConfirm } from '../hooks/useConfirm';
 
 interface TngTestLine {
   ts: string;
@@ -207,14 +208,15 @@ export function Settings() {
     else setAppUpdate((prev) => ({ ...(prev ?? {}), error: r.error ?? 'download_failed' }));
   });
 
+  const [confirm, confirmDialog] = useConfirm();
   const [applyUpdate, applying] = useAsyncAction(async () => {
     if (!downloadedPath) return;
-    if (!confirm('Install the update now?\n\nThis closes the app. For the installer variant, the NSIS wizard opens — accept its prompts. For the portable, the new exe launches in place.')) return;
+    if (!(await confirm({ title: 'Install update', message: 'Install the update now?\n\nThis closes the app. For the installer variant, the NSIS wizard opens — accept its prompts. For the portable, the new exe launches in place.', confirmLabel: 'Install' }))) return;
     await window.bridge.appUpdateApply({ path: downloadedPath });
   });
 
   const [runClearCache, clearingCache] = useAsyncAction(async () => {
-    if (!confirm('Clear browser cache and reload?\n\nThis wipes Electron-side cached responses, localStorage, IndexedDB, and cookies, then reloads the window. Your parking data (sessions, terminals, settings) is NOT affected.')) return;
+    if (!(await confirm({ title: 'Clear cache & reload', message: 'Clear browser cache and reload?\n\nThis wipes Electron-side cached responses, localStorage, IndexedDB, and cookies, then reloads the window. Your parking data (sessions, terminals, settings) is NOT affected.', confirmLabel: 'Clear & reload' }))) return;
     const r = await window.bridge.clearAppCache();
     // The reload happens server-side before this resolves, but show feedback
     // just in case the renderer is still alive momentarily.
@@ -242,6 +244,7 @@ export function Settings() {
 
   return (
     <div className="p-5 sm:p-8 max-w-3xl mx-auto">
+      {confirmDialog}
       <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
       <p className="text-sm text-gray-500 mt-1">Server-wide configuration. Restart not required — most changes take effect immediately.</p>
 

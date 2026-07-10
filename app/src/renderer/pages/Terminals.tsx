@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Plus, Trash2, Power, PowerOff, Activity, RefreshCw, CreditCard, X, Wrench, Loader2 } from 'lucide-react';
 import type { PaymentTerminal, TerminalStatus, LaneMode, OperationMode } from '@shared/types';
 import { TerminalTester } from './TerminalTester';
+import { useConfirm } from '../hooks/useConfirm';
 
 const EMPTY: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> = {
   name: '', host: '', port: 5000, secretKey: '', plazaId: 'P01', laneId: 'L01',
@@ -16,6 +17,7 @@ export function Terminals() {
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'err' | 'ok'; text: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirm();
 
   function flash(tone: 'err' | 'ok', text: string) {
     setToast({ tone, text });
@@ -75,7 +77,7 @@ export function Terminals() {
   }
 
   async function remove(id: number) {
-    if (!confirm(`Delete this terminal? Any open transactions will abort.`)) return;
+    if (!(await confirm({ title: 'Delete terminal', message: 'Delete this terminal? Any open transactions will abort.', danger: true, confirmLabel: 'Delete' }))) return;
     if (await guard('Delete', () => window.bridge.deleteTerminal(id))) {
       await refresh();
     }
@@ -176,6 +178,7 @@ export function Terminals() {
 
       {editing && <TerminalForm value={editing} onChange={setEditing} onCancel={() => setEditing(null)} onSave={save} error={formError} busy={busy === 'Save terminal'} />}
       {tester && <TerminalTester terminal={tester} onClose={() => setTester(null)} />}
+      {confirmDialog}
     </div>
   );
 }
