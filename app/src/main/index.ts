@@ -85,7 +85,7 @@ import {
   listParkingSpaces, listActivePasses,
   getCurrentSite,
 } from './services/db';
-import { computeFee, retriggerSessionExit, simulateScopeFee, simulateLaneEvent } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, simulateScopeFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './services/ecpi-terminal';
@@ -587,6 +587,15 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string) => {
 // DEV/QA lane simulator — drives the real parking flow for a lane+plate.
 ipcMain.handle('sessions:simulate-lane', (_e, laneId: number, plate: string, direction: 'entry'|'exit') =>
   simulateLaneEvent(laneId, plate, direction));
+// DEV/QA: record a completed session over an explicit entry→exit window.
+ipcMain.handle('sessions:simulate-session', (_e, laneId: number, plate: string, entryIso: string, exitIso: string) =>
+  simulateCompletedSession(laneId, plate, entryIso, exitIso));
+// DEV/QA: timed live flow — open a session at a chosen entry time, then exit at
+// a chosen exit time (prices the stay + drives the terminal).
+ipcMain.handle('sessions:simulate-entry', (_e, laneId: number, plate: string, entryIso: string) =>
+  simulateEntryAt(laneId, plate, entryIso));
+ipcMain.handle('sessions:simulate-exit', (_e, laneId: number, plate: string, exitIso: string) =>
+  simulateExitAt(laneId, plate, exitIso));
 
 /**
  * Admin session editor — recalculates duration + fee whenever entry/exit

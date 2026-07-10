@@ -71,6 +71,9 @@ const api: BridgeApi = {
    *  needs to close a stuck session by asking the driver to tap again. */
   retriggerSessionPayment: (id: number) => ipcRenderer.invoke('sessions:retrigger-payment', id),
   simulateLaneEvent: (laneId: number, plate: string, direction: 'entry'|'exit') => ipcRenderer.invoke('sessions:simulate-lane', laneId, plate, direction),
+  simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
+  simulateEntry: (laneId: number, plate: string, entryIso: string) => ipcRenderer.invoke('sessions:simulate-entry', laneId, plate, entryIso),
+  simulateExit: (laneId: number, plate: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-exit', laneId, plate, exitIso),
   deleteSession: (id: number) => ipcRenderer.invoke('sessions:delete', id),
   deleteSessionsBulk: (opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) =>
     ipcRenderer.invoke('sessions:delete-bulk', opts),

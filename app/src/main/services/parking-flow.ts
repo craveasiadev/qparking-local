@@ -22,10 +22,10 @@
  */
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
-import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../../shared/types';
+import type { ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getScope, getSiteDefaultScope, getSettings, getTerminal,
-  listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,
+  listLanes, listCameras, recordExit, updateSessionFields, findActivePassByPlate, getSessionById,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
@@ -181,9 +181,12 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     ?? (lane.scopeId ? getScope(lane.scopeId) : null)
     ?? getSiteDefaultScope();
   const entryMs = Date.parse(session.entryAt);
-  const exitMs = Date.now();
+  // exitAtOverride lets the dev simulator price a controlled stay; real camera
+  // events leave it undefined, so this stays "now".
+  const exitMs = event.exitAtOverride ? Date.parse(event.exitAtOverride) : Date.now();
+  const exitIso = new Date(exitMs).toISOString();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  let feeCents = computeFee(durationMinutes, scope, session.entryAt);
+  let feeCents = computeFee(durationMinutes, scope, session.entryAt, exitIso);
 
   // ─── Active-pass shortcut ────────────────────────────────────────────
   // Before driving the terminal, see if this plate is on the cached pass
@@ -681,7 +684,7 @@ async function startExitCharge(
   })();
 
   recordExit(inflight.sessionId, {
-    exitAt: new Date().toISOString(),
+    exitAt: event.exitAtOverride ?? new Date().toISOString(),
     exitLaneId: lane.id,
     exitCameraId: event.cameraId,
     exitImagePath: event.imagePath,
@@ -1152,6 +1155,117 @@ export function simulateLaneEvent(
     direction,
   };
   flog(`DEV SIMULATE: lane="${lane.name}" plate=${norm} direction=${direction} via camera=${cam.id}`);
+  lprEvents.emit('plate', event);
+  return { ok: true, cameraId: cam.id };
+}
+
+/**
+ * DEV/QA helper — record a COMPLETE (already-exited) parking session with
+ * explicit entry & exit times, so pricing can be verified over a real duration
+ * without waiting or tapping a card. Unlike simulateLaneEvent (which fires the
+ * LIVE flow at "now" and drives the terminal), this writes a closed session
+ * straight to the local DB with the fee the lane's plan computes for that exact
+ * window. It stays LOCAL — no terminal, no gate, no cloud push. Gated behind
+ * devMode in the UI.
+ */
+export function simulateCompletedSession(
+  laneId: number,
+  plate: string,
+  entryIso: string,
+  exitIso: string,
+): { ok: boolean; error?: string; sessionId?: number; durationMinutes?: number; feeCents?: number; scopeName?: string; currency?: string; paymentStatus?: string } {
+  const lane = getLane(laneId);
+  if (!lane) return { ok: false, error: 'lane_not_found' };
+  const norm = normalisePlate(plate);
+  if (!norm) return { ok: false, error: 'plate_required' };
+  const entryMs = Date.parse(entryIso);
+  const exitMs = Date.parse(exitIso);
+  if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return { ok: false, error: 'invalid_dates' };
+  if (exitMs < entryMs) return { ok: false, error: 'exit_before_entry' };
+
+  // Rate resolves the same way a real exit does: this lane plays the ENTRY role
+  // (its plan governs pricing), falling back to the site-default plan.
+  const scope = (lane.scopeId ? getScope(lane.scopeId) : null) ?? getSiteDefaultScope();
+  const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
+  const feeCents = computeFee(durationMinutes, scope, entryIso, exitIso);
+  const paymentStatus: ParkingSession['paymentStatus'] = feeCents > 0 ? 'paid' : 'free';
+
+  // Reuse the live-flow DB primitives: open a session, backdate its entry, then
+  // close it with the computed values. No terminal, no gate, no cloud push.
+  const session = createEntrySession(norm, laneId, null, null);
+  updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString(), notes: 'Simulated (dev tool)' });
+  recordExit(session.id, {
+    exitAt: new Date(exitMs).toISOString(),
+    exitLaneId: laneId,
+    exitCameraId: null,
+    exitImagePath: null,
+    durationMinutes,
+    feeCents,
+    paymentStatus,
+    terminalTxnId: null,
+    cardScheme: null,
+    paymentTimestamp: paymentStatus === 'paid' ? new Date(exitMs).toISOString() : null,
+  });
+  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min scope=${scope?.scopeName ?? 'NONE'} → fee=${feeCents}c status=${paymentStatus}`);
+  return { ok: true, sessionId: session.id, durationMinutes, feeCents, scopeName: scope?.scopeName, currency: scope?.currency, paymentStatus };
+}
+
+/**
+ * DEV/QA — open a session NOW but stamped with an operator-chosen entry time,
+ * so a later timed Exit can price a controlled stay. Creates only the open
+ * session (no gate/turnstile side effects) — the point is just to "store" the
+ * entry. Gated behind devMode in the UI.
+ */
+export function simulateEntryAt(
+  laneId: number, plate: string, entryIso: string,
+): { ok: boolean; error?: string; sessionId?: number } {
+  const lane = getLane(laneId);
+  if (!lane) return { ok: false, error: 'lane_not_found' };
+  const norm = normalisePlate(plate);
+  if (!norm) return { ok: false, error: 'plate_required' };
+  const entryMs = Date.parse(entryIso);
+  if (Number.isNaN(entryMs)) return { ok: false, error: 'invalid_entry_time' };
+  if (findOpenSessionByPlate(norm)) {
+    return { ok: false, error: 'already_inside — this plate has an open session; press Exit first' };
+  }
+  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
+  const session = createEntrySession(norm, laneId, cam?.id ?? null, null);
+  updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString() });
+  flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} session=${session.id}`);
+  return { ok: true, sessionId: session.id };
+}
+
+/**
+ * DEV/QA — fire the REAL exit flow for an open session, but with an
+ * operator-chosen exit time (fee window + recorded exit_at). This drives the
+ * terminal exactly like a live exit — the only difference is the exit instant.
+ * Requires an open session for the plate (press Entry first). Gated behind
+ * devMode in the UI.
+ */
+export function simulateExitAt(
+  laneId: number, plate: string, exitIso: string,
+): { ok: boolean; error?: string; cameraId?: number } {
+  const lane = getLane(laneId);
+  if (!lane) return { ok: false, error: 'lane_not_found' };
+  const norm = normalisePlate(plate);
+  if (!norm) return { ok: false, error: 'plate_required' };
+  const exitMs = Date.parse(exitIso);
+  if (Number.isNaN(exitMs)) return { ok: false, error: 'invalid_exit_time' };
+  if (!findOpenSessionByPlate(norm)) {
+    return { ok: false, error: 'no_open_session — press Entry for this plate first' };
+  }
+  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
+  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one so the flow can route to this lane` };
+  const event: PlateEvent = {
+    cameraId: cam.id,
+    plate: norm,
+    confidence: 1.0,
+    imagePath: null,
+    timestamp: exitIso,
+    direction: 'exit',
+    exitAtOverride: new Date(exitMs).toISOString(),
+  };
+  flog(`DEV SIMULATE EXIT: lane="${lane.name}" plate=${norm} exitAt=${exitIso} via camera=${cam.id}`);
   lprEvents.emit('plate', event);
   return { ok: true, cameraId: cam.id };
 }

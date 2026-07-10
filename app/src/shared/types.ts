@@ -152,6 +152,17 @@ export interface BridgeApi {
    *  camera on it) with a forced direction, exercising the real parking flow
    *  end-to-end. Backs the hidden Sessions lane simulator. */
   simulateLaneEvent(laneId: number, plate: string, direction: 'entry' | 'exit'): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
+  /** DEV/QA: record a completed session over an explicit entry→exit window
+   *  (local only; computes the fee from the lane's plan). Backs the Sessions
+   *  simulator's "Simulate session" mode. */
+  simulateSession(laneId: number, plate: string, entryIso: string, exitIso: string): Promise<{
+    ok: boolean; error?: string; sessionId?: number; durationMinutes?: number;
+    feeCents?: number; scopeName?: string; currency?: string; paymentStatus?: string;
+  }>;
+  /** DEV/QA: open a session stamped with a chosen entry time (no gate/terminal). */
+  simulateEntry(laneId: number, plate: string, entryIso: string): Promise<{ ok: boolean; error?: string; sessionId?: number }>;
+  /** DEV/QA: run the real exit flow (fee + terminal) at a chosen exit time. */
+  simulateExit(laneId: number, plate: string, exitIso: string): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
   deleteSession(id: number): Promise<boolean>;
   deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
   manualReleaseSession(id: number, reason: string): Promise<void>;

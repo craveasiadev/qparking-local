@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
   Trash2, Loader2, ChevronLeft, ChevronRight, CheckSquare, Square,
@@ -19,20 +19,33 @@ interface DateRangeFilters {
 const EMPTY_RANGE: DateRangeFilters = { entryFrom: '', entryTo: '', exitFrom: '', exitTo: '' };
 
 /**
- * Hidden dev/QA tool (rendered only when devMode is on): manually inject a
- * plate + lane into the REAL parking flow and watch the resulting actions —
- * entry (barrier), payment-pending (fee), exit (barrier/outcome) — stream in
- * live. It fires through an enabled camera on the lane, so it exercises the
- * actual routing → fee → gate → terminal chain, not a mock.
+ * Hidden dev/QA tool (rendered only when devMode is on). Drives the REAL
+ * parking flow with operator-controlled times:
+ *   - Entry → opens a session stamped with the chosen entry time.
+ *   - Exit  → runs the real exit at the chosen exit time: prices the stay,
+ *             prompts a wired terminal to tap, records + opens the gate.
+ *   - Simulate session → one-shot completed stay (entry→exit) with the computed
+ *             fee, no terminal/gate — for pure pricing checks.
+ * Actions route through an enabled camera on the lane, exercising the actual
+ * routing → fee → gate → terminal chain, not a mock.
  */
-function DevSimulator({ lanes }: { lanes: ParkingLane[] }) {
+function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSessionCreated?: () => void }) {
   const [plate, setPlate] = useState('');
   const [laneId, setLaneId] = useState<number | ''>('');
   const [busy, setBusy] = useState<string | null>(null);
+  // Default to a 1-hour stay ending now, so the fee is non-zero out of the box.
+  // (toLocalInput / toIso are the shared datetime-local <-> ISO helpers below.)
+  const [entryLocal, setEntryLocal] = useState(() => toLocalInput(new Date(Date.now() - 60 * 60_000).toISOString()));
+  const [exitLocal, setExitLocal] = useState(() => toLocalInput(new Date().toISOString()));
   const [log, setLog] = useState<{ ts: number; tone: 'in'|'pay'|'out'|'warn'|'info'; text: string }[]>([]);
 
   const push = (tone: 'in'|'pay'|'out'|'warn'|'info', text: string) =>
     setLog((cur) => [{ ts: Date.now(), tone, text }, ...cur].slice(0, 25));
+
+  // Latest refresh callback — lets the async exit event stream refresh the
+  // table without a stale closure.
+  const refreshRef = useRef(onSessionCreated);
+  refreshRef.current = onSessionCreated;
 
   // Translate the real parking-flow event stream (index.ts fans these out on
   // the 'session' channel) into a readable action timeline.
@@ -45,23 +58,56 @@ function DevSimulator({ lanes }: { lanes: ParkingLane[] }) {
       else if (kind === 'exit-completed') {
         const opened = ['paid','free','manual_release'].includes(d?.outcome);
         push('out', `Exit ${String(d?.outcome ?? '?').toUpperCase()} — barrier ${opened ? 'OPEN' : 'stays CLOSED'}`);
+        refreshRef.current?.();
       } else if (kind === 'warning') push('warn', `⚠ ${d?.kind ?? 'warning'}${d?.connState ? ` (${d.connState})` : ''}`);
     });
     return off;
   }, []);
 
-  async function fire(mode: 'entry' | 'exit' | 'full') {
-    if (!plate.trim()) { push('warn', '✗ Enter a plate first'); return; }
-    if (laneId === '') { push('warn', '✗ Select a lane first'); return; }
-    setBusy(mode);
-    const lid = Number(laneId);
-    const run = async (dir: 'entry' | 'exit') => {
-      const r = await window.bridge.simulateLaneEvent(lid, plate.trim(), dir);
-      if (!r?.ok) push('warn', `✗ ${dir}: ${r?.error ?? 'failed'}`);
-    };
+  function baseGuard(): number | null {
+    if (!plate.trim()) { push('warn', '✗ Enter a plate first'); return null; }
+    if (laneId === '') { push('warn', '✗ Select a lane first'); return null; }
+    return Number(laneId);
+  }
+
+  // Entry — open a session stamped with the chosen entry time (no gate/terminal).
+  async function fireEntry() {
+    const lid = baseGuard(); if (lid === null) return;
+    if (!entryLocal) { push('warn', '✗ Set an entry time'); return; }
+    setBusy('entry');
     try {
-      if (mode === 'full') { await run('entry'); await new Promise((res) => setTimeout(res, 3000)); await run('exit'); }
-      else { await run(mode); }
+      const r = await window.bridge.simulateEntry(lid, plate.trim(), toIso(entryLocal));
+      if (!r?.ok) push('warn', `✗ entry: ${r?.error ?? 'failed'}`);
+      else { push('in', `Entry stored — ${new Date(toIso(entryLocal)).toLocaleString()} (session #${r.sessionId})`); refreshRef.current?.(); }
+    } finally { setBusy(null); }
+  }
+
+  // Exit — run the REAL exit flow at the chosen exit time (prices the stay +
+  // prompts the terminal). Outcome arrives on the 'session' event stream above.
+  async function fireExit() {
+    const lid = baseGuard(); if (lid === null) return;
+    if (!exitLocal) { push('warn', '✗ Set an exit time'); return; }
+    setBusy('exit');
+    try {
+      const r = await window.bridge.simulateExit(lid, plate.trim(), toIso(exitLocal));
+      if (!r?.ok) push('warn', `✗ exit: ${r?.error ?? 'failed'}`);
+    } finally { setBusy(null); }
+  }
+
+  // One-shot: record a completed session over the entry→exit window — computes
+  // the fee from the lane's plan (no terminal/gate; local only).
+  async function fireSession() {
+    const lid = baseGuard(); if (lid === null) return;
+    const entryIso = toIso(entryLocal);
+    const exitIso = toIso(exitLocal);
+    if (Date.parse(exitIso) < Date.parse(entryIso)) { push('warn', '✗ Exit time is before entry time'); return; }
+    setBusy('session');
+    try {
+      const r = await window.bridge.simulateSession(lid, plate.trim(), entryIso, exitIso);
+      if (!r?.ok) { push('warn', `✗ session: ${r?.error ?? 'failed'}`); return; }
+      const rm = ((r.feeCents ?? 0) / 100).toFixed(2);
+      push('out', `Session #${r.sessionId} recorded — ${r.durationMinutes} min · ${r.scopeName ?? 'no plan'} · RM ${rm} · ${String(r.paymentStatus ?? '').toUpperCase()}`);
+      refreshRef.current?.();
     } finally { setBusy(null); }
   }
 
@@ -78,10 +124,11 @@ function DevSimulator({ lanes }: { lanes: ParkingLane[] }) {
         <span className="text-[10px] font-bold uppercase tracking-wider text-fuchsia-500">QA only</span>
       </div>
       <p className="text-[11px] text-gray-500 mb-3">
-        Injects a plate into the <strong>real</strong> parking flow for the chosen lane. A wired, connected terminal
-        will actually prompt for a card tap on <strong>Exit</strong>.
+        Drives the <strong>real</strong> flow with times you control. <strong>Entry</strong> opens a session at the entry time;
+        <strong> Exit</strong> prices the stay and prompts a wired terminal to tap. <strong>Simulate session</strong> writes a completed
+        stay in one shot (no terminal). Pick the lane that has the plan + terminal you're testing.
       </p>
-      <div className="flex flex-wrap items-end gap-2">
+      <div className="flex flex-wrap items-end gap-2 mb-2">
         <div>
           <label className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Plate</label>
           <input value={plate} onChange={(e) => setPlate(e.target.value)} placeholder="VMM1234"
@@ -95,22 +142,40 @@ function DevSimulator({ lanes }: { lanes: ParkingLane[] }) {
             {lanes.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
         </div>
-        <button onClick={() => fire('entry')} disabled={!!busy}
+        {log.length > 0 && (
+          <button onClick={() => setLog([])} className="h-9 px-2 text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900">Clear log</button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2 mb-2">
+        <div>
+          <label className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Entry time</label>
+          <input type="datetime-local" value={entryLocal} onChange={(e) => setEntryLocal(e.target.value)}
+            className="h-9 px-2 rounded-lg border border-gray-300 text-sm" />
+        </div>
+        <button onClick={() => fireEntry()} disabled={!!busy}
           className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
           {busy === 'entry' ? <Loader2 size={13} className="animate-spin" /> : <ArrowDown size={13} />} Entry
         </button>
-        <button onClick={() => fire('exit')} disabled={!!busy}
+        <span className="text-[11px] text-gray-400 pb-2">opens a session stamped at this time</span>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Exit time</label>
+          <input type="datetime-local" value={exitLocal} onChange={(e) => setExitLocal(e.target.value)}
+            className="h-9 px-2 rounded-lg border border-gray-300 text-sm" />
+        </div>
+        <button onClick={() => fireExit()} disabled={!!busy}
           className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
           {busy === 'exit' ? <Loader2 size={13} className="animate-spin" /> : <ArrowUp size={13} />} Exit
         </button>
-        <button onClick={() => fire('full')} disabled={!!busy}
-          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-          {busy === 'full' ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Full flow
+        <button onClick={() => fireSession()} disabled={!!busy}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+          {busy === 'session' ? <Loader2 size={13} className="animate-spin" /> : <Car size={13} />} Simulate session
         </button>
-        {log.length > 0 && (
-          <button onClick={() => setLog([])} className="h-9 px-2 text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900">Clear</button>
-        )}
       </div>
+
       {log.length > 0 && (
         <div className="mt-3 rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 max-h-52 overflow-auto">
           {log.map((e, i) => (
@@ -389,7 +454,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         </div>
       )}
 
-      {devMode && <DevSimulator lanes={lanes} />}
+      {devMode && <DevSimulator lanes={lanes} onSessionCreated={() => runRefresh()} />}
 
       {retriggerNotice && (
         <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${

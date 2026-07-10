@@ -36,6 +36,10 @@ export interface PlateEvent {
   imagePath: string | null;
   timestamp: string;
   direction: 'entry' | 'exit' | 'dual';
+  /** DEV/QA only: force the exit moment (fee window + recorded exit_at) to this
+   *  ISO instant instead of "now". Set by the Sessions simulator's timed Exit;
+   *  undefined for real camera events, so the live flow is unaffected. */
+  exitAtOverride?: string;
 }
 
 export const lprEvents = new EventEmitter();
