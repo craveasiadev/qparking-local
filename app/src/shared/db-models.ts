@@ -10,7 +10,7 @@
  *   ParkingLane      → lanes
  *   ParkingSession   → sessions
  *   TariffRule       → tariff_rules
- *   ScopeRate        → scopes
+ *   RatePolicy        → rate_policies
  *   ActivePass       → active_passes
  *   ParkingSpace     → parking_spaces
  *   Site             → sites
@@ -104,8 +104,8 @@ export interface LprCamera {
 export interface ParkingLane {
   id: number;
   name: string;
-  /** Scope from qparking SaaS — the rate config is fetched per scope. */
-  scopeId: string | null;
+  /** Policy from qparking SaaS — the rate config is fetched per policy. */
+  policyId: string | null;
   /** FK to PaymentTerminal — exit lanes have this set. */
   terminalId: number | null;
   /** Optional GPIO/relay address for the gate barrier. */
@@ -128,7 +128,7 @@ export interface ParkingSession {
   exitLaneId: number | null;
   exitCameraId: number | null;
   exitImagePath: string | null;
-  /** Total billable minutes — computed at exit time using the lane's scope rate. */
+  /** Total billable minutes — computed at exit time using the lane's policy rate. */
   durationMinutes: number | null;
   /** Final amount in CENTS (so 100 = RM 1.00). */
   feeCents: number | null;
@@ -149,7 +149,7 @@ export interface ParkingSession {
 // ─── tariff_rules ────────────────────────────────────────────────────────────
 
 /** A single time-windowed tariff rule from qparking SaaS. Multiple of these
- *  per scope describe the full schedule (weekday/weekend, daytime/night,
+ *  per policy describe the full schedule (weekday/weekend, daytime/night,
  *  24-hour, etc). qparking-local picks the rule matching the SESSION moment,
  *  not the moment the cloud was polled. */
 export interface TariffRule {
@@ -175,16 +175,16 @@ export interface TariffRule {
   isOvernight: boolean;
   /** Per-rule activation flag — mirrors the cloud Activations tab. Inactive
    *  rules are still cached locally so the operator can see the full picture
-   *  in Scopes, but the exit-flow fee math skips them. Defaults to true. */
+   *  in Parking Policies, but the exit-flow fee math skips them. Defaults to true. */
   isActive: boolean;
 }
 
-// ─── scopes ──────────────────────────────────────────────────────────────────
+// ─── policies ──────────────────────────────────────────────────────────────────
 
-/** Cached qparking scope/rate row. Refreshed periodically from the SaaS. */
-export interface ScopeRate {
-  scopeId: string;
-  scopeName: string;
+/** Cached qparking policy/rate row. Refreshed periodically from the SaaS. */
+export interface RatePolicy {
+  policyId: string;
+  policyName: string;
   /** Free duration in minutes at start of session. */
   freeMinutes: number;
   /** Legacy flat fields — kept as fallback when `rules` is empty. */
@@ -224,8 +224,6 @@ export interface ScopeRate {
    *  mirror — is the policy cap the schedule-path fee calc applies alongside
    *  each rule's own cap. */
   policyDailyCapCents?: number | null;
-  policyId: string | null;
-  policyName: string | null;
   /** Operator-facing free-form description from the cloud Setup & Rules tab. */
   policyDescription: string | null;
   /** Cloud flag: this is the site-wide default plan applied when a lane
@@ -241,7 +239,7 @@ export interface ScopeRate {
  *  "skip charging this car, it's already paid" without a WAN round-trip. */
 export interface ActivePass {
   passId: string;
-  scopeId: string;
+  policyId: string;
   plateNumber: string;
   passType: string;
   status: string;
@@ -353,7 +351,7 @@ export interface AppSettings {
    *  the LPR-driven barrier and the face-auth turnstile open together.
    *  When OFF, no faceapp calls are made even if URL/token are filled in. */
   faceGateEnabled: boolean;
-  /** Override for the computed fee — if the scope-based calculation would
+  /** Override for the computed fee — if the policy-based calculation would
    *  return less than this value (in cents), use this instead. 0 disables
    *  the override. Useful when testing the EMV terminal flow without having
    *  to wait for duration > freeMinutes, OR for sites with a flat minimum

@@ -11,7 +11,7 @@
  *
  * Exit flow:
  *   1. plate event arrives on an exit-direction camera
- *   2. look up open session, compute duration + fee from the lane's scope rate
+ *   2. look up open session, compute duration + fee from the lane's policy rate
  *   3. if fee == 0 → record exit immediately as "free", trigger gate
  *   4. otherwise → drive the payment terminal:
  *        kiosk-mode lane: terminal.initExit → waits for card tap → proceedExit
@@ -22,9 +22,9 @@
  */
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
-import type { ParkingLane, PaymentTerminal, ScopeRate, TariffRule } from '../../shared/types';
+import type { ParkingLane, PaymentTerminal, RatePolicy, TariffRule } from '../../shared/types';
 import {
-  createEntrySession, findOpenSessionByPlate, getCamera, getLane, getScope, getSiteDefaultScope, getSettings, getTerminal,
+  createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
   listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
@@ -115,7 +115,7 @@ function handlePlateEvent(event: PlateEvent) {
 
   // Find the lane for this camera.
   const lane = laneForCamera(event.cameraId);
-  flog(`routed → ${direction}, lane=${lane?.id ?? 'null'} (terminalId=${lane?.terminalId ?? 'null'}, scopeId=${lane?.scopeId ?? 'null'})`);
+  flog(`routed → ${direction}, lane=${lane?.id ?? 'null'} (terminalId=${lane?.terminalId ?? 'null'}, policyId=${lane?.policyId ?? 'null'})`);
 
   if (direction === 'entry') {
     handleEntry(event, lane);
@@ -176,14 +176,14 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // previewFee and keeps the charge deterministic no matter which exit lane
   // the driver picks. The exit is still RECORDED against this lane below.
   const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
-  const scope =
-    (entryLane?.scopeId ? getScope(entryLane.scopeId) : null)
-    ?? (lane.scopeId ? getScope(lane.scopeId) : null)
-    ?? getSiteDefaultScope();
+  const policy =
+    (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
+    ?? (lane.policyId ? getRatePolicy(lane.policyId) : null)
+    ?? getSiteDefaultRatePolicy();
   const entryMs = Date.parse(session.entryAt);
   const exitMs = Date.now();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  let feeCents = computeFee(durationMinutes, scope, session.entryAt);
+  let feeCents = computeFee(durationMinutes, policy, session.entryAt);
 
   // ─── Active-pass shortcut ────────────────────────────────────────────
   // Before driving the terminal, see if this plate is on the cached pass
@@ -191,10 +191,10 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // payment (monthly/quarterly/yearly pre-paid, or VIP/staff/free_access
   // explicitly waived). Skip the charge and open the gate — but still
   // record the exit so the audit row exists.
-  // Look the plate up under the SAME scope that governs pricing (entry/site
-  // context), not the exit gate's scope.
-  const passScopeId = scope?.scopeId ?? null;
-  const activePass = passScopeId ? findActivePassByPlate(passScopeId, event.plate) : null;
+  // Look the plate up under the SAME policy that governs pricing (entry/site
+  // context), not the exit gate's policy.
+  const passPolicyId = policy?.policyId ?? null;
+  const activePass = passPolicyId ? findActivePassByPlate(passPolicyId, event.plate) : null;
   if (activePass) {
     flog(`PASS MATCH: plate=${event.plate} pass=${activePass.passType} id=${activePass.passId} → free exit (skip terminal)`);
     recordExit(session.id, {
@@ -220,7 +220,7 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
 
   // Diagnostic — without this, a 0-fee exit looks identical to "terminal
   // didn't fire", which is exactly the support ticket we keep getting.
-  flog(`fee math: plate=${event.plate} duration=${durationMinutes}min scope=${scope?.scopeName ?? 'NONE'} freeMin=${scope?.freeMinutes ?? '-'} firstBlock=${scope?.firstBlockCents ?? '-'}c perBlock=${scope?.perBlockCents ?? '-'}c → computedFee=${feeCents}c`);
+  flog(`fee math: plate=${event.plate} duration=${durationMinutes}min policy=${policy?.policyName ?? 'NONE'} freeMin=${policy?.freeMinutes ?? '-'} firstBlock=${policy?.firstBlockCents ?? '-'}c perBlock=${policy?.perBlockCents ?? '-'}c → computedFee=${feeCents}c`);
 
   // Operator-set minimum charge — forces the terminal flow even when the
   // computed fee is 0 (useful for testing the EMV flow without waiting
@@ -232,14 +232,14 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     feeCents = minCharge;
   }
 
-  parkingEvents.emit('exit-pending', { session, lane, scope, durationMinutes, feeCents, event });
+  parkingEvents.emit('exit-pending', { session, lane, policy, durationMinutes, feeCents, event });
 
   if (feeCents === 0) {
     // Genuinely free — no rate configured, OR duration within freeMinutes,
-    // OR lane has no scope. Gate opens immediately; no terminal call is
+    // OR lane has no policy. Gate opens immediately; no terminal call is
     // possible because there's nothing to charge. We DO surface this on
     // the gate screen so the operator doesn't think the system was silent.
-    flog(`FREE EXIT (fee=0) — no terminal interaction. Reason: ${!scope ? 'no scope on lane' : durationMinutes < (scope.freeMinutes ?? 0) ? `duration ${durationMinutes}min < freeMinutes ${scope.freeMinutes}` : 'scope rate is RM 0 — check Scopes page'}`);
+    flog(`FREE EXIT (fee=0) — no terminal interaction. Reason: ${!policy ? 'no policy on lane' : durationMinutes < (policy.freeMinutes ?? 0) ? `duration ${durationMinutes}min < freeMinutes ${policy.freeMinutes}` : 'policy rate is RM 0 — check Parking Policies page'}`);
     recordExit(session.id, {
       exitAt: new Date(exitMs).toISOString(),
       exitLaneId: lane.id,
@@ -255,7 +255,7 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     parkingEvents.emit('exit-completed', {
       sessionId: session.id,
       outcome: 'free',
-      reason: !scope ? 'no-scope' : (durationMinutes < (scope.freeMinutes ?? 0) ? 'within-grace' : 'rate-zero'),
+      reason: !policy ? 'no-policy' : (durationMinutes < (policy.freeMinutes ?? 0) ? 'within-grace' : 'rate-zero'),
     });
     return;
   }
@@ -734,7 +734,7 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 /**
  * Time-aware fee calculator.
  *
- * When the scope carries a non-empty `rules[]` array (the new schedule
+ * When the policy carries a non-empty `rules[]` array (the new schedule
  * format from qparking SaaS), we segment the billable interval at every
  * boundary where a different rule takes effect (day-of-week change,
  * time window crossing) and bill each segment under its matching rule.
@@ -749,21 +749,21 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
  */
 export function computeFee(
   durationMinutes: number,
-  scope: ScopeRate | null,
+  policy: RatePolicy | null,
   entryAt?: string | Date,
   /** Explicit exit instant for simulation/testing. Defaults to now (the real
    *  gate exit). Only affects the schedule-driven path. */
   exitAt?: string | Date,
 ): number {
-  if (!scope) return 0;
+  if (!policy) return 0;
 
   // Pure block model — no schedule available, use legacy math.
-  if (!scope.rules || scope.rules.length === 0) {
-    const billable = Math.max(0, durationMinutes - scope.freeMinutes);
+  if (!policy.rules || policy.rules.length === 0) {
+    const billable = Math.max(0, durationMinutes - policy.freeMinutes);
     if (billable === 0) return 0;
-    const blocks = Math.ceil(billable / Math.max(1, scope.blockMinutes));
-    let cents = scope.firstBlockCents + Math.max(0, blocks - 1) * scope.perBlockCents;
-    if (scope.dailyCapCents > 0 && cents > scope.dailyCapCents) cents = scope.dailyCapCents;
+    const blocks = Math.ceil(billable / Math.max(1, policy.blockMinutes));
+    let cents = policy.firstBlockCents + Math.max(0, blocks - 1) * policy.perBlockCents;
+    if (policy.dailyCapCents > 0 && cents > policy.dailyCapCents) cents = policy.dailyCapCents;
     return cents;
   }
 
@@ -779,21 +779,21 @@ export function computeFee(
   // Grace: within the grace window the whole stay is free. Mirrors the cloud's
   // `duration_minutes <= grace_minutes` check (integer minutes).
   const durMin = diffFloorMinutes(entryMs, exitMs);
-  const grace = Math.max(0, scope.freeMinutes || 0);
+  const grace = Math.max(0, policy.freeMinutes || 0);
   if (durMin <= grace) return 0;
 
   // Billing start: ONLY 'charge_from_grace_end' bills from the grace boundary;
   // every other value (including the cloud default 'charge_from_entry') bills
   // from the entry instant once grace is exceeded.
-  const billStartMs = scope.graceExceededBehavior === 'charge_from_grace_end'
+  const billStartMs = policy.graceExceededBehavior === 'charge_from_grace_end'
     ? entryMs + grace * 60_000
     : entryMs;
 
   // rate_basis 'entry' — the rule covering the ENTRY moment governs the entire
   // stay (early-bird pricing). Clone it as an all-day rule.
-  let rulesForStay = scope.rules;
-  if ((scope.rateBasis ?? 'occupancy') === 'entry') {
-    const entryRule = pickRuleAtMoment(entryMs, scope.rules, false);
+  let rulesForStay = policy.rules;
+  if ((policy.rateBasis ?? 'occupancy') === 'entry') {
+    const entryRule = pickRuleAtMoment(entryMs, policy.rules, false);
     if (entryRule) {
       rulesForStay = [{
         ...entryRule,
@@ -807,18 +807,18 @@ export function computeFee(
     }
   }
 
-  const cycles = buildBillingCycles(billStartMs, exitMs, scope);
+  const cycles = buildBillingCycles(billStartMs, exitMs, policy);
   // first_block_once_per_entry only matters across cut-off cycles.
-  const carryBlocks = !!scope.firstBlockOncePerEntry && !!scope.cutoffEnabled;
-  const flatMode = ['sum', 'entry', 'highest', 'per_day'].includes(scope.flatMultiRate ?? 'sum')
-    ? (scope.flatMultiRate ?? 'sum')
+  const carryBlocks = !!policy.firstBlockOncePerEntry && !!policy.cutoffEnabled;
+  const flatMode = ['sum', 'entry', 'highest', 'per_day'].includes(policy.flatMultiRate ?? 'sum')
+    ? (policy.flatMultiRate ?? 'sum')
     : 'sum';
   // Policy-level cap = the TRUE policy daily cap (policyDailyCapCents), NOT the
   // legacy `dailyCapCents` mirror (which holds whichever RULE was effective at
   // sync time and would wrongly over-cap block_hourly stays). Per-rule caps are
   // applied separately inside priceBillingCycle. null/0 = uncapped.
-  const policyCap = scope.policyDailyCapCents != null && scope.policyDailyCapCents > 0
-    ? scope.policyDailyCapCents
+  const policyCap = policy.policyDailyCapCents != null && policy.policyDailyCapCents > 0
+    ? policy.policyDailyCapCents
     : null;
 
   let total = 0;
@@ -827,11 +827,11 @@ export function computeFee(
     const [cs, ce] = cycles[idx];
     // On every cut-off crossing under 'new_day_fixed_fee', charge the fixed fee
     // for the new day instead of pricing the cycle by time.
-    if (idx > 0 && scope.cutoffBehavior === 'new_day_fixed_fee') {
-      total += scope.newDayFixedFeeCents ?? 0;
+    if (idx > 0 && policy.cutoffBehavior === 'new_day_fixed_fee') {
+      total += policy.newDayFixedFeeCents ?? 0;
       continue;
     }
-    const preferOvernight = idx > 0 && scope.cutoffBehavior === 'overnight_tariff';
+    const preferOvernight = idx > 0 && policy.cutoffBehavior === 'overnight_tariff';
     const res = priceBillingCycle(
       cs, ce, rulesForStay, preferOvernight, policyCap,
       carryBlocks ? blockMinutes : 0, flatMode,
@@ -956,9 +956,9 @@ function priceBlockHourlyCents(minutes: number, rule: TariffRule, prior = 0): nu
 }
 
 /** Split [start, end] into billing cycles at each cut-off crossing. */
-function buildBillingCycles(startMs: number, endMs: number, scope: ScopeRate): Array<[number, number]> {
-  if (!scope.cutoffEnabled) return [[startMs, endMs]];
-  const parts = String(scope.cutoffTime ?? '00:00:00').split(':');
+function buildBillingCycles(startMs: number, endMs: number, policy: RatePolicy): Array<[number, number]> {
+  if (!policy.cutoffEnabled) return [[startMs, endMs]];
+  const parts = String(policy.cutoffTime ?? '00:00:00').split(':');
   const h = Number(parts[0]) || 0, m = Number(parts[1]) || 0, s = Number(parts[2]) || 0;
   const cycles: Array<[number, number]> = [];
   let segStart = startMs;
@@ -1048,29 +1048,29 @@ function priceBillingCycle(
 
 /** Used by the UI fee-preview panel — shows what the calculated charge WOULD be
  *  if a given plate were to exit right now. */
-export function previewFee(plate: string): { found: boolean; sessionId?: number; durationMinutes?: number; feeCents?: number; scope?: ScopeRate | null } {
+export function previewFee(plate: string): { found: boolean; sessionId?: number; durationMinutes?: number; feeCents?: number; policy?: RatePolicy | null } {
   const session = findOpenSessionByPlate(plate);
   if (!session) return { found: false };
   const lane = listLanes().find((l) => l.id === session.entryLaneId);
-  const scope = (lane?.scopeId ? getScope(lane.scopeId) : null) ?? getSiteDefaultScope();
+  const policy = (lane?.policyId ? getRatePolicy(lane.policyId) : null) ?? getSiteDefaultRatePolicy();
   const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
-  const feeCents = computeFee(durationMinutes, scope, session.entryAt);
-  return { found: true, sessionId: session.id, durationMinutes, feeCents, scope };
+  const feeCents = computeFee(durationMinutes, policy, session.entryAt);
+  return { found: true, sessionId: session.id, durationMinutes, feeCents, policy };
 }
 
 /**
- * "Test price" — compute what a given rate plan (scope) would charge for an
+ * "Test price" — compute what a given rate plan (policy) would charge for an
  * explicit entry→exit window, without needing a live session. Mirrors the
  * qparking SaaS "Test a price" simulator so an operator can confirm the gate
  * charge matches the cloud for the same inputs.
  */
-export function simulateScopeFee(
-  scopeId: string,
+export function simulateRatePolicyFee(
+  policyId: string,
   entryIso: string,
   exitIso: string,
-): { ok: boolean; feeCents?: number; durationMinutes?: number; scopeName?: string; currency?: string; error?: string } {
-  const scope = getScope(scopeId);
-  if (!scope) return { ok: false, error: 'rate_plan_not_found' };
+): { ok: boolean; feeCents?: number; durationMinutes?: number; policyName?: string; currency?: string; error?: string } {
+  const policy = getRatePolicy(policyId);
+  if (!policy) return { ok: false, error: 'rate_plan_not_found' };
   const entryMs = Date.parse(entryIso);
   const exitMs = Date.parse(exitIso);
   if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return { ok: false, error: 'invalid_dates' };
@@ -1078,8 +1078,8 @@ export function simulateScopeFee(
   // Floor to whole minutes — matches the cloud TariffCalculator's integer
   // duration so the two produce identical block math.
   const durationMinutes = Math.max(0, Math.floor((exitMs - entryMs) / 60_000));
-  const feeCents = computeFee(durationMinutes, scope, entryIso, exitIso);
-  return { ok: true, feeCents, durationMinutes, scopeName: scope.scopeName, currency: scope.currency };
+  const feeCents = computeFee(durationMinutes, policy, entryIso, exitIso);
+  return { ok: true, feeCents, durationMinutes, policyName: policy.policyName, currency: policy.currency };
 }
 
 /**

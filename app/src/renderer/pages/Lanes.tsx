@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2, Map as MapIcon, X } from 'lucide-react';
-import type { ParkingLane, PaymentTerminal, ScopeRate, LprCamera } from '@shared/types';
+import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
 
 const EMPTY: Omit<ParkingLane, 'id'> = {
-  name: '', scopeId: null, terminalId: null, gateRelayAddress: null, enabled: true,
+  name: '', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
 };
 
 /** A lane's direction is derived from its cameras (the single source of
@@ -21,7 +21,7 @@ function laneDirectionLabel(cams: LprCamera[]): string {
 export function Lanes() {
   const [list, setList] = useState<ParkingLane[]>([]);
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
-  const [scopes, setScopes] = useState<ScopeRate[]>([]);
+  const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   // `cameraIds` rides alongside the lane fields — it's the set of cameras this
   // lane covers, persisted server-side against each camera's lane_id.
@@ -32,7 +32,7 @@ export function Lanes() {
   async function refresh() {
     setList(await window.bridge.listLanes());
     setTerminals(await window.bridge.listTerminals());
-    setScopes(await window.bridge.listScopes());
+    setPolicies(await window.bridge.listRatePolicies());
     setCameras(await window.bridge.listCameras());
   }
   useEffect(() => { void refresh(); }, []);
@@ -51,7 +51,7 @@ export function Lanes() {
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Lanes</h1>
-          <p className="text-sm text-gray-500 mt-1">Entry and exit gates. Each lane links cameras + a payment terminal + a scope rate.</p>
+          <p className="text-sm text-gray-500 mt-1">Entry and exit gates. Each lane links cameras + a payment terminal + a policy rate.</p>
         </div>
         <button onClick={() => { setFormError(null); setEditing({ ...EMPTY, cameraIds: [] }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
           <Plus size={14} /> Add lane
@@ -61,7 +61,7 @@ export function Lanes() {
       <div className="grid grid-cols-1 gap-3">
         {list.map((l) => {
           const t = terminals.find((x) => x.id === l.terminalId);
-          const s = scopes.find((x) => x.scopeId === l.scopeId);
+          const s = policies.find((x) => x.policyId === l.policyId);
           return (
             <div key={l.id} className="rounded-xl border border-gray-200 bg-white p-4 flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -70,7 +70,7 @@ export function Lanes() {
                   <h3 className="font-semibold">{l.name}</h3>
                 </div>
                 <div className="mt-1 text-xs text-gray-500 font-mono">
-                  {laneDirectionLabel(cameras.filter((c) => c.laneId === l.id))} · plan: {s?.scopeName ?? 'site default'} · terminal: {t?.name ?? '—'}
+                  {laneDirectionLabel(cameras.filter((c) => c.laneId === l.id))} · plan: {s?.policyName ?? 'site default'} · terminal: {t?.name ?? '—'}
                   {!l.enabled && ' · DISABLED'}
                 </div>
               </div>
@@ -95,16 +95,16 @@ export function Lanes() {
             <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Display name"><input className="input" value={editing.name ?? ''} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
               <Field label="Rate plan">
-                {/* Points at a scope_id which now corresponds to a cloud
+                {/* Points at a policy_id which now corresponds to a cloud
                     RatePolicy — different lanes can bind to different
                     plans (VIP → premium, general → standard). Leaving
                     it "— site default —" falls back to the plan the
                     cloud flagged as default. */}
-                <select className="input" value={editing.scopeId ?? ''} onChange={(e) => setEditing({ ...editing, scopeId: e.target.value || null })}>
+                <select className="input" value={editing.policyId ?? ''} onChange={(e) => setEditing({ ...editing, policyId: e.target.value || null })}>
                   <option value="">— site default —</option>
-                  {scopes.map((s) => (
-                    <option key={s.scopeId} value={s.scopeId}>
-                      {s.scopeName}{(s as any).isSiteDefault ? ' (default)' : ''}
+                  {policies.map((s) => (
+                    <option key={s.policyId} value={s.policyId}>
+                      {s.policyName}{(s as any).isSiteDefault ? ' (default)' : ''}
                     </option>
                   ))}
                 </select>

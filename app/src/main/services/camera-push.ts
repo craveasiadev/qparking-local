@@ -14,15 +14,15 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
   const camera = getCamera(cameraId);
   if (!camera) return { ok: false, error: 'unknown_camera' };
 
-  // site_id is the lane's scope_id, which we sync from qparking. Without
+  // site_id is the lane's policy_id, which we sync from qparking. Without
   // it we can't attribute the camera to any cloud-side site so we skip.
   const lane = camera.laneId ? getLane(camera.laneId) : null;
-  if (!lane?.scopeId) return { ok: false, error: 'camera_lane_has_no_scope' };
+  if (!lane?.policyId) return { ok: false, error: 'camera_lane_has_no_scope' };
 
   try {
     await cloud.post('/cameras', {
       external_id: `local-${camera.id}`, // stable across pushes
-      site_id: lane.scopeId,
+      site_id: lane.policyId,
       name: camera.name,
       direction: camera.direction,
       host: camera.host,

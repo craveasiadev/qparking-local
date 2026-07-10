@@ -8,7 +8,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
 import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
-import { Scopes } from './pages/Scopes';
+import { ParkingPolicies } from './pages/ParkingPolicies';
 import { Sessions } from './pages/Sessions';
 import { Sites } from './pages/Sites';
 import { LiveDisplay } from './pages/LiveDisplay';
@@ -21,7 +21,7 @@ type Page =
   // Parking Management
   | 'spaces' | 'passes'
   // Pricing & Tariffs
-  | 'scopes'
+  | 'policies'
   // System
   | 'settings' | 'sites';
 
@@ -54,7 +54,7 @@ const SECTIONS: NavSection[] = [
   {
     key: 'pricing', label: 'Pricing & tariffs',
     items: [
-      { id: 'scopes', label: 'Parking rates', icon: Tag },
+      { id: 'policies', label: 'Parking Policies', icon: Tag },
     ],
   },
   {
@@ -206,7 +206,7 @@ export function App() {
           {page === 'sessions' && <Sessions devMode={devMode} />}
           {page === 'spaces' && <Spaces />}
           {page === 'passes' && <Passes />}
-          {page === 'scopes' && <Scopes />}
+          {page === 'policies' && <ParkingPolicies />}
           {page === 'sites' && <Sites />}
           {page === 'settings' && <Settings />}
         </div>

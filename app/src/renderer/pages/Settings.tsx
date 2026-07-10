@@ -55,7 +55,7 @@ interface CloudSyncResult { ok: boolean; fetched: number; error?: string }
 /** Per-model outcome of a full cloud pull, as returned by syncAllNow(). */
 interface CloudSyncReport {
   site: CloudSyncResult;
-  scopes: CloudSyncResult;
+  policies: CloudSyncResult;
   passes: CloudSyncResult;
   spaces: CloudSyncResult;
 }
@@ -105,7 +105,7 @@ export function Settings() {
 
   // ─── qparking cloud sync ───────────────────────────────────────────────────
   // "Sync now" saves the URL/key currently on screen, pulls every cloud-owned
-  // model (site, scopes, passes, spaces) and shows the per-model outcome.
+  // model (site, policies, passes, spaces) and shows the per-model outcome.
   const [cloudSyncReport, setCloudSyncReport] = useState<CloudSyncReport | null>(null);
 
   const [runCloudSyncNow, cloudSyncing] = useAsyncAction(
@@ -339,7 +339,7 @@ export function Settings() {
         )}
         {cloudSyncReport && (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
-            {(['site', 'scopes', 'passes', 'spaces'] as const).map((model) => {
+            {(['site', 'policies', 'passes', 'spaces'] as const).map((model) => {
               const result = cloudSyncReport[model];
               return (
                 <div key={model} className={result.ok ? 'text-emerald-700' : 'text-red-700'}>
@@ -349,7 +349,7 @@ export function Settings() {
             })}
           </div>
         )}
-        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, scopes, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>. Background sync re-pulls everything every 60 seconds.</p>
+        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>. Background sync re-pulls everything every 60 seconds.</p>
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
@@ -722,7 +722,7 @@ export function Settings() {
           Wipes Electron-side browser caches (HTTP responses, localStorage,
           IndexedDB, service workers, cookies) and reloads the window.
           Useful after an app update when the UI shows stale data. <strong>Does NOT
-          delete parking sessions, terminals, cameras, lanes, scopes, or settings</strong> —
+          delete parking sessions, terminals, cameras, lanes, policies, or settings</strong> —
           those live in the SQLite database and survive a cache clear.
         </p>
         <button onClick={() => runClearCache()} disabled={clearingCache}

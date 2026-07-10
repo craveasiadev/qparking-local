@@ -102,10 +102,10 @@ function readImageAsBase64(imagePath: string | null | undefined): string | null 
  */
 export function enqueueEntry(session: ParkingSession): void {
   const lane = session.entryLaneId ? getLane(session.entryLaneId) : null;
-  if (!lane?.scopeId) return; // skip — lane lacks scope, can't attribute
+  if (!lane?.policyId) return; // skip — lane lacks a policy, can't attribute
   const entryImage = readImageAsBase64(session.entryImagePath);
   enqueueSync('session.entry', {
-    site_id: lane.scopeId,
+    site_id: lane.policyId,
     plate_number: session.plate,
     entry_time: session.entryAt,
     ...(entryImage ? { entry_image_base64: entryImage } : {}),
@@ -130,14 +130,14 @@ function paymentFields(session: ParkingSession) {
 export function enqueueExit(session: ParkingSession): void {
   const lane = session.exitLaneId ? getLane(session.exitLaneId)
     : (session.entryLaneId ? getLane(session.entryLaneId) : null);
-  if (!lane?.scopeId) return;
+  if (!lane?.policyId) return;
   // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
   // and the freshly-captured exit image. Cloud upsert is idempotent per column
   // so re-uploading the entry image is safe.
   const entryImage = readImageAsBase64(session.entryImagePath);
   const exitImage  = readImageAsBase64(session.exitImagePath);
   enqueueSync('session.exit', {
-    site_id: lane.scopeId,
+    site_id: lane.policyId,
     plate_number: session.plate,
     entry_time: session.entryAt,
     exit_time: session.exitAt,
@@ -153,14 +153,14 @@ export function enqueueExit(session: ParkingSession): void {
 export function enqueueUpdate(session: ParkingSession): void {
   const lane = session.exitLaneId ? getLane(session.exitLaneId)
     : (session.entryLaneId ? getLane(session.entryLaneId) : null);
-  if (!lane?.scopeId) return;
+  if (!lane?.policyId) return;
   // The same upsertParkingRecord endpoint handles updates — re-posting an
   // open entry refreshes it; posting with an exit_time closes it. So an
   // edit can re-use the entry / exit shapes depending on whether exitAt
   // is set.
   if (session.exitAt) {
     enqueueSync('session.update', {
-      site_id: lane.scopeId,
+      site_id: lane.policyId,
       plate_number: session.plate,
       entry_time: session.entryAt,
       exit_time: session.exitAt,
@@ -170,7 +170,7 @@ export function enqueueUpdate(session: ParkingSession): void {
     });
   } else {
     enqueueSync('session.update', {
-      site_id: lane.scopeId,
+      site_id: lane.policyId,
       plate_number: session.plate,
       entry_time: session.entryAt,
     });
@@ -181,9 +181,9 @@ export function enqueueUpdate(session: ParkingSession): void {
 export function enqueueDelete(session: ParkingSession): void {
   const lane = session.exitLaneId ? getLane(session.exitLaneId)
     : (session.entryLaneId ? getLane(session.entryLaneId) : null);
-  if (!lane?.scopeId) return;
+  if (!lane?.policyId) return;
   enqueueSync('session.delete', {
-    site_id: lane.scopeId,
+    site_id: lane.policyId,
     plate_number: session.plate,
     entry_time: session.entryAt,
   });

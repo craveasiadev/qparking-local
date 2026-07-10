@@ -1,7 +1,7 @@
 /**
  * Sync layer between this on-prem server and the qparking SaaS cloud.
  *
- * Pulls scope+rate config, active passes and parking spaces from the cloud
+ * Pulls policy+rate config, active passes and parking spaces from the cloud
  * and caches them in SQLite, so the exit flow can compute fees even when the
  * WAN is offline. Also polls for remote gate-open commands and pushes local
  * rate edits back up to the cloud.
@@ -13,18 +13,18 @@
  *
  * If the qparking SaaS isn't configured yet, every sync returns
  * `qparking_not_configured` and the app still works — operators can fill the
- * scopes table manually via the Scopes page in the UI.
+ * policies table manually via the Parking Policies page in the UI.
  */
 import {
-  upsertScope,
+  upsertRatePolicy,
   upsertSite,
-  replaceActivePassesForScope,
-  listScopes,
+  replaceActivePassesForRatePolicy,
+  listRatePolicies,
   replaceParkingSpaces,
-  pruneStaleScopes,
+  pruneStaleRatePolicies,
 } from './db';
 import { getCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
-import type { ScopeRate, TariffRule, ActivePass, ParkingSpace, Site } from '../../shared/types';
+import type { RatePolicy, TariffRule, ActivePass, ParkingSpace, Site } from '../../shared/types';
 
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
@@ -41,10 +41,10 @@ function toFailedSyncResult(error: any): SyncResult {
 
 // ─── API row → local type mapping ────────────────────────────────────────────
 
-/** Map the `rules` array on a cloud scope row to local TariffRule objects. */
-function mapApiRowToTariffRules(scopeRow: any): TariffRule[] {
-  if (!Array.isArray(scopeRow.rules)) return [];
-  return scopeRow.rules
+/** Map the `rules` array on a cloud policy row to local TariffRule objects. */
+function mapApiRowToTariffRules(policyRow: any): TariffRule[] {
+  if (!Array.isArray(policyRow.rules)) return [];
+  return policyRow.rules
     .map((ruleRow: any): TariffRule => ({
       ruleId: String(ruleRow.rule_id ?? ruleRow.ruleId ?? ''),
       name: String(ruleRow.name ?? ''),
@@ -70,14 +70,14 @@ function mapApiRowToTariffRules(scopeRow: any): TariffRule[] {
     .filter((rule: TariffRule) => !!rule.ruleId);
 }
 
-/** Map one cloud scope row (snake_case API fields) to a local ScopeRate. */
-function mapApiRowToScope(scopeRow: any, fetchedAt: string): ScopeRate {
-  const scopeId = String(scopeRow.scope_id ?? scopeRow.scopeId ?? scopeRow.id ?? '');
-  const rules = mapApiRowToTariffRules(scopeRow);
+/** Map one cloud policy row (snake_case API fields) to a local RatePolicy. */
+function mapApiRowToRatePolicy(policyRow: any, fetchedAt: string): RatePolicy {
+  const policyId = String(policyRow.policy_id ?? policyRow.policyId ?? policyRow.id ?? '');
+  const rules = mapApiRowToTariffRules(policyRow);
 
   // The /rate-policies endpoint doesn't send the legacy flat mirrors
-  // (first_block_cents …) — those are computed on /scopes from the effective
-  // rule. Mirror that here from the highest-priority active rule so the Scopes
+  // (first_block_cents …) — those are computed on /policies from the effective
+  // rule. Mirror that here from the highest-priority active rule so the Parking Policies
   // overview shows a real headline rate instead of RM 0.00 + a false "zero
   // rate" warning. Fee math itself always reads rules[] per-moment, so these
   // three fields are display-only.
@@ -86,75 +86,73 @@ function mapApiRowToScope(scopeRow: any, fetchedAt: string): ScopeRate {
     .sort((a, b) => b.priority - a.priority)[0];
 
   return {
-    scopeId,
-    scopeName: String(scopeRow.scope_name ?? scopeRow.scopeName ?? scopeRow.name ?? scopeId),
-    freeMinutes: Number(scopeRow.grace_minutes ?? scopeRow.free_minutes ?? scopeRow.freeMinutes ?? 0),
-    firstBlockCents: Number(scopeRow.first_block_cents ?? scopeRow.firstBlockCents ?? topRule?.firstBlockAmountCents ?? 0),
-    perBlockCents: Number(scopeRow.per_block_cents ?? scopeRow.perBlockCents ?? topRule?.subsequentBlockAmountCents ?? topRule?.firstBlockAmountCents ?? 0),
-    blockMinutes: Number(scopeRow.block_minutes ?? scopeRow.blockMinutes ?? topRule?.subsequentBlockMinutes ?? topRule?.firstBlockMinutes ?? 60),
-    dailyCapCents: Number(scopeRow.daily_cap_cents ?? scopeRow.dailyCapCents ?? 0),
-    currency: String(scopeRow.currency ?? 'MYR'),
+    policyId,
+    policyName: String(policyRow.policy_name ?? policyRow.policyName ?? policyRow.name ?? policyId),
+    freeMinutes: Number(policyRow.grace_minutes ?? policyRow.free_minutes ?? policyRow.freeMinutes ?? 0),
+    firstBlockCents: Number(policyRow.first_block_cents ?? policyRow.firstBlockCents ?? topRule?.firstBlockAmountCents ?? 0),
+    perBlockCents: Number(policyRow.per_block_cents ?? policyRow.perBlockCents ?? topRule?.subsequentBlockAmountCents ?? topRule?.firstBlockAmountCents ?? 0),
+    blockMinutes: Number(policyRow.block_minutes ?? policyRow.blockMinutes ?? topRule?.subsequentBlockMinutes ?? topRule?.firstBlockMinutes ?? 60),
+    dailyCapCents: Number(policyRow.daily_cap_cents ?? policyRow.dailyCapCents ?? 0),
+    currency: String(policyRow.currency ?? 'MYR'),
     fetchedAt,
     rules,
-    // /rate-policies sends id/name/description (not policy_*). Fall back to them.
-    policyId: scopeRow.policy_id ?? scopeRow.id ?? null,
-    policyName: scopeRow.policy_name ?? scopeRow.name ?? null,
-    policyDescription: scopeRow.policy_description ?? scopeRow.description ?? null,
-    isSiteDefault: !!scopeRow.is_site_default,
-    graceExceededBehavior: scopeRow.grace_exceeded_behavior ?? null,
-    cutoffEnabled: !!scopeRow.cutoff_enabled,
-    cutoffTime: scopeRow.cutoff_time ?? null,
-    cutoffBehavior: scopeRow.cutoff_behavior ?? null,
-    newDayFixedFeeCents: scopeRow.new_day_fixed_fee_cents != null
-      ? Number(scopeRow.new_day_fixed_fee_cents)
+    // /rate-policies sends description (policyId/policyName are folded into the
+    // canonical fields above, which already fall back to id/name).
+    policyDescription: policyRow.policy_description ?? policyRow.description ?? null,
+    isSiteDefault: !!policyRow.is_site_default,
+    graceExceededBehavior: policyRow.grace_exceeded_behavior ?? null,
+    cutoffEnabled: !!policyRow.cutoff_enabled,
+    cutoffTime: policyRow.cutoff_time ?? null,
+    cutoffBehavior: policyRow.cutoff_behavior ?? null,
+    newDayFixedFeeCents: policyRow.new_day_fixed_fee_cents != null
+      ? Number(policyRow.new_day_fixed_fee_cents)
       : null,
-    rateBasis: (scopeRow.rate_basis ?? scopeRow.rateBasis ?? null) as any,
-    flatMultiRate: (scopeRow.flat_multi_rate ?? scopeRow.flatMultiRate ?? null) as any,
-    firstBlockOncePerEntry: !!(scopeRow.first_block_once_per_entry ?? scopeRow.firstBlockOncePerEntry ?? false),
+    rateBasis: (policyRow.rate_basis ?? policyRow.rateBasis ?? null) as any,
+    flatMultiRate: (policyRow.flat_multi_rate ?? policyRow.flatMultiRate ?? null) as any,
+    firstBlockOncePerEntry: !!(policyRow.first_block_once_per_entry ?? policyRow.firstBlockOncePerEntry ?? false),
     // /rate-policies sends the true policy cap as `daily_cap_cents` (not
     // policy_daily_cap_cents). Without this fallback the fee engine reads null
     // and leaves daily capping silently OFF.
-    policyDailyCapCents: (scopeRow.policy_daily_cap_cents ?? scopeRow.policyDailyCapCents ?? scopeRow.daily_cap_cents) != null
-      ? Number(scopeRow.policy_daily_cap_cents ?? scopeRow.policyDailyCapCents ?? scopeRow.daily_cap_cents)
+    policyDailyCapCents: (policyRow.policy_daily_cap_cents ?? policyRow.policyDailyCapCents ?? policyRow.daily_cap_cents) != null
+      ? Number(policyRow.policy_daily_cap_cents ?? policyRow.policyDailyCapCents ?? policyRow.daily_cap_cents)
       : null,
   };
 }
 
-// ─── pull sync: scopes / passes / spaces ─────────────────────────────────────
+// ─── pull sync: policies / passes / spaces ─────────────────────────────────────
 
-/** Pull scope+rate config from the cloud and upsert into the local cache. */
-export async function syncScopes(): Promise<SyncResult> {
+/** Pull policy+rate config from the cloud and upsert into the local cache. */
+export async function syncRatePolicies(): Promise<SyncResult> {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
     const { data: responseBody } = await cloud.get<CloudListBody>('/rate-policies');
-    const scopeRows = responseBody.data ?? [];
+    const ratePoliciesRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
-    const scopes = scopeRows
-      .map((scopeRow: any) => mapApiRowToScope(scopeRow, fetchedAt))
-      .filter((scope: ScopeRate) => !!scope.scopeId);
+    const ratePolicies = ratePoliciesRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt))
+      .filter((policy: RatePolicy) => !!policy.policyId);
 
     // /rate-policies doesn't send is_site_default. The backend returns policies
     // ordered by name and treats the FIRST as the site default — the plan a lane
-    // falls back to when it has no scope of its own. Mirror that here: without a
-    // default, getSiteDefaultScope() returns null and unassigned lanes stop
+    // falls back to when it has no policy of its own. Mirror that here: without a
+    // default, getSiteDefaultRatePolicy() returns null and unassigned lanes stop
     // charging. (Respects the flag if a future payload ever carries it.)
-    if (scopes.length && !scopes.some((scope) => scope.isSiteDefault)) {
-      scopes[0].isSiteDefault = true;
+    if (ratePolicies.length && !ratePolicies.some((policy) => policy.isSiteDefault)) {
+      ratePolicies[0].isSiteDefault = true;
     }
 
     let savedCount = 0;
-    for (const scope of scopes) {
-      upsertScope(scope);
+    for (const ratePolicy of ratePolicies) {
+      upsertRatePolicy(ratePolicy);
       savedCount++;
     }
 
-    // Drop local scopes the cloud no longer returns.
+    // Drop local policies the cloud no longer returns.
     try {
-      const cloudScopeIds = scopeRows.map((scopeRow: any) => String(scopeRow.scope_id ?? scopeRow.scopeId ?? scopeRow.id ?? ''))
+      const cloudPolicyIds = ratePoliciesRows.map((policyRow: any) => String(policyRow.policy_id ?? policyRow.policyId ?? policyRow.id ?? ''))
         .filter(Boolean);
-      pruneStaleScopes(cloudScopeIds);
+      pruneStaleRatePolicies(cloudPolicyIds);
     } catch { /* pruning is best-effort; sync loop retries next tick */ }
 
     return { ok: true, fetched: savedCount };
@@ -168,7 +166,7 @@ export async function syncScopes(): Promise<SyncResult> {
 }
 
 /**
- * Pull the active pass roster for each cached scope. The gate uses this
+ * Pull the active pass roster for each cached policy. The gate uses this
  * to skip charging plates that have a paid / VIP / corporate / staff pass.
  * An empty roster is a legitimate result (no active passes), not a failure.
  */
@@ -180,16 +178,16 @@ export async function syncPasses(): Promise<SyncResult> {
     const passRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
-    // Group passes by scope so we can do a single replace-all per scope.
-    const passesByScopeId = new Map<string, ActivePass[]>();
+    // Group passes by policy so we can do a single replace-all per policy.
+    const passesByPolicyId = new Map<string, ActivePass[]>();
     for (const passRow of passRows) {
-      const scopeId = String(passRow.site_id ?? passRow.scope_id ?? '');
+      const policyId = String(passRow.site_id ?? passRow.policy_id ?? '');
       const plateNumber = String(passRow.plate_number ?? '');
-      if (!scopeId || !plateNumber) continue;
+      if (!policyId || !plateNumber) continue;
 
       const pass: ActivePass = {
         passId: String(passRow.pass_id ?? passRow.id ?? ''),
-        scopeId,
+        policyId,
         plateNumber,
         passType: String(passRow.pass_type ?? 'monthly'),
         status: String(passRow.status ?? 'active'),
@@ -199,14 +197,14 @@ export async function syncPasses(): Promise<SyncResult> {
         spaceNumber: passRow.space_number ?? null,
         fetchedAt,
       };
-      if (!passesByScopeId.has(scopeId)) passesByScopeId.set(scopeId, []);
-      passesByScopeId.get(scopeId)!.push(pass);
+      if (!passesByPolicyId.has(policyId)) passesByPolicyId.set(policyId, []);
+      passesByPolicyId.get(policyId)!.push(pass);
     }
 
-    // Refresh every scope we know about — including scopes that returned
+    // Refresh every policy we know about — including policies that returned
     // zero passes (so a revoked pass actually disappears from local cache).
-    for (const scope of listScopes()) {
-      replaceActivePassesForScope(scope.scopeId, passesByScopeId.get(scope.scopeId) ?? []);
+    for (const policy of listRatePolicies()) {
+      replaceActivePassesForRatePolicy(policy.policyId, passesByPolicyId.get(policy.policyId) ?? []);
     }
     return { ok: true, fetched: passRows.length };
   } catch (error) {
@@ -302,18 +300,18 @@ export async function syncSpaces(): Promise<SyncResult> {
 
 /** Run all three pulls in parallel; one failing doesn't block the others. */
 export async function syncAll(): Promise<{
-  scopes: SyncResult;
+  policies: SyncResult;
   passes: SyncResult;
   spaces: SyncResult;
   site: SyncResult;
 }> {
-  const [scopes, passes, spaces, site] = await Promise.all([
-    syncScopes().catch(toFailedSyncResult),
+  const [policies, passes, spaces, site] = await Promise.all([
+    syncRatePolicies().catch(toFailedSyncResult),
     syncPasses().catch(toFailedSyncResult),
     syncSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
   ]);
-  return { scopes, passes, spaces, site };
+  return { policies, passes, spaces, site };
 }
 
 export async function handleDebug(): Promise<any> {
@@ -327,7 +325,7 @@ let backgroundSyncTimer: NodeJS.Timeout | null = null;
 /** Run every pull, swallowing errors — the timer retries next tick. */
 function runFullSyncQuietly(): void {
   syncSite().catch(() => null);
-  syncScopes().catch(() => null);
+  syncRatePolicies().catch(() => null);
   syncPasses().catch(() => null);
   syncSpaces().catch(() => null);
 }
@@ -418,8 +416,8 @@ async function pollGateCommands(): Promise<void> {
   } catch { /* poll failure is transient — retry on next tick */ }
 }
 
-/** Start the 20s gate-open command poller. Runs alongside the main scope/pass
- *  sync but on its own timer so a slow scope pull doesn't block gate opens. */
+/** Start the 20s gate-open command poller. Runs alongside the main policy/pass
+ *  sync but on its own timer so a slow policy pull doesn't block gate opens. */
 export function startGatePoll(intervalMs = 20_000): void {
   stopGatePoll();
   gateCommandPollTimer = setInterval(() => { void pollGateCommands(); }, intervalMs);
@@ -436,11 +434,11 @@ export function stopGatePoll(): void {
 // ─── push: rate edits up to the SaaS ─────────────────────────────────────────
 
 /**
- * Push a rate edit up to the qparking SaaS (PUT /scopes/rate). On success
- * we immediately re-pull the scopes so the cached row reflects whatever
+ * Push a rate edit up to the qparking SaaS (PUT /policies/rate). On success
+ * we immediately re-pull the policies so the cached row reflects whatever
  * the SaaS canonicalised (and the rest of the app sees the new fee math).
  */
-export async function pushScopeRate(rateInput: {
+export async function pushRatePolicy(rateInput: {
   firstBlockCents: number;
   perBlockCents: number;
   blockMinutes: number;
@@ -450,7 +448,7 @@ export async function pushScopeRate(rateInput: {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
-    await cloud.put('/scopes/rate', {
+    await cloud.put('/policies/rate', {
       first_block_cents: rateInput.firstBlockCents,
       per_block_cents: rateInput.perBlockCents,
       block_minutes: rateInput.blockMinutes,
@@ -458,7 +456,7 @@ export async function pushScopeRate(rateInput: {
       daily_cap_cents: rateInput.dailyCapCents,
     });
     // Re-pull so the local cache reflects whatever the SaaS canonicalised.
-    return await syncScopes();
+    return await syncRatePolicies();
   } catch (error) {
     return toFailedSyncResult(error);
   }
