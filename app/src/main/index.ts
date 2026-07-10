@@ -60,13 +60,20 @@ function migrateUserData() {
 
     fs.mkdirSync(newDir, { recursive: true });
     for (const src of sources) {
-      for (const f of ['qparking-local.db', 'qparking-local.db-shm', 'qparking-local.db-wal']) {
-        const from = path.join(src, f);
-        const to = path.join(newDir, f);
-        if (fs.existsSync(from) && !fs.existsSync(to)) {
-          fs.copyFileSync(from, to);
-          console.log(`[boot] migrated ${f} from ${src} → ${newDir}`);
-        }
+      // Copy ONLY the .db — never the -wal/-shm sidecars. Those journal files
+      // are meaningful only when paired with the exact .db they were written
+      // from; copying them across databases (or independently of the .db)
+      // replays foreign schema pages on open and corrupts the target with
+      // "malformed database schema … invalid rootpage". SQLite recreates a
+      // fresh -wal/-shm on first open, so the .db alone is sufficient. Any
+      // un-checkpointed data in the source WAL is intentionally left behind —
+      // a lossless seed would require checkpointing the source first, which
+      // isn't worth it for this one-shot dev convenience copy.
+      const from = path.join(src, 'qparking-local.db');
+      const to = path.join(newDir, 'qparking-local.db');
+      if (fs.existsSync(from) && !fs.existsSync(to)) {
+        fs.copyFileSync(from, to);
+        console.log(`[boot] migrated qparking-local.db from ${src} → ${newDir}`);
       }
     }
   } catch (e: any) {
