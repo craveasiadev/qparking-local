@@ -25,7 +25,7 @@ import { app } from 'electron';
 import type { ParkingLane, PaymentTerminal, RatePolicy, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
-  listLanes, listCameras, recordExit, findActivePassByPlate, getSessionById,
+  listLanes, listCameras, recordExit, findSeasonPassByPlate, getSessionById,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
 import { getTerminalInstance } from './ecpi-terminal';
@@ -193,9 +193,9 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // record the exit so the audit row exists.
   // Season passes are site-scoped (one site per install), so look the plate up
   // directly — no policy dimension.
-  const activePass = findActivePassByPlate(event.plate);
-  if (activePass) {
-    flog(`PASS MATCH: plate=${event.plate} pass=${activePass.passType} id=${activePass.passId} → free exit (skip terminal)`);
+  const seasonPass = findSeasonPassByPlate(event.plate);
+  if (seasonPass) {
+    flog(`PASS MATCH: plate=${event.plate} pass=${seasonPass.passType} id=${seasonPass.passId} → free exit (skip terminal)`);
     recordExit(session.id, {
       exitAt: new Date(exitMs).toISOString(),
       exitLaneId: lane.id,
@@ -211,8 +211,8 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     parkingEvents.emit('exit-completed', {
       sessionId: session.id,
       outcome: 'free',
-      reason: `pass-${activePass.passType}`,
-      passId: activePass.passId,
+      reason: `pass-${seasonPass.passType}`,
+      passId: seasonPass.passId,
     });
     return;
   }

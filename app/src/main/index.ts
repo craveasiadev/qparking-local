@@ -89,7 +89,7 @@ import {
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
-  listParkingSpaces, listActivePasses,
+  listParkingSpaces, listSeasonPasses,
   getCurrentSite,
 } from './services/db';
 import { computeFee, retriggerSessionExit, simulateRatePolicyFee, simulateLaneEvent } from './services/parking-flow';
@@ -673,7 +673,7 @@ ipcMain.handle('policies:sync', () => syncRatePolicies());
 // background sync also refreshes these on its 60s timer.
 ipcMain.handle('spaces:list', () => listParkingSpaces());
 ipcMain.handle('spaces:sync', () => syncSpaces());
-ipcMain.handle('passes:list', () => listActivePasses());
+ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('policies:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;

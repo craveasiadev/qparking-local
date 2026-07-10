@@ -12,7 +12,7 @@
 export * from './db-models';
 
 import type {
-  ActivePass,
+  SeasonPass,
   AppSettings,
   LprCamera,
   ParkingLane,
@@ -169,7 +169,7 @@ export interface BridgeApi {
   syncSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** Read every active pass cached from the cloud. Already populated by the
    *  periodic syncSeasonPasses(); this just lets the UI display them. */
-  listActivePasses(): Promise<ActivePass[]>;
+  listSeasonPasses(): Promise<SeasonPass[]>;
 
   // Rate policies
   listRatePolicies(): Promise<RatePolicy[]>;

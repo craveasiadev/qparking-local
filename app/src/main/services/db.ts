@@ -9,7 +9,7 @@ import path from 'node:path';
 import { app } from 'electron';
 import Database from 'better-sqlite3';
 import type {
-  ActivePass,
+  SeasonPass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule,
   ParkingSpace, Site, SyncOp, SyncQueueRow,
 } from '../../shared/types';
@@ -23,6 +23,7 @@ export function getDb(): Database.Database {
   db.pragma('journal_mode = WAL'); // concurrent reads while writing
   db.pragma('foreign_keys = OFF');
   migrateScopesToRatePolicies(db);
+  migrateActivePassesToSeasonPasses(db);
   applySchema(db);
   return db;
 }
@@ -59,6 +60,27 @@ function migrateScopesToRatePolicies(db: Database.Database): void {
   }
   // Legacy index name — applySchema recreates it as idx_tariff_rules_policy.
   try { db.exec('DROP INDEX IF EXISTS idx_tariff_rules_scope'); } catch { /* ignore */ }
+}
+
+/**
+ * 2026-07-11 rename: `active_passes` → `season_passes`, aligning the local
+ * table with the cloud's SeasonPass model it has always mirrored. Also folds
+ * in the earlier site-scoping cleanup (drop the vestigial `policy_id` column
+ * and the index that referenced it) so both run while the table still has its
+ * old name, THEN renames. Runs BEFORE applySchema so the RENAME isn't blocked
+ * by a freshly-created empty `season_passes`. Order is load-bearing: the index
+ * must be dropped before the column it depends on, and the column before the
+ * table rename. Every step is guarded — a fresh install (no `active_passes`)
+ * and an already-migrated install (`season_passes` present) both no-op.
+ */
+function migrateActivePassesToSeasonPasses(db: Database.Database): void {
+  // Legacy site-scoping cleanup: the vestigial policy_id FK and its index.
+  // Index first — SQLite refuses to drop a column an index still depends on.
+  try { db.exec('DROP INDEX IF EXISTS idx_passes_lookup'); } catch { /* absent */ }
+  try { db.exec('ALTER TABLE active_passes DROP COLUMN policy_id'); } catch { /* column absent, old SQLite, or already renamed */ }
+  // The rename itself. Indexes and the composite PK follow automatically
+  // (SQLite ≥ 3.25 rewrites schema references on RENAME TO).
+  try { db.exec('ALTER TABLE active_passes RENAME TO season_passes'); } catch { /* already renamed or table absent */ }
 }
 
 function applySchema(db: Database.Database) {
@@ -169,11 +191,12 @@ function applySchema(db: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_tariff_rules_policy ON tariff_rules (policy_id);
 
-    -- Active season/visitor/free-access passes pulled down from qparking SaaS.
-    -- Indexed by (policy_id, plate_number) for the gate's "is this plate
-    -- already paid?" check at exit time. The same plate can have multiple
-    -- rows (e.g. visitor + corporate); the gate uses the lowest-cost match.
-    CREATE TABLE IF NOT EXISTS active_passes (
+    -- Season / visitor / free-access passes mirrored from qparking SaaS (the
+    -- cloud SeasonPass model). Site-scoped — one site per install — so the gate
+    -- looks a plate up directly. A plate can ride on more than one pass (e.g. a
+    -- personal + a corporate entitlement), hence the composite PK on
+    -- (pass_id, plate_number); the gate prefers the free / longest-coverage row.
+    CREATE TABLE IF NOT EXISTS season_passes (
       pass_id TEXT NOT NULL,
       plate_number TEXT NOT NULL,
       pass_type TEXT NOT NULL,
@@ -185,9 +208,8 @@ function applySchema(db: Database.Database) {
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (pass_id, plate_number)
     );
-    -- Season passes are site-scoped (one site per install); the gate looks them
-    -- up purely by plate, so the index is on plate_number alone.
-    CREATE INDEX IF NOT EXISTS idx_passes_plate ON active_passes (plate_number);
+    -- Gate lookup is by plate alone (passes are already site-scoped).
+    CREATE INDEX IF NOT EXISTS idx_passes_plate ON season_passes (plate_number);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -320,12 +342,6 @@ function applySchema(db: Database.Database) {
   ]) {
     try { db.exec(`ALTER TABLE sites DROP COLUMN ${col}`); } catch { /* column absent or old SQLite */ }
   }
-
-  // Season passes are site-scoped, not per-policy — drop the vestigial
-  // policy_id FK on active_passes. The index that references it MUST be dropped
-  // first (SQLite refuses to drop a column an index still depends on).
-  try { db.exec('DROP INDEX IF EXISTS idx_passes_lookup'); } catch { /* absent */ }
-  try { db.exec('ALTER TABLE active_passes DROP COLUMN policy_id'); } catch { /* column absent or old SQLite */ }
 
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
@@ -1132,7 +1148,7 @@ export function pruneStaleRatePolicies(keepIds: string[]): number {
 // inbound plate here BEFORE driving the terminal — a match means "already
 // paid, just open the gate".
 
-function rowToActivePass(row: any): ActivePass {
+function rowToSeasonPass(row: any): SeasonPass {
   return {
     passId: row.pass_id, plateNumber: row.plate_number,
     passType: row.pass_type, status: row.status,
@@ -1146,24 +1162,24 @@ function rowToActivePass(row: any): ActivePass {
  *  site per install), so the lookup is purely by plate. Returns the
  *  longest-coverage pass first so a plate with a free_access + corporate match
  *  prefers the broader entitlement. */
-export function findActivePassByPlate(plate: string): ActivePass | null {
+export function findSeasonPassByPlate(plate: string): SeasonPass | null {
   const normalisedPlate = plate.toUpperCase().replace(/\s+/g, '');
   const row = getDb().prepare(`
-    SELECT * FROM active_passes
+    SELECT * FROM season_passes
     WHERE plate_number = ? AND status = 'active'
     ORDER BY is_free DESC, end_date DESC
     LIMIT 1
   `).get(normalisedPlate) as any;
-  return row ? rowToActivePass(row) : null;
+  return row ? rowToSeasonPass(row) : null;
 }
 
 /**
  * Every active pass the gate currently recognises (cached from
  * `/api/v1/local-server/passes`). Backs the Passes page.
  */
-export function listActivePasses(): ActivePass[] {
-  const rows = getDb().prepare('SELECT * FROM active_passes ORDER BY plate_number').all() as any[];
-  return rows.map(rowToActivePass);
+export function listSeasonPasses(): SeasonPass[] {
+  const rows = getDb().prepare('SELECT * FROM season_passes ORDER BY plate_number').all() as any[];
+  return rows.map(rowToSeasonPass);
 }
 
 // ─── parking spaces (mirror) ───────────────────────────────────────────────
@@ -1218,11 +1234,11 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
  * truth — a pass that disappeared from the cloud (revoked, expired, holder
  * unenrolled) must vanish from the local cache on the very next sync.
  */
-export function replaceAllActivePasses(passes: ActivePass[]): void {
+export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
   const db = getDb();
   const tx = db.transaction(() => {
-    db.prepare('DELETE FROM active_passes').run();
-    const insert = db.prepare(`INSERT INTO active_passes (
+    db.prepare('DELETE FROM season_passes').run();
+    const insert = db.prepare(`INSERT INTO season_passes (
         pass_id, plate_number, pass_type, status,
         start_date, end_date, is_free, space_number, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);

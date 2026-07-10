@@ -11,7 +11,7 @@
  *   ParkingSession   → sessions
  *   TariffRule       → tariff_rules
  *   RatePolicy        → rate_policies
- *   ActivePass       → active_passes
+ *   SeasonPass       → season_passes
  *   ParkingSpace     → parking_spaces
  *   Site             → sites
  *   SyncQueueRow     → sync_queue
@@ -233,11 +233,11 @@ export interface RatePolicy {
   isSiteDefault?: boolean;
 }
 
-// ─── active_passes ───────────────────────────────────────────────────────────
+// ─── season_passes ───────────────────────────────────────────────────────────
 
 /** A plate-keyed pass cached from qparking SaaS so the gate can decide
  *  "skip charging this car, it's already paid" without a WAN round-trip. */
-export interface ActivePass {
+export interface SeasonPass {
   passId: string;
   plateNumber: string;
   passType: string;

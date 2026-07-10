@@ -18,12 +18,12 @@
 import {
   upsertRatePolicy,
   upsertSite,
-  replaceAllActivePasses,
+  replaceAllSeasonPasses,
   replaceParkingSpaces,
   pruneStaleRatePolicies,
 } from './db';
 import { getCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
-import type { RatePolicy, TariffRule, ActivePass, ParkingSpace, Site } from '../../shared/types';
+import type { RatePolicy, TariffRule, SeasonPass, ParkingSpace, Site } from '../../shared/types';
 
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
@@ -152,7 +152,7 @@ export async function syncRatePolicies(): Promise<SyncResult> {
   }
 }
 
-function mapApiRowToSeasonPass(seasonPassRow: any, fetchedAt: string): ActivePass {
+function mapApiRowToSeasonPass(seasonPassRow: any, fetchedAt: string): SeasonPass {
 
   return {
       passId: seasonPassRow.pass_id,
@@ -183,7 +183,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
     const fetchedAt = new Date().toISOString();
 
     const seasonPasses = seasonPassRows.filter((seasonPassRow: any) => seasonPassRow.plate_number).map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
-    replaceAllActivePasses(seasonPasses);
+    replaceAllSeasonPasses(seasonPasses);
     return { ok: true, fetched: seasonPasses.length };
   } catch (error) {
     // 404 means an older qparking SaaS without the endpoint — gracefully no-op.

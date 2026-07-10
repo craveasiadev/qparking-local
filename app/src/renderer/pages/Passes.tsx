@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud } from 'lucide-react';
-import type { ActivePass } from '@shared/types';
+import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 /**
@@ -12,12 +12,12 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
  * refresh here.
  */
 export function Passes() {
-  const [passes, setPasses] = useState<ActivePass[]>([]);
+  const [passes, setPasses] = useState<SeasonPass[]>([]);
   const [filter, setFilter] = useState<'all' | 'free' | 'paid' | 'expiring'>('all');
   const [search, setSearch] = useState('');
 
   const [load, loading] = useAsyncAction(async () => {
-    setPasses(await window.bridge.listActivePasses());
+    setPasses(await window.bridge.listSeasonPasses());
   });
 
   useEffect(() => { void load(); }, []);
