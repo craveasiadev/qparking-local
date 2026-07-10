@@ -178,7 +178,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
-    const { data: responseBody } = await cloud.get<CloudListBody>('/passes');
+    const { data: responseBody } = await cloud.get<CloudListBody>('/season-passes');
     const seasonPassRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 

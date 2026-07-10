@@ -4,14 +4,14 @@ import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 /**
- * Active passes view — every plate the gate currently honours without
+ * Season passes view — every plate the gate currently honours without
  * driving the payment terminal. Includes season passes (monthly /
  * quarterly / yearly), corporate fleet, staff, VIP, and free-access
  * permits. The list is cached locally from `/api/v1/local-server/passes`
  * (refreshed by the periodic sync); the operator can also force a
  * refresh here.
  */
-export function Passes() {
+export function SeasonPasses() {
   const [passes, setPasses] = useState<SeasonPass[]>([]);
   const [filter, setFilter] = useState<'all' | 'free' | 'paid' | 'expiring'>('all');
   const [search, setSearch] = useState('');
@@ -50,7 +50,7 @@ export function Passes() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Ticket size={22} /> Passes
+            <Ticket size={22} /> Season Passes
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every plate the gate opens for without charging. Cached from the cloud.
@@ -72,10 +72,11 @@ export function Passes() {
         <div className="text-xs text-blue-900 leading-relaxed">
           <p className="font-bold uppercase tracking-wide text-[10px]">Managed in cloud</p>
           <p className="mt-1">
-            Passes are created by customers in the qparking cloud portal
-            (Profile → My vehicles + Passes → Apply) and approved by
-            operators. This local view refreshes every few minutes so the
-            LPR gate always sees the latest roster.
+            Season passes are created by customers in the qparking cloud portal
+            (the Passes tab → "Apply for a new pass", after adding a vehicle
+            under Profile → My vehicles) and approved by operators. This local
+            view refreshes every few minutes so the LPR gate always sees the
+            latest roster.
           </p>
         </div>
       </div>

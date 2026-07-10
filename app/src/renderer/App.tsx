@@ -13,13 +13,13 @@ import { Sessions } from './pages/Sessions';
 import { Sites } from './pages/Sites';
 import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
-import { Passes } from './pages/Passes';
+import { SeasonPasses } from './pages/SeasonPasses';
 import { Spaces } from './pages/Spaces';
 
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
   // Parking Management
-  | 'spaces' | 'passes'
+  | 'spaces' | 'season-passes'
   // Pricing & Tariffs
   | 'policies'
   // System
@@ -48,7 +48,7 @@ const SECTIONS: NavSection[] = [
     key: 'mgmt', label: 'Parking management',
     items: [
       { id: 'spaces', label: 'Space management', icon: Grid3x3 },
-      { id: 'passes', label: 'Passes', icon: Ticket },
+      { id: 'season-passes', label: 'Season Passes', icon: Ticket },
     ],
   },
   {
@@ -205,7 +205,7 @@ export function App() {
           {page === 'lanes' && <Lanes />}
           {page === 'sessions' && <Sessions devMode={devMode} />}
           {page === 'spaces' && <Spaces />}
-          {page === 'passes' && <Passes />}
+          {page === 'season-passes' && <SeasonPasses />}
           {page === 'policies' && <ParkingPolicies />}
           {page === 'sites' && <Sites />}
           {page === 'settings' && <Settings />}
