@@ -92,8 +92,8 @@ const api: BridgeApi = {
   syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
 
   // Mirrored config from qparking SaaS (read-only locally)
-  listSpaces: () => ipcRenderer.invoke('spaces:list'),
-  syncSpacesNow: () => ipcRenderer.invoke('spaces:sync'),
+  listParkingSpaces: () => ipcRenderer.invoke('parking-spaces:list'),
+  syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
   saveRatePolicy: (input: {
     firstBlockCents: number; perBlockCents: number;

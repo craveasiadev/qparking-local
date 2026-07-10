@@ -99,7 +99,7 @@ import {
 import { startLprServer, lprEvents, simulatePlate, getLatestFrame } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
-  startBackgroundSync, syncRatePolicies, pushRatePolicy, syncSpaces,
+  startBackgroundSync, syncRatePolicies, pushRatePolicy, syncParkingSpaces,
   startGatePoll, setGateOpenHandler,
   syncAll, syncSite,
   handleDebug,
@@ -671,8 +671,8 @@ ipcMain.handle('policies:sync', () => syncRatePolicies());
 // Mirrored config from qparking SaaS — read-only locally. Sync handlers
 // each force a fresh pull from the cloud + return the new count. The
 // background sync also refreshes these on its 60s timer.
-ipcMain.handle('spaces:list', () => listParkingSpaces());
-ipcMain.handle('spaces:sync', () => syncSpaces());
+ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
+ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('policies:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;

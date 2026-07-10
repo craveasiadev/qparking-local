@@ -123,12 +123,12 @@ export async function syncRatePolicies(): Promise<SyncResult> {
   if (!cloud) return NOT_CONFIGURED;
   try {
     const { data: responseBody } = await cloud.get<CloudListBody>('/rate-policies');
-    const ratePoliciesRows = responseBody.data ?? [];
+    const ratePolicyRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
     // The backend flags one policy as is_site_default (RatePolicyController
     // marks the first by name), so isSiteDefault comes straight from the payload.
-    const ratePolicies = ratePoliciesRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt));
+    const ratePolicies = ratePolicyRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt));
 
     let savedCount = 0;
     for (const ratePolicy of ratePolicies) {
@@ -138,7 +138,7 @@ export async function syncRatePolicies(): Promise<SyncResult> {
 
     // Drop local policies the cloud no longer returns.
     try {
-      const cloudPolicyIds = ratePoliciesRows.map((policyRow: any) => policyRow.id);
+      const cloudPolicyIds = ratePolicyRows.map((policyRow: any) => policyRow.id);
       pruneStaleRatePolicies(cloudPolicyIds);
     } catch { /* pruning is best-effort; sync loop retries next tick */ }
 
@@ -235,40 +235,44 @@ export async function syncSite(): Promise<SyncResult> {
   }
 }
 
+function mapApiRowToParkingSpace(parkingSpaceRow: any, fetchedAt: string): ParkingSpace {
+
+  return {
+       id: parkingSpaceRow.id,
+        building: parkingSpaceRow.building ?? null,
+        level: parkingSpaceRow.level ?? null,
+        zone: parkingSpaceRow.zone ?? null,
+        spaceNumber: parkingSpaceRow.space_number ?? null,
+        spaceCode: parkingSpaceRow.space_code ?? null,
+        status: parkingSpaceRow.status,
+        customerName: parkingSpaceRow.customer_name ?? null,
+        vehiclePlate: parkingSpaceRow.vehicle_plate ?? null,
+        passType: parkingSpaceRow.pass_type ?? null,
+        passId: parkingSpaceRow.pass_id ?? null,
+        startDate: parkingSpaceRow.start_date ?? null,
+        endDate: parkingSpaceRow.end_date ?? null,
+        notes: parkingSpaceRow.notes ?? null,
+        fetchedAt,
+  };
+}
+
 /**
  * Pull the canonical parking-space inventory from the cloud. Read-only
  * mirror — the operator manages spaces in qparking SaaS, the on-prem app
  * just reflects them for visibility.
  */
-export async function syncSpaces(): Promise<SyncResult> {
+export async function syncParkingSpaces(): Promise<SyncResult> {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
-    const { data: responseBody } = await cloud.get<CloudListBody>('/spaces');
+    const { data: responseBody } = await cloud.get<CloudListBody>('/parking-spaces');
+    const parkingparkingSpaceRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
-    const spaces: ParkingSpace[] = (responseBody.data ?? [])
-      .map((spaceRow: any): ParkingSpace => ({
-        id: String(spaceRow.id ?? ''),
-        building: spaceRow.building ?? null,
-        level: spaceRow.level ?? null,
-        zone: spaceRow.zone ?? null,
-        spaceNumber: spaceRow.space_number ?? null,
-        spaceCode: spaceRow.space_code ?? null,
-        status: String(spaceRow.status ?? 'available'),
-        customerName: spaceRow.customer_name ?? null,
-        vehiclePlate: spaceRow.vehicle_plate ?? null,
-        passType: spaceRow.pass_type ?? null,
-        passId: spaceRow.pass_id ?? null,
-        startDate: spaceRow.start_date ?? null,
-        endDate: spaceRow.end_date ?? null,
-        notes: spaceRow.notes ?? null,
-        fetchedAt,
-      }))
-      .filter((space) => !!space.id);
+    const parkingSpaces = parkingparkingSpaceRows.map((parkingparkingSpaceRow: any) => mapApiRowToParkingSpace(parkingparkingSpaceRow, fetchedAt));
 
-    replaceParkingSpaces(spaces);
-    return { ok: true, fetched: spaces.length };
+    replaceParkingSpaces(parkingSpaces);
+    return { ok: true, fetched: parkingSpaces.length };
   } catch (error) {
     // 404 means an older qparking SaaS without the endpoint — gracefully no-op.
     if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
@@ -286,7 +290,7 @@ export async function syncAll(): Promise<{
   const [policies, passes, spaces, site] = await Promise.all([
     syncRatePolicies().catch(toFailedSyncResult),
     syncSeasonPasses().catch(toFailedSyncResult),
-    syncSpaces().catch(toFailedSyncResult),
+    syncParkingSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
   ]);
   return { policies, passes, spaces, site };
@@ -305,7 +309,7 @@ function runFullSyncQuietly(): void {
   syncSite().catch(() => null);
   syncRatePolicies().catch(() => null);
   syncSeasonPasses().catch(() => null);
-  syncSpaces().catch(() => null);
+  syncParkingSpaces().catch(() => null);
 }
 
 /**

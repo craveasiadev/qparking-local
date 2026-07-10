@@ -1209,7 +1209,7 @@ export function listParkingSpaces(): ParkingSpace[] {
 }
 
 /** Replace the entire cached space inventory in one transaction. */
-export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
+export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
   const db = getDb();
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM parking_spaces').run();
@@ -1218,11 +1218,11 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
         customer_name, vehicle_plate, pass_type, pass_id,
         start_date, end_date, notes, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const space of spaces) {
+    for (const parkingSpace of parkingSpaces) {
       insert.run(
-        space.id, space.building, space.level, space.zone, space.spaceNumber, space.spaceCode, space.status,
-        space.customerName, space.vehiclePlate, space.passType, space.passId,
-        space.startDate, space.endDate, space.notes,
+        parkingSpace.id, parkingSpace.building, parkingSpace.level, parkingSpace.zone, parkingSpace.spaceNumber, parkingSpace.spaceCode, parkingSpace.status,
+        parkingSpace.customerName, parkingSpace.vehiclePlate, parkingSpace.passType, parkingSpace.passId,
+        parkingSpace.startDate, parkingSpace.endDate, parkingSpace.notes,
       );
     }
   });

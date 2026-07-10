@@ -165,8 +165,8 @@ export interface BridgeApi {
   }): Promise<ParkingSession>;
 
   // Mirrored config from qparking SaaS (read-only locally)
-  listSpaces(): Promise<ParkingSpace[]>;
-  syncSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  listParkingSpaces(): Promise<ParkingSpace[]>;
+  syncParkingSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** Read every active pass cached from the cloud. Already populated by the
    *  periodic syncSeasonPasses(); this just lets the UI display them. */
   listSeasonPasses(): Promise<SeasonPass[]>;

@@ -9,15 +9,15 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
  * Edits happen in the cloud Operator → Space Management; this page is
  * for at-the-gate visibility.
  */
-export function Spaces() {
+export function ParkingSpaces() {
   const [spaces, setSpaces] = useState<ParkingSpace[]>([]);
   const [result, setResult] = useState<{ ok: boolean; fetched: number; error?: string } | null>(null);
 
-  async function refresh() { setSpaces(await window.bridge.listSpaces()); }
+  async function refresh() { setSpaces(await window.bridge.listParkingSpaces()); }
   useEffect(() => { void refresh(); }, []);
 
   const [sync, syncing] = useAsyncAction(async () => {
-    const r = await window.bridge.syncSpacesNow();
+    const r = await window.bridge.syncParkingSpacesNow();
     setResult(r as any);
     await refresh();
   });
@@ -48,7 +48,7 @@ export function Spaces() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Grid3x3 size={22} /> Space management
+            <Grid3x3 size={22} /> Parking Spaces
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Live read-only view of the cloud's parking-space inventory. Edits happen in qparking SaaS — Operator → Space Management.
