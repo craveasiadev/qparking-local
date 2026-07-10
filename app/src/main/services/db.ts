@@ -175,7 +175,6 @@ function applySchema(db: Database.Database) {
     -- rows (e.g. visitor + corporate); the gate uses the lowest-cost match.
     CREATE TABLE IF NOT EXISTS active_passes (
       pass_id TEXT NOT NULL,
-      policy_id TEXT NOT NULL,
       plate_number TEXT NOT NULL,
       pass_type TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -186,7 +185,9 @@ function applySchema(db: Database.Database) {
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (pass_id, plate_number)
     );
-    CREATE INDEX IF NOT EXISTS idx_passes_lookup ON active_passes (policy_id, plate_number);
+    -- Season passes are site-scoped (one site per install); the gate looks them
+    -- up purely by plate, so the index is on plate_number alone.
+    CREATE INDEX IF NOT EXISTS idx_passes_plate ON active_passes (plate_number);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -319,6 +320,12 @@ function applySchema(db: Database.Database) {
   ]) {
     try { db.exec(`ALTER TABLE sites DROP COLUMN ${col}`); } catch { /* column absent or old SQLite */ }
   }
+
+  // Season passes are site-scoped, not per-policy — drop the vestigial
+  // policy_id FK on active_passes. The index that references it MUST be dropped
+  // first (SQLite refuses to drop a column an index still depends on).
+  try { db.exec('DROP INDEX IF EXISTS idx_passes_lookup'); } catch { /* absent */ }
+  try { db.exec('ALTER TABLE active_passes DROP COLUMN policy_id'); } catch { /* column absent or old SQLite */ }
 
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
@@ -1101,9 +1108,7 @@ export function upsertRatePolicy(policy: RatePolicy): RatePolicy {
 export function pruneStaleRatePolicies(keepIds: string[]): number {
   const db = getDb();
   const existing = db.prepare('SELECT policy_id FROM rate_policies').all() as { policy_id: string }[];
-  const stale = existing
-    .map((row) => row.policy_id)
-    .filter((id) => !keepIds.includes(id));
+  const stale = existing.map((row) => row.policy_id).filter((id) => !keepIds.includes(id));
   if (stale.length === 0) return 0;
   const tx = db.transaction((ids: string[]) => {
     const delRule = db.prepare('DELETE FROM tariff_rules WHERE policy_id = ?');
@@ -1129,7 +1134,7 @@ export function pruneStaleRatePolicies(keepIds: string[]): number {
 
 function rowToActivePass(row: any): ActivePass {
   return {
-    passId: row.pass_id, policyId: row.policy_id, plateNumber: row.plate_number,
+    passId: row.pass_id, plateNumber: row.plate_number,
     passType: row.pass_type, status: row.status,
     startDate: row.start_date ?? null, endDate: row.end_date ?? null,
     isFree: !!row.is_free, spaceNumber: row.space_number ?? null,
@@ -1137,29 +1142,27 @@ function rowToActivePass(row: any): ActivePass {
   };
 }
 
-/** Find an active pass for the given plate at the given policy (cloud site
- *  uuid). Returns the longest-coverage pass first so a plate with a
- *  free_access + corporate match prefers the broader entitlement. */
-export function findActivePassByPlate(policyId: string, plate: string): ActivePass | null {
+/** Find an active pass for the given plate. Season passes are site-scoped (one
+ *  site per install), so the lookup is purely by plate. Returns the
+ *  longest-coverage pass first so a plate with a free_access + corporate match
+ *  prefers the broader entitlement. */
+export function findActivePassByPlate(plate: string): ActivePass | null {
   const normalisedPlate = plate.toUpperCase().replace(/\s+/g, '');
   const row = getDb().prepare(`
     SELECT * FROM active_passes
-    WHERE policy_id = ? AND plate_number = ? AND status = 'active'
+    WHERE plate_number = ? AND status = 'active'
     ORDER BY is_free DESC, end_date DESC
     LIMIT 1
-  `).get(policyId, normalisedPlate) as any;
+  `).get(normalisedPlate) as any;
   return row ? rowToActivePass(row) : null;
 }
 
 /**
- * Cached active passes, optionally filtered to one policy. With no argument
- * this is what the Passes page shows: every pass the gate currently
- * recognises (cached from `/api/v1/local-server/passes`).
+ * Every active pass the gate currently recognises (cached from
+ * `/api/v1/local-server/passes`). Backs the Passes page.
  */
-export function listActivePasses(policyId?: string): ActivePass[] {
-  const rows = (policyId
-    ? getDb().prepare('SELECT * FROM active_passes WHERE policy_id = ? ORDER BY plate_number').all(policyId)
-    : getDb().prepare('SELECT * FROM active_passes ORDER BY policy_id, plate_number').all()) as any[];
+export function listActivePasses(): ActivePass[] {
+  const rows = getDb().prepare('SELECT * FROM active_passes ORDER BY plate_number').all() as any[];
   return rows.map(rowToActivePass);
 }
 
@@ -1211,22 +1214,21 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
 }
 
 /**
- * Replace the entire cached pass set for a given policy. The SaaS is the
- * source of truth — a pass that disappeared from the cloud (revoked,
- * expired, holder unenrolled) must vanish from the local cache on the
- * very next sync.
+ * Replace the entire cached pass set (site-wide). The SaaS is the source of
+ * truth — a pass that disappeared from the cloud (revoked, expired, holder
+ * unenrolled) must vanish from the local cache on the very next sync.
  */
-export function replaceActivePassesForRatePolicy(policyId: string, passes: ActivePass[]): void {
+export function replaceAllActivePasses(passes: ActivePass[]): void {
   const db = getDb();
   const tx = db.transaction(() => {
-    db.prepare('DELETE FROM active_passes WHERE policy_id = ?').run(policyId);
+    db.prepare('DELETE FROM active_passes').run();
     const insert = db.prepare(`INSERT INTO active_passes (
-        pass_id, policy_id, plate_number, pass_type, status,
+        pass_id, plate_number, pass_type, status,
         start_date, end_date, is_free, space_number, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
     for (const pass of passes) {
       insert.run(
-        pass.passId, pass.policyId, pass.plateNumber.toUpperCase().replace(/\s+/g, ''),
+        pass.passId, pass.plateNumber.toUpperCase().replace(/\s+/g, ''),
         pass.passType, pass.status,
         pass.startDate, pass.endDate,
         pass.isFree ? 1 : 0,

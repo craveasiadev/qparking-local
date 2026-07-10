@@ -603,7 +603,7 @@ export async function syncAll(): Promise<{
 }> {
   const [scopes, passes, spaces] = await Promise.all([
     syncScopes().catch(toFailedSyncResult),
-    syncPasses().catch(toFailedSyncResult),
+    syncSeasonPasses().catch(toFailedSyncResult),
     syncSpaces().catch(toFailedSyncResult),
   ]);
   return { scopes, passes, spaces };

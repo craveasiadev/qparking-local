@@ -24,7 +24,7 @@ export function ParkingPolicies() {
     <div className="p-4 sm:p-6 lg:p-8 max-w-5xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Parking rates</h1>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Parking Rates</h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every active parking rate configured on the cloud, cached here so the gate can price sessions even if WAN is offline. Expand a rate to test a price.
           </p>

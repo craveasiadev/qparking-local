@@ -168,7 +168,7 @@ export interface BridgeApi {
   listSpaces(): Promise<ParkingSpace[]>;
   syncSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** Read every active pass cached from the cloud. Already populated by the
-   *  periodic syncPasses(); this just lets the UI display them. */
+   *  periodic syncSeasonPasses(); this just lets the UI display them. */
   listActivePasses(): Promise<ActivePass[]>;
 
   // Rate policies

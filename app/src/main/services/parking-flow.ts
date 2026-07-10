@@ -191,10 +191,9 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // payment (monthly/quarterly/yearly pre-paid, or VIP/staff/free_access
   // explicitly waived). Skip the charge and open the gate — but still
   // record the exit so the audit row exists.
-  // Look the plate up under the SAME policy that governs pricing (entry/site
-  // context), not the exit gate's policy.
-  const passPolicyId = policy?.policyId ?? null;
-  const activePass = passPolicyId ? findActivePassByPlate(passPolicyId, event.plate) : null;
+  // Season passes are site-scoped (one site per install), so look the plate up
+  // directly — no policy dimension.
+  const activePass = findActivePassByPlate(event.plate);
   if (activePass) {
     flog(`PASS MATCH: plate=${event.plate} pass=${activePass.passType} id=${activePass.passId} → free exit (skip terminal)`);
     recordExit(session.id, {

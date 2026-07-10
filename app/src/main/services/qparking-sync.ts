@@ -18,8 +18,7 @@
 import {
   upsertRatePolicy,
   upsertSite,
-  replaceActivePassesForRatePolicy,
-  listRatePolicies,
+  replaceAllActivePasses,
   replaceParkingSpaces,
   pruneStaleRatePolicies,
 } from './db';
@@ -44,8 +43,7 @@ function toFailedSyncResult(error: any): SyncResult {
 /** Map the `rules` array on a cloud policy row to local TariffRule objects. */
 function mapApiRowToTariffRules(policyRow: any): TariffRule[] {
   if (!Array.isArray(policyRow.rules)) return [];
-  return policyRow.rules
-    .map((ruleRow: any): TariffRule => ({
+  return policyRow.rules.map((ruleRow: any): TariffRule => ({
       ruleId: String(ruleRow.rule_id ?? ruleRow.ruleId ?? ''),
       name: String(ruleRow.name ?? ''),
       priority: Number(ruleRow.priority ?? 0),
@@ -72,18 +70,16 @@ function mapApiRowToTariffRules(policyRow: any): TariffRule[] {
 
 /** Map one cloud policy row (snake_case API fields) to a local RatePolicy. */
 function mapApiRowToRatePolicy(policyRow: any, fetchedAt: string): RatePolicy {
-  const policyId = String(policyRow.policy_id ?? policyRow.policyId ?? policyRow.id ?? '');
+  const policyId = policyRow.id;
   const rules = mapApiRowToTariffRules(policyRow);
 
   // The /rate-policies endpoint doesn't send the legacy flat mirrors
-  // (first_block_cents …) — those are computed on /policies from the effective
+  // (first_block_cents …) — those are computed on /scopes from the effective
   // rule. Mirror that here from the highest-priority active rule so the Parking Policies
   // overview shows a real headline rate instead of RM 0.00 + a false "zero
   // rate" warning. Fee math itself always reads rules[] per-moment, so these
   // three fields are display-only.
-  const topRule = [...rules]
-    .filter((rule) => rule.isActive)
-    .sort((a, b) => b.priority - a.priority)[0];
+  const topRule = [...rules].filter((rule) => rule.isActive).sort((a, b) => b.priority - a.priority)[0];
 
   return {
     policyId,
@@ -130,17 +126,9 @@ export async function syncRatePolicies(): Promise<SyncResult> {
     const ratePoliciesRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
-    const ratePolicies = ratePoliciesRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt))
-      .filter((policy: RatePolicy) => !!policy.policyId);
-
-    // /rate-policies doesn't send is_site_default. The backend returns policies
-    // ordered by name and treats the FIRST as the site default — the plan a lane
-    // falls back to when it has no policy of its own. Mirror that here: without a
-    // default, getSiteDefaultRatePolicy() returns null and unassigned lanes stop
-    // charging. (Respects the flag if a future payload ever carries it.)
-    if (ratePolicies.length && !ratePolicies.some((policy) => policy.isSiteDefault)) {
-      ratePolicies[0].isSiteDefault = true;
-    }
+    // The backend flags one policy as is_site_default (RatePolicyController
+    // marks the first by name), so isSiteDefault comes straight from the payload.
+    const ratePolicies = ratePoliciesRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt));
 
     let savedCount = 0;
     for (const ratePolicy of ratePolicies) {
@@ -150,8 +138,7 @@ export async function syncRatePolicies(): Promise<SyncResult> {
 
     // Drop local policies the cloud no longer returns.
     try {
-      const cloudPolicyIds = ratePoliciesRows.map((policyRow: any) => String(policyRow.policy_id ?? policyRow.policyId ?? policyRow.id ?? ''))
-        .filter(Boolean);
+      const cloudPolicyIds = ratePoliciesRows.map((policyRow: any) => policyRow.id);
       pruneStaleRatePolicies(cloudPolicyIds);
     } catch { /* pruning is best-effort; sync loop retries next tick */ }
 
@@ -165,48 +152,39 @@ export async function syncRatePolicies(): Promise<SyncResult> {
   }
 }
 
+function mapApiRowToSeasonPass(seasonPassRow: any, fetchedAt: string): ActivePass {
+
+  return {
+      passId: seasonPassRow.pass_id,
+        plateNumber:seasonPassRow.plate_number,
+        passType: seasonPassRow.pass_type,
+        status: seasonPassRow.status,
+        startDate: seasonPassRow.start_date ?? null,
+        endDate: seasonPassRow.end_date ?? null,
+        isFree: !!(seasonPassRow.is_free ?? false),
+        spaceNumber: seasonPassRow.space_number ?? null,
+        fetchedAt,
+  };
+}
+
 /**
- * Pull the active pass roster for each cached policy. The gate uses this
- * to skip charging plates that have a paid / VIP / corporate / staff pass.
- * An empty roster is a legitimate result (no active passes), not a failure.
+ * Pull the active season-pass roster. The gate uses this to skip charging
+ * plates that have a paid / VIP / corporate / staff pass. Passes are
+ * site-scoped (one site per install), so they're cached as a single flat set
+ * keyed by plate — replace-all, so a pass revoked on the cloud disappears
+ * locally on the next sync. An empty roster is legitimate, not a failure.
  */
-export async function syncPasses(): Promise<SyncResult> {
+export async function syncSeasonPasses(): Promise<SyncResult> {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
     const { data: responseBody } = await cloud.get<CloudListBody>('/passes');
-    const passRows = responseBody.data ?? [];
+    const seasonPassRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
-    // Group passes by policy so we can do a single replace-all per policy.
-    const passesByPolicyId = new Map<string, ActivePass[]>();
-    for (const passRow of passRows) {
-      const policyId = String(passRow.site_id ?? passRow.policy_id ?? '');
-      const plateNumber = String(passRow.plate_number ?? '');
-      if (!policyId || !plateNumber) continue;
-
-      const pass: ActivePass = {
-        passId: String(passRow.pass_id ?? passRow.id ?? ''),
-        policyId,
-        plateNumber,
-        passType: String(passRow.pass_type ?? 'monthly'),
-        status: String(passRow.status ?? 'active'),
-        startDate: passRow.start_date ?? null,
-        endDate: passRow.end_date ?? null,
-        isFree: !!(passRow.is_free ?? false),
-        spaceNumber: passRow.space_number ?? null,
-        fetchedAt,
-      };
-      if (!passesByPolicyId.has(policyId)) passesByPolicyId.set(policyId, []);
-      passesByPolicyId.get(policyId)!.push(pass);
-    }
-
-    // Refresh every policy we know about — including policies that returned
-    // zero passes (so a revoked pass actually disappears from local cache).
-    for (const policy of listRatePolicies()) {
-      replaceActivePassesForRatePolicy(policy.policyId, passesByPolicyId.get(policy.policyId) ?? []);
-    }
-    return { ok: true, fetched: passRows.length };
+    const seasonPasses = seasonPassRows.filter((seasonPassRow: any) => seasonPassRow.plate_number).map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
+    replaceAllActivePasses(seasonPasses);
+    return { ok: true, fetched: seasonPasses.length };
   } catch (error) {
     // 404 means an older qparking SaaS without the endpoint — gracefully no-op.
     if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
@@ -307,7 +285,7 @@ export async function syncAll(): Promise<{
 }> {
   const [policies, passes, spaces, site] = await Promise.all([
     syncRatePolicies().catch(toFailedSyncResult),
-    syncPasses().catch(toFailedSyncResult),
+    syncSeasonPasses().catch(toFailedSyncResult),
     syncSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
   ]);
@@ -326,7 +304,7 @@ let backgroundSyncTimer: NodeJS.Timeout | null = null;
 function runFullSyncQuietly(): void {
   syncSite().catch(() => null);
   syncRatePolicies().catch(() => null);
-  syncPasses().catch(() => null);
+  syncSeasonPasses().catch(() => null);
   syncSpaces().catch(() => null);
 }
 
@@ -434,7 +412,7 @@ export function stopGatePoll(): void {
 // ─── push: rate edits up to the SaaS ─────────────────────────────────────────
 
 /**
- * Push a rate edit up to the qparking SaaS (PUT /policies/rate). On success
+ * Push a rate edit up to the qparking SaaS (PUT /scopes/rate). On success
  * we immediately re-pull the policies so the cached row reflects whatever
  * the SaaS canonicalised (and the rest of the app sees the new fee math).
  */
@@ -448,7 +426,7 @@ export async function pushRatePolicy(rateInput: {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
-    await cloud.put('/policies/rate', {
+    await cloud.put('/scopes/rate', {
       first_block_cents: rateInput.firstBlockCents,
       per_block_cents: rateInput.perBlockCents,
       block_minutes: rateInput.blockMinutes,

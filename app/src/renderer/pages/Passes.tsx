@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Building2, Car, Cloud } from 'lucide-react';
-import type { ActivePass, RatePolicy } from '@shared/types';
+import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud } from 'lucide-react';
+import type { ActivePass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 /**
@@ -13,22 +13,15 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
  */
 export function Passes() {
   const [passes, setPasses] = useState<ActivePass[]>([]);
-  const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [filter, setFilter] = useState<'all' | 'free' | 'paid' | 'expiring'>('all');
   const [search, setSearch] = useState('');
 
   const [load, loading] = useAsyncAction(async () => {
-    const [p, s] = await Promise.all([
-      window.bridge.listActivePasses(),
-      window.bridge.listRatePolicies(),
-    ]);
-    setPasses(p);
-    setPolicies(s);
+    setPasses(await window.bridge.listActivePasses());
   });
 
   useEffect(() => { void load(); }, []);
 
-  const policyName = (id: string) => policies.find((s) => s.policyId === id)?.policyName ?? id;
   const today = new Date().toISOString().slice(0, 10);
   const in7Days = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
 
@@ -130,7 +123,6 @@ export function Passes() {
                 <tr>
                   <th className="text-left px-3 py-2 font-bold">Plate</th>
                   <th className="text-left px-3 py-2 font-bold">Type</th>
-                  <th className="text-left px-3 py-2 font-bold">Policy</th>
                   <th className="text-left px-3 py-2 font-bold">Valid</th>
                   <th className="text-left px-3 py-2 font-bold">Space</th>
                   <th className="text-right px-3 py-2 font-bold">Status</th>
@@ -150,10 +142,6 @@ export function Passes() {
                         }`}>
                           {p.isFree && <Crown size={9} />} {p.passType}
                         </span>
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        <Building2 size={11} className="inline mr-1 text-gray-400" />
-                        {policyName(p.policyId)}
                       </td>
                       <td className="px-3 py-2 text-[12px] font-mono text-gray-700">
                         {p.startDate ?? '—'} → {p.endDate ?? '—'}

@@ -239,7 +239,6 @@ export interface RatePolicy {
  *  "skip charging this car, it's already paid" without a WAN round-trip. */
 export interface ActivePass {
   passId: string;
-  policyId: string;
   plateNumber: string;
   passType: string;
   status: string;

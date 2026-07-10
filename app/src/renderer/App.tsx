@@ -54,7 +54,7 @@ const SECTIONS: NavSection[] = [
   {
     key: 'pricing', label: 'Pricing & tariffs',
     items: [
-      { id: 'policies', label: 'Parking Policies', icon: Tag },
+      { id: 'policies', label: 'Parking Rates', icon: Tag },
     ],
   },
   {
