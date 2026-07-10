@@ -90,14 +90,15 @@ export function Settings() {
   // `settings` is the whole AppSettings row, edited in place by the inputs
   // below and persisted as one unit by the Save button.
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [justSaved, setJustSaved] = useState(false);
+  const [justSaved, setJustSaved] = useState<boolean>(false);
+  const [syncError , setSyncError] = useState<string | null>(null);
 
   useEffect(() => { window.bridge.getSettings().then(setSettings); }, []);
 
   const [saveSettings, savingSettings] = useAsyncAction(async () => {
-    if (!settings) return;
-    const persisted = await window.bridge.saveSettings(settings);
-    setSettings(persisted);
+    if (!settings) return null;
+    const savedSetting = await window.bridge.saveSettings(settings);
+    setSettings(savedSetting);
     setJustSaved(true);
     setTimeout(() => setJustSaved(false), 2000);
   });
@@ -107,11 +108,15 @@ export function Settings() {
   // model (site, scopes, passes, spaces) and shows the per-model outcome.
   const [cloudSyncReport, setCloudSyncReport] = useState<CloudSyncReport | null>(null);
 
-  const [runCloudSyncNow, cloudSyncing] = useAsyncAction(async () => {
-    if (!settings) return;
-    setSettings(await window.bridge.saveSettings(settings));
-    setCloudSyncReport(await window.bridge.syncAllNow());
-  });
+  const [runCloudSyncNow, cloudSyncing] = useAsyncAction(
+    async () => {
+      setSyncError(null);
+      if (!settings) return;
+      if (!settings.qparkingApiKey) { setSyncError('Set an API key before syncing'); return; }
+      setCloudSyncReport(await window.bridge.syncAllNow());
+    },
+    { onError: (error) => setSyncError(String((error as any)?.message ?? error)) },
+  );
 
   // ─── Face-auth turnstile test ──────────────────────────────────────────────
   const [faceGateTestResult, setFaceGateTestResult] = useState<string | null>(null);
@@ -327,6 +332,11 @@ export function Settings() {
         <Field label="API key">
           <input type="password" className="input font-mono text-xs" value={settings.qparkingApiKey} onChange={(e) => setSettings({ ...settings, qparkingApiKey: e.target.value })} placeholder="issued by qparking admin" />
         </Field>
+        {syncError && (
+          <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-[11px] px-3 py-2">
+            {syncError}
+          </div>
+        )}
         {cloudSyncReport && (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
             {(['site', 'scopes', 'passes', 'spaces'] as const).map((model) => {
