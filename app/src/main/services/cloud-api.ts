@@ -32,14 +32,19 @@ export function isHttpStatus(error: unknown, status: number): boolean {
 }
 
 /**
- * Human-readable message from any thrown request error. Prefers the response
- * body's own `message` / `error` field, then falls back to `http_<status>`
- * or the raw network error text (timeout, DNS, refused, …).
+ * Human-readable message from any thrown request error. HTTP failures show
+ * the status plus the response body's own `message` / `error` field when the
+ * server sent one (e.g. `http_500: Cannot redeclare Site::operators()`);
+ * everything else falls back to the raw network error text (timeout, DNS,
+ * refused, …).
  */
 export function describeRequestError(error: any): string {
   if (axios.isAxiosError(error) && error.response) {
     const responseBody: any = error.response.data;
-    return responseBody?.message || responseBody?.error || `http_${error.response.status}`;
+    const serverMessage = responseBody?.message || responseBody?.error;
+    return serverMessage
+      ? `http_${error.response.status}: ${serverMessage}`
+      : `http_${error.response.status}`;
   }
   return String(error?.message ?? error);
 }

@@ -11,7 +11,7 @@ import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
 import { Scopes } from './pages/Scopes';
 import { Sessions } from './pages/Sessions';
-import { SiteSettings } from './pages/SiteSettings';
+import { Sites } from './pages/Sites';
 import { Settings } from './pages/Settings';
 import { Passes } from './pages/Passes';
 import { Spaces } from './pages/Spaces';
@@ -23,7 +23,7 @@ type Page =
   // Pricing & Tariffs
   | 'scopes'
   // System
-  | 'settings' | 'site-setting';
+  | 'settings' | 'sites';
 
 interface NavItem { id: Page; label: string; icon: any }
 interface NavSection { key: string; label: string; items: NavItem[] }
@@ -59,7 +59,7 @@ const SECTIONS: NavSection[] = [
   {
     key: 'system', label: 'Administration',
     items: [
-      { id: 'site-setting', label: 'Site Settings', icon: MapPin },
+      { id: 'sites', label: 'Sites', icon: MapPin },
       { id: 'settings', label: 'Settings', icon: SettingsIcon },
     ],
   },
@@ -169,7 +169,7 @@ export function App() {
           {page === 'spaces' && <Spaces />}
           {page === 'passes' && <Passes />}
           {page === 'scopes' && <Scopes />}
-          {page === 'site-setting' && <SiteSettings />}
+          {page === 'sites' && <Sites />}
           {page === 'settings' && <Settings />}
         </div>
         <div className="flex-shrink-0 bg-gray-950 text-white border-t border-white/10">

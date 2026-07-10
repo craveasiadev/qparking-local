@@ -213,11 +213,10 @@ function applySchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_spaces_building ON parking_spaces (building);
     CREATE INDEX IF NOT EXISTS idx_spaces_status ON parking_spaces (status);
 
-    -- Local mirror of the qparking SaaS sites table (Laravel Site model): the
-    -- union of create_sites_table + local_server_api_key + scope-override
-    -- migrations. Cloud is the source of truth; cached here so company /
-    -- receipt / logo / scope-override config is available offline. id and
-    -- company_id are cloud UUIDs (TEXT, not autoincrement).
+    -- Local mirror of the qparking SaaS sites table (Laravel Site model).
+    -- Cloud is the source of truth; cached here so identity / occupancy /
+    -- contact info is available offline. id and company_id are cloud UUIDs
+    -- (TEXT, not autoincrement).
     CREATE TABLE IF NOT EXISTS sites (
       id TEXT PRIMARY KEY,
       local_server_api_key TEXT UNIQUE,
@@ -257,6 +256,24 @@ function applySchema(db: Database.Database) {
   try { db.exec('DROP TABLE IF EXISTS vehicle_types'); } catch { /* ignore */ }
   try { db.exec('DROP TABLE IF EXISTS vehicle_groups'); } catch { /* ignore */ }
   try { db.exec('ALTER TABLE tariff_rules DROP COLUMN vehicle_type'); } catch { /* column absent or old SQLite */ }
+
+  // 2026-07-10: the site page was slimmed to identity / occupancy / contact,
+  // so receipt-branding, season-pass logo and scope-override columns are no
+  // longer synced or read. Drop them on installs whose `sites` table predates
+  // this. Idempotent / best-effort (DROP COLUMN needs SQLite ≥ 3.35).
+  for (const col of [
+    'season_pass_logo_url',
+    'receipt_header',
+    'receipt_footer',
+    'primary_color',
+    'scope_free_minutes',
+    'scope_first_block_cents',
+    'scope_per_block_cents',
+    'scope_block_minutes',
+    'scope_daily_cap_cents',
+  ]) {
+    try { db.exec(`ALTER TABLE sites DROP COLUMN ${col}`); } catch { /* column absent or old SQLite */ }
+  }
 
   // Idempotent column adds for installs whose `cameras` table was created
   // before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
@@ -816,7 +833,6 @@ export function getScope(id: string): ScopeRate | null {
 function rowToSite(row: any): Site {
   return {
     id: row.id,
-    localServerApiKey: row.local_server_api_key ?? null,
     companyId: row.company_id ?? null,
     name: row.name,
     address: row.address ?? null,
@@ -830,19 +846,8 @@ function rowToSite(row: any): Site {
     fax: row.fax ?? null,
     country: row.country ?? null,
     email: row.email ?? null,
-    seasonPassLogoUrl: row.season_pass_logo_url ?? null,
     parkingSiteType: row.parking_site_type ?? null,
     logoUrl: row.logo_url ?? null,
-    receiptHeader: row.receipt_header ?? null,
-    receiptFooter: row.receipt_footer ?? null,
-    primaryColor: row.primary_color,
-    scopeFreeMinutes: row.scope_free_minutes ?? null,
-    scopeFirstBlockCents: row.scope_first_block_cents ?? null,
-    scopePerBlockCents: row.scope_per_block_cents ?? null,
-    scopeBlockMinutes: row.scope_block_minutes ?? null,
-    scopeDailyCapCents: row.scope_daily_cap_cents ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
   };
 }
 
@@ -850,6 +855,49 @@ export function getSite(id: string): Site | null {
   const row = getDb().prepare('SELECT * FROM sites WHERE id = ?').get(id) as any;
   if (!row) return null;
   return rowToSite(row);
+}
+
+/** The cached site for this install (one site per local server). */
+export function getCurrentSite(): Site | null {
+  const row = getDb().prepare('SELECT * FROM sites ORDER BY updated_at DESC LIMIT 1').get() as Site;
+  return row ? rowToSite(row) : null;
+}
+
+/**
+ * Idempotent upsert of the site row mirrored from GET /local-server/site.
+ * The API payload omits local_server_api_key and timestamps, so the key
+ * column keeps whatever value it already has and updated_at is stamped here.
+ */
+export function upsertSite(site: Site): Site {
+  getDb().prepare(`INSERT INTO sites (
+      id, company_id, name, address, total_spaces, occupied_spaces,
+      revenue_today, status, alarm_count, contact_person, telephone, fax,
+      country, email, parking_site_type, logo_url
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET
+      company_id=excluded.company_id,
+      name=excluded.name,
+      address=excluded.address,
+      total_spaces=excluded.total_spaces,
+      occupied_spaces=excluded.occupied_spaces,
+      revenue_today=excluded.revenue_today,
+      status=excluded.status,
+      alarm_count=excluded.alarm_count,
+      contact_person=excluded.contact_person,
+      telephone=excluded.telephone,
+      fax=excluded.fax,
+      country=excluded.country,
+      email=excluded.email,
+      parking_site_type=excluded.parking_site_type,
+      logo_url=excluded.logo_url,
+      updated_at=CURRENT_TIMESTAMP`)
+    .run(
+      site.id, site.companyId, site.name, site.address, site.totalSpaces,
+      site.occupiedSpaces, site.revenueToday, site.status, site.alarmCount,
+      site.contactPerson, site.telephone, site.fax, site.country, site.email,
+      site.parkingSiteType, site.logoUrl,
+    );
+  return getSite(site.id)!;
 }
 
 /**

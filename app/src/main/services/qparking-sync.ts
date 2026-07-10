@@ -15,16 +15,17 @@
  * `qparking_not_configured` and the app still works — operators can fill the
  * scopes table manually via the Scopes page in the UI.
  */
-import axios from 'axios';
 import {
   upsertScope,
+  upsertSite,
   replaceActivePassesForScope,
   listScopes,
   replaceParkingSpaces,
   pruneStaleScopes,
 } from './db';
-import { getCloudApi, isHttpStatus } from './cloud-api';
-import type { ScopeRate, TariffRule, ActivePass, ParkingSpace } from '../../shared/types';
+import { getCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
+import type { ScopeRate, TariffRule, ActivePass, ParkingSpace, Site } from '../../shared/types';
+
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
 
@@ -35,10 +36,7 @@ const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: 'qparking_not
 
 /** Convert any thrown error (HTTP failure, timeout, DNS, …) into a SyncResult. */
 function toFailedSyncResult(error: any): SyncResult {
-  if (axios.isAxiosError(error) && error.response) {
-    return { ok: false, fetched: 0, error: `http_${error.response.status}` };
-  }
-  return { ok: false, fetched: 0, error: String(error?.message ?? error) };
+  return { ok: false, fetched: 0, error: describeRequestError(error) };
 }
 
 // ─── API row → local type mapping ────────────────────────────────────────────
@@ -127,8 +125,7 @@ export async function syncScopes(): Promise<SyncResult> {
 
     // Drop local scopes the cloud no longer returns.
     try {
-      const cloudScopeIds = scopeRows
-        .map((scopeRow: any) => String(scopeRow.scope_id ?? scopeRow.scopeId ?? scopeRow.id ?? ''))
+      const cloudScopeIds = scopeRows.map((scopeRow: any) => String(scopeRow.scope_id ?? scopeRow.scopeId ?? scopeRow.id ?? ''))
         .filter(Boolean);
       pruneStaleScopes(cloudScopeIds);
     } catch { /* pruning is best-effort; sync loop retries next tick */ }
@@ -188,6 +185,49 @@ export async function syncPasses(): Promise<SyncResult> {
   }
 }
 
+/** Map the GET /site payload (snake_case SiteResource) to the local Site. */
+function mapApiRowToSite(siteRow: any): Site {
+  return {
+    id: String(siteRow.id ?? ''),
+    companyId: siteRow.company_id ?? null,
+    name: String(siteRow.name ?? ''),
+    address: siteRow.address ?? null,
+    totalSpaces: Number(siteRow.total_spaces ?? 0),
+    occupiedSpaces: Number(siteRow.occupied_spaces ?? 0),
+    revenueToday: Number(siteRow.revenue_today ?? 0),
+    status: (siteRow.status ?? 'active') as Site['status'],
+    alarmCount: Number(siteRow.alarm_count ?? 0),
+    contactPerson: siteRow.contact_person ?? null,
+    telephone: siteRow.telephone ?? null,
+    fax: siteRow.fax ?? null,
+    country: siteRow.country ?? null,
+    email: siteRow.email ?? null,
+    parkingSiteType: siteRow.parking_site_type ?? null,
+    logoUrl: siteRow.logo_url ?? null,
+  };
+}
+
+/**
+ * Pull THE site this install's API key belongs to (GET /site) and cache it
+ * in the local `sites` table. The site is the root object — its identity,
+ * occupancy and contact details are mirrored here for offline display.
+ */
+export async function syncSite(): Promise<SyncResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return NOT_CONFIGURED;
+  try {
+    const { data: responseBody } = await cloud.get<{ data?: any }>('/site');
+    const siteRow = responseBody?.data;
+    if (!siteRow?.id) return { ok: false, fetched: 0, error: 'empty_site_payload' };
+    upsertSite(mapApiRowToSite(siteRow));
+    return { ok: true, fetched: 1 };
+  } catch (error) {
+    // 404 means an older qparking SaaS without the endpoint — gracefully no-op.
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+    return toFailedSyncResult(error);
+  }
+}
+
 /**
  * Pull the canonical parking-space inventory from the cloud. Read-only
  * mirror — the operator manages spaces in qparking SaaS, the on-prem app
@@ -234,21 +274,28 @@ export async function syncAll(): Promise<{
   scopes: SyncResult;
   passes: SyncResult;
   spaces: SyncResult;
+  site: SyncResult;
 }> {
-  const [scopes, passes, spaces] = await Promise.all([
+  const [scopes, passes, spaces, site] = await Promise.all([
     syncScopes().catch(toFailedSyncResult),
     syncPasses().catch(toFailedSyncResult),
     syncSpaces().catch(toFailedSyncResult),
+    syncSite().catch(toFailedSyncResult),
   ]);
-  return { scopes, passes, spaces };
+  return { scopes, passes, spaces, site };
+}
+
+export async function handleDebug(): Promise<any> {
+  return syncSite();
 }
 
 // ─── background sync timer ───────────────────────────────────────────────────
 
 let backgroundSyncTimer: NodeJS.Timeout | null = null;
 
-/** Run all three pulls, swallowing errors — the timer retries next tick. */
+/** Run every pull, swallowing errors — the timer retries next tick. */
 function runFullSyncQuietly(): void {
+  syncSite().catch(() => null);
   syncScopes().catch(() => null);
   syncPasses().catch(() => null);
   syncSpaces().catch(() => null);
@@ -381,13 +428,7 @@ export async function pushScopeRate(rateInput: {
     });
     // Re-pull so the local cache reflects whatever the SaaS canonicalised.
     return await syncScopes();
-  } catch (error: any) {
-    // Prefer the SaaS's own validation message over a bare status code.
-    if (axios.isAxiosError(error) && error.response) {
-      const errorBody: any = error.response.data;
-      const message = errorBody?.message || errorBody?.error || `http_${error.response.status}`;
-      return { ok: false, fetched: 0, error: message };
-    }
-    return { ok: false, fetched: 0, error: String(error?.message ?? error) };
+  } catch (error) {
+    return toFailedSyncResult(error);
   }
 }

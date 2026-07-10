@@ -271,13 +271,14 @@ export interface ParkingSpace {
 
 // ─── sites ───────────────────────────────────────────────────────────────────
 
-/** The branch/site record mirrored from the qparking SaaS `sites` table
- *  (Laravel App\Models\Site). Cloud is the source of truth; cached locally so
- *  company / receipt / logo / scope-override config is available offline.
- *  `id` and `companyId` are cloud UUIDs. */
+/** The branch/site record mirrored from the qparking SaaS `sites` table,
+ *  as served by GET /local-server/site (Laravel SiteResource). Cloud is the
+ *  source of truth; cached locally so identity / occupancy / contact info is
+ *  available offline. `id` and `companyId` are cloud UUIDs. The API
+ *  deliberately omits local_server_api_key and the created/updated
+ *  timestamps, so they're not part of this shape. */
 export interface Site {
   id: string;
-  localServerApiKey: string | null;
   companyId: string | null;
   name: string;
   address: string | null;
@@ -291,21 +292,8 @@ export interface Site {
   fax: string | null;
   country: string | null;
   email: string | null;
-  seasonPassLogoUrl: string | null;
   parkingSiteType: string | null;
   logoUrl: string | null;
-  receiptHeader: string | null;
-  receiptFooter: string | null;
-  primaryColor: string;
-  /** Per-site scope overrides editable from the local Scopes page. Null = use
-   *  the cloud rate plan unchanged. */
-  scopeFreeMinutes: number | null;
-  scopeFirstBlockCents: number | null;
-  scopePerBlockCents: number | null;
-  scopeBlockMinutes: number | null;
-  scopeDailyCapCents: number | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 // ─── sync_queue ──────────────────────────────────────────────────────────────

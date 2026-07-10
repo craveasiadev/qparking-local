@@ -20,6 +20,7 @@ import type {
   ParkingSpace,
   PaymentTerminal,
   ScopeRate,
+  Site,
   SyncQueueRow,
 } from './db-models';
 
@@ -166,7 +167,14 @@ export interface BridgeApi {
     scopes: { ok: boolean; fetched: number; error?: string };
     passes: { ok: boolean; fetched: number; error?: string };
     spaces: { ok: boolean; fetched: number; error?: string };
+    site: { ok: boolean; fetched: number; error?: string };
   }>;
+
+  /** The site profile mirrored from qparking SaaS (one site per install).
+   *  Populated by the periodic syncSite(); null until the first sync lands. */
+  getCurrentSite(): Promise<Site | null>;
+
+  debug(): Promise<any>;
 
   /** Push a rate edit to qparking SaaS, then re-pull. The SaaS becomes the
    *  source of truth; the local cache reflects whatever it canonicalised. */

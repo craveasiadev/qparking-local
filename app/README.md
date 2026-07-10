@@ -498,6 +498,60 @@ One row from the `sessions` table (shape defined in `src/shared/types.ts`):
 While a car is still inside, `exitAt` is `null` (that's how "open sessions" are
 found).
 
+### Example 6 — How a DB upsert works (`?` placeholders, `ON CONFLICT`, `excluded`)
+
+Every cloud-synced table (`scopes`, `sites`, …) is written with the same
+**upsert** pattern (**up**date-or-in**sert**). Trimmed from the real
+`upsertScope` in `services/db.ts`:
+
+```ts
+db.prepare(`INSERT INTO scopes (
+    scope_id, scope_name, free_minutes
+  ) VALUES (?,?,?)
+  ON CONFLICT(scope_id) DO UPDATE SET
+    scope_name   = excluded.scope_name,
+    free_minutes = excluded.free_minutes`)
+  .run(scope.scopeId, scope.scopeName, scope.freeMinutes);
+```
+
+Three pieces to understand:
+
+**1. `?` placeholders + `.run(...)`** — the SQL is compiled once with holes in
+it; `.run()` pours your values into those holes **in order** (1st `?` ←
+`scope.scopeId`, 2nd `?` ← `scope.scopeName`, …). The argument order must match
+the column list exactly. Why not build the SQL string by hand? Safety (a plate
+named `'); DROP TABLE scopes;--` stays plain data — no SQL injection) and speed
+(compile once, run many). Two idioms you'll see in every `.run()`:
+- `x ?? null` — SQLite can't store `undefined`, so maybe-missing values become `NULL`.
+- `flag ? 1 : 0` — SQLite has no boolean type; `true`/`false` are stored as `1`/`0`.
+
+**2. `ON CONFLICT(scope_id) DO UPDATE`** — try the insert; if a row with that
+`scope_id` already exists, don't fail — run the `UPDATE` on the existing row
+instead. One statement handles both "first time seen" and "already cached".
+
+**3. `excluded.<column>`** — inside the `DO UPDATE` there are two rows in play:
+the **old row already in the table**, and the **new row that just got rejected**
+(*excluded*) from inserting. `excluded.scope_name` means "the value I just tried
+to insert" — i.e. the fresh data from the cloud:
+
+```sql
+SET scope_name = excluded.scope_name
+--     ↑                ↑
+--  old row's       the fresh value from
+--  column          this sync's payload
+```
+
+Worked example — the cloud has scope `abc-123` named **"Weekend Rate"**:
+
+| Sync tick | What happens |
+|---|---|
+| First ever | No row with `scope_id = 'abc-123'` → plain **insert** |
+| Operator renames it in the cloud to "Weekend & Holiday Rate" | Next 60s sync sends the same id → insert **conflicts** on the primary key → `DO UPDATE` overwrites the cached name with `excluded.scope_name` |
+| Every tick after | Same id, same values → conflict + update to identical values (harmless) |
+
+Same id in, one row out, always fresh — that's why the 60-second sync can run
+forever without ever creating duplicate rows.
+
 ### Recipe — add your own bridge call
 
 Say you want a "count cars currently inside" button. Four small steps:
@@ -749,8 +803,11 @@ so you can watch the whole cycle from one click.
 - Terminal TCP traffic is logged to the `terminal_log` table in SQLite — open
   `%APPDATA%\qparking-local\qparking-local.db` with any SQLite browser.
 - Sessions are in the `sessions` table; open sessions have `exit_at IS NULL`.
-- The Electron main process also writes to the console — open DevTools
-  (Ctrl+Shift+I in dev) to see live output.
+- **Two different consoles — don't mix them up.** `console.log` in
+  `src/renderer/` (React) prints in the app window's **DevTools** (Ctrl+Shift+I).
+  `console.log` in `src/main/` (services, index.ts) prints in the **terminal
+  running `npm run dev`** — the lines prefixed `[electron]` — and NEVER in
+  DevTools.
 
 ---
 

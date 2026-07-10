@@ -1,10 +1,31 @@
+/**
+ * Settings page — server-wide configuration for this local install.
+ *
+ * Every value shown here lives in the SQLite `settings` table. Reads and
+ * writes go through the typed bridge (window.bridge → preload → ipcMain →
+ * services/db.ts), and most changes take effect immediately after Save —
+ * no app restart needed.
+ *
+ * Sections, top to bottom:
+ *   1. qparking SaaS sync  — cloud base URL + API key, manual "Sync now"
+ *   2. Local servers       — LPR webhook / operator API ports, image store
+ *   3. Face-auth turnstile — optional faceapp_main gate trigger + test tools
+ *   4. Flow behavior       — single-camera entry/exit mode
+ *   5. Touch'n'Go W4G      — multi-acquirer payment box + live test panel
+ *   6. Operations          — exit grace period
+ *   7. App updates         — check / download / install a newer build
+ *   8. Maintenance         — clear Electron browser cache
+ */
 import { useEffect, useState } from 'react';
 import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
-interface TngTestLine {
-  ts: string;
+// ─── Types local to this page ────────────────────────────────────────────────
+
+/** One line in the W4G test panel's black console. */
+interface TngLogLine {
+  at: string;
   kind: 'send' | 'recv' | 'error' | 'info';
   text: string;
   /** Optional structured payload (JSON body, headers, decoded fields). Rendered
@@ -13,6 +34,7 @@ interface TngTestLine {
   payload?: unknown;
 }
 
+/** Live W4G integration state polled from the main process every 2s. */
 interface TngStatus {
   enabled: boolean;
   listening: boolean;
@@ -26,6 +48,34 @@ interface TngStatus {
   lastError?: string;
 }
 
+/** Outcome of pulling one cloud model (mirrors SyncResult in qparking-sync). */
+interface CloudSyncResult { ok: boolean; fetched: number; error?: string }
+
+/** Per-model outcome of a full cloud pull, as returned by syncAllNow(). */
+interface CloudSyncReport {
+  site: CloudSyncResult;
+  scopes: CloudSyncResult;
+  passes: CloudSyncResult;
+  spaces: CloudSyncResult;
+}
+
+/** A downloadable build artifact offered by the update endpoint. */
+interface UpdateArtifact { filename: string; size: number | null; url: string }
+
+/** Result of the last "Check for updates" call, stamped with checkedAt. */
+interface UpdateCheckReport {
+  checkedAt?: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  isNewer?: boolean;
+  releasedAt?: string | null;
+  notes?: string | null;
+  portable?: UpdateArtifact | null;
+  installer?: UpdateArtifact | null;
+  error?: string;
+}
+
+/** W4G payType code → human label, for the test panel's APPROVED line. */
 const PAY_TYPE_LABEL: Record<number, string> = {
   0: 'TNG card',
   1: 'Visa',
@@ -35,39 +85,91 @@ const PAY_TYPE_LABEL: Record<number, string> = {
 };
 
 export function Settings() {
-  const [s, setS] = useState<AppSettings | null>(null);
-  const [saved, setSaved] = useState(false);
-  const [faceGateTest, setFaceGateTest] = useState<string | null>(null);
-  const [tngStatus, setTngStatus] = useState<TngStatus | null>(null);
-  const [tngLog, setTngLog] = useState<TngTestLine[]>([]);
-  const [tngTestAmount, setTngTestAmount] = useState<number>(100);
-  const [tngLastOrderId, setTngLastOrderId] = useState<string>('');
+  // ─── Settings form ─────────────────────────────────────────────────────────
+  // `settings` is the whole AppSettings row, edited in place by the inputs
+  // below and persisted as one unit by the Save button.
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [justSaved, setJustSaved] = useState(false);
 
-  useEffect(() => { window.bridge.getSettings().then(setS); }, []);
+  useEffect(() => { window.bridge.getSettings().then(setSettings); }, []);
+
+  const [saveSettings, savingSettings] = useAsyncAction(async () => {
+    if (!settings) return;
+    const persisted = await window.bridge.saveSettings(settings);
+    setSettings(persisted);
+    setJustSaved(true);
+    setTimeout(() => setJustSaved(false), 2000);
+  });
+
+  // ─── qparking cloud sync ───────────────────────────────────────────────────
+  // "Sync now" saves the URL/key currently on screen, pulls every cloud-owned
+  // model (site, scopes, passes, spaces) and shows the per-model outcome.
+  const [cloudSyncReport, setCloudSyncReport] = useState<CloudSyncReport | null>(null);
+
+  const [runCloudSyncNow, cloudSyncing] = useAsyncAction(async () => {
+    if (!settings) return;
+    setSettings(await window.bridge.saveSettings(settings));
+    setCloudSyncReport(await window.bridge.syncAllNow());
+  });
+
+  // ─── Face-auth turnstile test ──────────────────────────────────────────────
+  const [faceGateTestResult, setFaceGateTestResult] = useState<string | null>(null);
+
+  const [runFaceGatePing, faceGatePingBusy] = useAsyncAction(async () => {
+    if (!settings) return;
+    setFaceGateTestResult('Saving config…');
+    await window.bridge.saveSettings(settings);
+    setFaceGateTestResult('Pinging…');
+    const result = await window.bridge.pingFaceGate();
+    setFaceGateTestResult(result.ok ? `✓ Reachable (status ${result.status})` : `✗ ${result.error ?? `status ${result.status}`}`);
+  });
+
+  const [runFaceGateOpen, faceGateOpenBusy] = useAsyncAction(async () => {
+    if (!settings) return;
+    setFaceGateTestResult('Saving config…');
+    await window.bridge.saveSettings(settings);
+    setFaceGateTestResult('Opening…');
+    const result = await window.bridge.openFaceGate({ plate: 'TEST', reason: 'settings-test' });
+    if (result.ok) {
+      setFaceGateTestResult('✓ Open command accepted by gateway');
+    } else {
+      const bodyMessage = (result.body as any)?.message ?? (result.body as any)?.error ?? '';
+      const parts = [`status ${result.status ?? '—'}`];
+      if (result.error) parts.push(result.error);
+      if (bodyMessage) parts.push(bodyMessage);
+      setFaceGateTestResult(`✗ ${parts.join(' · ')}`);
+    }
+  });
+
+  // ─── Touch'n'Go W4G test panel ─────────────────────────────────────────────
+  const [tngStatus, setTngStatus] = useState<TngStatus | null>(null);
+  const [tngLog, setTngLog] = useState<TngLogLine[]>([]);
+  const [tngTestAmountCents, setTngTestAmountCents] = useState<number>(100);
+  const [tngLastOrderId, setTngLastOrderId] = useState<string>('');
 
   // Live status poll — refreshes every 2s so the operator sees pending
   // orders and the last callback as soon as the device responds.
   useEffect(() => {
     let cancelled = false;
-    const tick = async () => {
+    const poll = async () => {
       try {
-        const st = await window.bridge.tngStatus();
-        if (!cancelled) setTngStatus(st);
+        const status = await window.bridge.tngStatus();
+        if (!cancelled) setTngStatus(status);
       } catch { /* ignore */ }
     };
-    tick();
-    const handle = setInterval(tick, 2000);
-    return () => { cancelled = true; clearInterval(handle); };
+    poll();
+    const timerId = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(timerId); };
   }, []);
 
   // Stream W4G activity into the test panel. Comes through the generic 'log'
   // channel; we filter by source==='w4g' so other terminal logs don't leak in.
   useEffect(() => {
-    const off = window.bridge.onEvent('log' as any, (payload: any) => {
+    const unsubscribe = window.bridge.onEvent('log', (payload: any) => {
       if (payload?.source !== 'w4g') return;
       setTngLog((prev) => [
         {
-          ts: new Date().toLocaleTimeString(),
+          at: new Date().toLocaleTimeString(),
           kind: payload.direction,
           text: payload.message,
           payload: payload.payload,
@@ -75,179 +177,128 @@ export function Settings() {
         ...prev,
       ].slice(0, 100));
     });
-    return () => { try { off(); } catch { /* ignore */ } };
+    return () => { try { unsubscribe(); } catch { /* ignore */ } };
   }, []);
 
-  const pushLog = (kind: TngTestLine['kind'], text: string, payload?: unknown) => {
-    setTngLog((prev) => [{ ts: new Date().toLocaleTimeString(), kind, text, payload }, ...prev].slice(0, 100));
+  /** Prepend a line to the black test console (newest first, capped at 100). */
+  const appendTngLog = (kind: TngLogLine['kind'], text: string, payload?: unknown) => {
+    setTngLog((prev) => [{ at: new Date().toLocaleTimeString(), kind, text, payload }, ...prev].slice(0, 100));
   };
 
-  const [save, saving] = useAsyncAction(async () => {
-    if (!s) return;
-    const next = await window.bridge.saveSettings(s);
-    setS(next);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  });
-
-  const [runPing, pingBusy] = useAsyncAction(async () => {
-    if (!s) return;
-    setFaceGateTest('Saving config…');
-    await window.bridge.saveSettings(s);
-    setFaceGateTest('Pinging…');
-    const r = await window.bridge.pingFaceGate();
-    setFaceGateTest(r.ok ? `✓ Reachable (status ${r.status})` : `✗ ${r.error ?? `status ${r.status}`}`);
-  });
-
-  const [runTngLoopback, tngLooping] = useAsyncAction(async () => {
-    if (!s) return;
-    if (!s.tngEnabled) {
-      pushLog('error', 'Enable TNG and save settings first');
-      return;
-    }
-    await window.bridge.saveSettings(s);
-    pushLog('info', `Loopback test — POSTing synthetic PayResult to our own listener…`);
-    const r = await window.bridge.tngLoopbackPayResult();
-    if (r.ok) {
-      pushLog('recv', `✓ Loopback succeeded · status=${r.status} · ${r.elapsedMs}ms — listener is healthy and parsing correctly. If real device callbacks still aren't landing, the issue is purely device-side (PayResult URL or firewall).`, { sent: r.sentBody, response: r.responseBody });
-    } else {
-      pushLog('error', `✗ Loopback failed: ${r.error ?? `status=${r.status}`} — our own listener can't be reached on the callback port. Save settings first, then retry.`);
-    }
+  const [runTngPing, tngPinging] = useAsyncAction(async () => {
+    if (!settings) return;
+    await window.bridge.saveSettings(settings);
+    appendTngLog('info', `Ping ${settings.tngHost}:${settings.tngPort}…`);
+    const result = await window.bridge.tngPing();
+    if (result.ok) appendTngLog('recv', `✓ Reachable (${result.latencyMs}ms)`);
+    else appendTngLog('error', `✗ ${result.error ?? 'unreachable'}`);
   });
 
   const [runTngProbe, tngProbing] = useAsyncAction(async () => {
-    if (!s) return;
-    await window.bridge.saveSettings(s);
-    pushLog('info', `Probe HTTP GET / at ${s.tngHost}:${s.tngPort}…`);
-    const r = await window.bridge.tngProbeHttp();
-    if (r.ok) {
-      pushLog('recv', `✓ HTTP ${r.status} ${r.statusText ?? ''} · ${r.elapsedMs}ms`, {
-        headers: r.headers,
-        body_preview: r.bodyPreview,
+    if (!settings) return;
+    await window.bridge.saveSettings(settings);
+    appendTngLog('info', `Probe HTTP GET / at ${settings.tngHost}:${settings.tngPort}…`);
+    const result = await window.bridge.tngProbeHttp();
+    if (result.ok) {
+      appendTngLog('recv', `✓ HTTP ${result.status} ${result.statusText ?? ''} · ${result.elapsedMs}ms`, {
+        headers: result.headers,
+        body_preview: result.bodyPreview,
       });
     } else {
-      pushLog('error', `✗ Probe failed: ${r.error}`);
+      appendTngLog('error', `✗ Probe failed: ${result.error}`);
     }
   });
 
-  const [runTngPing, tngPinging] = useAsyncAction(async () => {
-    if (!s) return;
-    await window.bridge.saveSettings(s);
-    pushLog('info', `Ping ${s.tngHost}:${s.tngPort}…`);
-    const r = await window.bridge.tngPing();
-    if (r.ok) pushLog('recv', `✓ Reachable (${r.latencyMs}ms)`);
-    else pushLog('error', `✗ ${r.error ?? 'unreachable'}`);
+  const [runTngLoopback, tngLooping] = useAsyncAction(async () => {
+    if (!settings) return;
+    if (!settings.tngEnabled) {
+      appendTngLog('error', 'Enable TNG and save settings first');
+      return;
+    }
+    await window.bridge.saveSettings(settings);
+    appendTngLog('info', `Loopback test — POSTing synthetic PayResult to our own listener…`);
+    const result = await window.bridge.tngLoopbackPayResult();
+    if (result.ok) {
+      appendTngLog('recv', `✓ Loopback succeeded · status=${result.status} · ${result.elapsedMs}ms — listener is healthy and parsing correctly. If real device callbacks still aren't landing, the issue is purely device-side (PayResult URL or firewall).`, { sent: result.sentBody, response: result.responseBody });
+    } else {
+      appendTngLog('error', `✗ Loopback failed: ${result.error ?? `status=${result.status}`} — our own listener can't be reached on the callback port. Save settings first, then retry.`);
+    }
   });
 
   const [runTngPayRequest, tngPayBusy] = useAsyncAction(async () => {
-    if (!s) return;
-    if (!s.tngEnabled) {
-      pushLog('error', 'Enable TNG first and Save settings');
+    if (!settings) return;
+    if (!settings.tngEnabled) {
+      appendTngLog('error', 'Enable TNG first and Save settings');
       return;
     }
-    await window.bridge.saveSettings(s);
-    pushLog('send', `PayRequest amount=${tngTestAmount}c`);
-    const r = await window.bridge.tngTestPayRequest({ payAmount: tngTestAmount });
-    setTngLastOrderId(r.orderId);
-    if (r.ok) {
-      const scheme = r.payType != null ? (PAY_TYPE_LABEL[r.payType] ?? `code ${r.payType}`) : '?';
-      pushLog('recv', `✓ APPROVED · ${scheme} · card=${r.cardNo ?? '-'} · appr=${r.apprCode ?? '-'}`);
-    } else if (r.resultState) {
-      pushLog('error', `✗ DECLINED state=${r.resultState}`);
+    await window.bridge.saveSettings(settings);
+    appendTngLog('send', `PayRequest amount=${tngTestAmountCents}c`);
+    const result = await window.bridge.tngTestPayRequest({ payAmount: tngTestAmountCents });
+    setTngLastOrderId(result.orderId);
+    if (result.ok) {
+      const scheme = result.payType != null ? (PAY_TYPE_LABEL[result.payType] ?? `code ${result.payType}`) : '?';
+      appendTngLog('recv', `✓ APPROVED · ${scheme} · card=${result.cardNo ?? '-'} · appr=${result.apprCode ?? '-'}`);
+    } else if (result.resultState) {
+      appendTngLog('error', `✗ DECLINED state=${result.resultState}`);
     } else {
-      pushLog('error', `✗ ${r.error ?? 'failed'}`);
+      appendTngLog('error', `✗ ${result.error ?? 'failed'}`);
     }
   });
 
   const [runTngPayCancel, tngCancelBusy] = useAsyncAction(async () => {
     if (!tngLastOrderId) {
-      pushLog('error', 'No orderId yet — fire PayRequest first');
+      appendTngLog('error', 'No orderId yet — fire PayRequest first');
       return;
     }
-    pushLog('send', `PayCancel orderId=${tngLastOrderId}`);
-    const r = await window.bridge.tngTestPayCancel(tngLastOrderId);
-    if (r.ok) pushLog('recv', `✓ Cancel accepted (state=${r.deviceState})`);
-    else pushLog('error', `✗ ${r.error ?? `state=${r.deviceState}`}`);
+    appendTngLog('send', `PayCancel orderId=${tngLastOrderId}`);
+    const result = await window.bridge.tngTestPayCancel(tngLastOrderId);
+    if (result.ok) appendTngLog('recv', `✓ Cancel accepted (state=${result.deviceState})`);
+    else appendTngLog('error', `✗ ${result.error ?? `state=${result.deviceState}`}`);
   });
 
-  // ─── App self-update ─────────────────────────────────────────────────
-  const [appUpdate, setAppUpdate] = useState<{
-    checkedAt?: string;
-    currentVersion?: string;
-    latestVersion?: string;
-    isNewer?: boolean;
-    releasedAt?: string | null;
-    notes?: string | null;
-    portable?: { filename: string; size: number | null; url: string } | null;
-    installer?: { filename: string; size: number | null; url: string } | null;
-    error?: string;
-  } | null>(null);
-  const [downloadPct, setDownloadPct] = useState<number | null>(null);
-  const [downloadedPath, setDownloadedPath] = useState<string | null>(null);
+  // ─── App self-update ───────────────────────────────────────────────────────
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckReport | null>(null);
+  const [downloadProgressPct, setDownloadProgressPct] = useState<number | null>(null);
+  const [downloadedUpdatePath, setDownloadedUpdatePath] = useState<string | null>(null);
 
+  // Subscribe to streaming download-progress events from the main process.
   useEffect(() => {
-    // Subscribe to streaming progress events from the main process.
-    const off = window.bridge.onEvent('app-update-progress' as any, (p: any) => {
-      if (typeof p?.pct === 'number') setDownloadPct(p.pct);
+    const unsubscribe = window.bridge.onEvent('app-update-progress', (progress: any) => {
+      if (typeof progress?.pct === 'number') setDownloadProgressPct(progress.pct);
     });
-    return () => { try { off(); } catch { /* ignore */ } };
+    return () => { try { unsubscribe(); } catch { /* ignore */ } };
   }, []);
 
-  const [checkUpdate, checking] = useAsyncAction(async () => {
-    setDownloadPct(null);
-    setDownloadedPath(null);
-    const r = await window.bridge.appUpdateCheck();
-    setAppUpdate({ ...r, checkedAt: new Date().toISOString() });
+  const [runUpdateCheck, checkingForUpdate] = useAsyncAction(async () => {
+    setDownloadProgressPct(null);
+    setDownloadedUpdatePath(null);
+    const report = await window.bridge.appUpdateCheck();
+    setUpdateCheck({ ...report, checkedAt: new Date().toISOString() });
   });
 
-  const [downloadUpdate, downloading] = useAsyncAction(async (variant: 'portable' | 'installer') => {
-    setDownloadPct(0);
-    const r = await window.bridge.appUpdateDownload({ variant });
-    if (r.ok && r.path) setDownloadedPath(r.path);
-    else setAppUpdate((prev) => ({ ...(prev ?? {}), error: r.error ?? 'download_failed' }));
+  const [runUpdateDownload, downloadingUpdate] = useAsyncAction(async (variant: 'portable' | 'installer') => {
+    setDownloadProgressPct(0);
+    const result = await window.bridge.appUpdateDownload({ variant });
+    if (result.ok && result.path) setDownloadedUpdatePath(result.path);
+    else setUpdateCheck((prev) => ({ ...(prev ?? {}), error: result.error ?? 'download_failed' }));
   });
 
-  const [applyUpdate, applying] = useAsyncAction(async () => {
-    if (!downloadedPath) return;
+  const [runUpdateInstall, installingUpdate] = useAsyncAction(async () => {
+    if (!downloadedUpdatePath) return;
     if (!confirm('Install the update now?\n\nThis closes the app. For the installer variant, the NSIS wizard opens — accept its prompts. For the portable, the new exe launches in place.')) return;
-    await window.bridge.appUpdateApply({ path: downloadedPath });
+    await window.bridge.appUpdateApply({ path: downloadedUpdatePath });
   });
 
+  // ─── Maintenance ───────────────────────────────────────────────────────────
   const [runClearCache, clearingCache] = useAsyncAction(async () => {
     if (!confirm('Clear browser cache and reload?\n\nThis wipes Electron-side cached responses, localStorage, IndexedDB, and cookies, then reloads the window. Your parking data (sessions, terminals, settings) is NOT affected.')) return;
-    const r = await window.bridge.clearAppCache();
-    // The reload happens server-side before this resolves, but show feedback
-    // just in case the renderer is still alive momentarily.
-    console.log(`[settings] cache cleared in ${r.elapsedMs}ms`);
+    const result = await window.bridge.clearAppCache();
+    // The reload happens main-process-side before this resolves, but show
+    // feedback just in case the renderer is still alive momentarily.
+    console.log(`[settings] cache cleared in ${result.elapsedMs}ms`);
   });
 
-  const [runTestOpen, testOpenBusy] = useAsyncAction(async () => {
-    if (!s) return;
-    setFaceGateTest('Saving config…');
-    await window.bridge.saveSettings(s);
-    setFaceGateTest('Opening…');
-    const r = await window.bridge.openFaceGate({ plate: 'TEST', reason: 'settings-test' });
-    if (r.ok) {
-      setFaceGateTest('✓ Open command accepted by gateway');
-    } else {
-      const bodyMsg = (r.body as any)?.message ?? (r.body as any)?.error ?? '';
-      const bits = [`status ${r.status ?? '—'}`];
-      if (r.error) bits.push(r.error);
-      if (bodyMsg) bits.push(bodyMsg);
-      setFaceGateTest(`✗ ${bits.join(' · ')}`);
-    }
-  });
-
-  const handleSyncAll = async () => {
-    try{
-      const results = await window.bridge.syncAllNow();    
-      console.log(results);
-    }catch(e) {
-    console.error('[SiteSettings] failed to sync all', e);   // ← don't swallow
-  }
-  }
-
-  if (!s) return <div className="p-10 text-center text-gray-500 text-sm">Loading…</div>;
+  if (!settings) return <div className="p-10 text-center text-gray-500 text-sm">Loading…</div>;
 
   return (
     <div className="p-5 sm:p-8 max-w-3xl mx-auto">
@@ -259,34 +310,47 @@ export function Settings() {
           <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">qparking SaaS sync</h2>
           <button
             type="button"
-            onClick={handleSyncAll}
-            className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide"
+            onClick={() => runCloudSyncNow()}
+            disabled={cloudSyncing}
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
           >
-            <RefreshCw size={13} />
-            Sync now
+            {cloudSyncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {cloudSyncing ? 'Syncing…' : 'Sync now'}
           </button>
         </div>
         <Field label="qparking base URL">
-          <input className="input" value={s.qparkingBaseUrl} onChange={(e) => setS({ ...s, qparkingBaseUrl: e.target.value })} placeholder="https://parking.qbot.now" />
+          <input className="input" value={settings.qparkingBaseUrl} onChange={(e) => setSettings({ ...settings, qparkingBaseUrl: e.target.value })} placeholder="https://parking.qbot.now" />
         </Field>
         <Field label="API key">
-          <input type="password" className="input font-mono text-xs" value={s.qparkingApiKey} onChange={(e) => setS({ ...s, qparkingApiKey: e.target.value })} placeholder="issued by qparking admin" />
+          <input type="password" className="input font-mono text-xs" value={settings.qparkingApiKey} onChange={(e) => setSettings({ ...settings, qparkingApiKey: e.target.value })} placeholder="issued by qparking admin" />
         </Field>
-        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Scope/rate rows are pulled from <code className="font-mono">{`{base}/api/local-server/scopes`}</code>. Background sync runs hourly.</p>
+        {cloudSyncReport && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
+            {(['site', 'scopes', 'passes', 'spaces'] as const).map((model) => {
+              const result = cloudSyncReport[model];
+              return (
+                <div key={model} className={result.ok ? 'text-emerald-700' : 'text-red-700'}>
+                  {result.ok ? '✓' : '✗'} {model} — {result.ok ? `${result.fetched} pulled` : result.error}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, scopes, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>. Background sync re-pulls everything every 60 seconds.</p>
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
         <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Local servers</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="LPR webhook port">
-            <input type="number" className="input" value={s.lprWebhookPort} onChange={(e) => setS({ ...s, lprWebhookPort: Number(e.target.value) })} />
+            <input type="number" className="input" value={settings.lprWebhookPort} onChange={(e) => setSettings({ ...settings, lprWebhookPort: Number(e.target.value) })} />
           </Field>
           <Field label="Operator API port">
-            <input type="number" className="input" value={s.apiPort} onChange={(e) => setS({ ...s, apiPort: Number(e.target.value) })} />
+            <input type="number" className="input" value={settings.apiPort} onChange={(e) => setSettings({ ...settings, apiPort: Number(e.target.value) })} />
           </Field>
         </div>
         <Field label="Image store path (optional)">
-          <input className="input font-mono text-xs" value={s.imageStorePath} onChange={(e) => setS({ ...s, imageStorePath: e.target.value })} placeholder="leave blank to use app userData/plates" />
+          <input className="input font-mono text-xs" value={settings.imageStorePath} onChange={(e) => setSettings({ ...settings, imageStorePath: e.target.value })} placeholder="leave blank to use app userData/plates" />
         </Field>
       </section>
 
@@ -301,8 +365,8 @@ export function Settings() {
           <input
             type="checkbox"
             className="mt-0.5 w-4 h-4 accent-gray-900"
-            checked={s.faceGateEnabled}
-            onChange={(e) => setS({ ...s, faceGateEnabled: e.target.checked })}
+            checked={settings.faceGateEnabled}
+            onChange={(e) => setSettings({ ...settings, faceGateEnabled: e.target.checked })}
           />
           <div>
             <div className="text-sm font-semibold">Trigger faceapp turnstile on every plate scan</div>
@@ -313,30 +377,30 @@ export function Settings() {
         </label>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="faceapp_main base URL">
-            <input className="input" value={s.faceappBaseUrl} onChange={(e) => setS({ ...s, faceappBaseUrl: e.target.value })} placeholder="https://face.qbot.now" />
+            <input className="input" value={settings.faceappBaseUrl} onChange={(e) => setSettings({ ...settings, faceappBaseUrl: e.target.value })} placeholder="https://face.qbot.now" />
           </Field>
           <Field label="API token">
-            <input type="password" className="input font-mono text-xs" value={s.faceappApiToken} onChange={(e) => setS({ ...s, faceappApiToken: e.target.value })} placeholder="FACEAPP_EXTERNAL_API_TOKEN" />
+            <input type="password" className="input font-mono text-xs" value={settings.faceappApiToken} onChange={(e) => setSettings({ ...settings, faceappApiToken: e.target.value })} placeholder="FACEAPP_EXTERNAL_API_TOKEN" />
           </Field>
           <Field label="Device ID (0 = default device)">
-            <input type="number" className="input" value={s.faceappDeviceId} onChange={(e) => setS({ ...s, faceappDeviceId: Number(e.target.value) })} />
+            <input type="number" className="input" value={settings.faceappDeviceId} onChange={(e) => setSettings({ ...settings, faceappDeviceId: Number(e.target.value) })} />
           </Field>
           <div className="flex items-end gap-2">
-            <button onClick={() => runPing()} disabled={pingBusy || testOpenBusy}
+            <button onClick={() => runFaceGatePing()} disabled={faceGatePingBusy || faceGateOpenBusy}
               className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
-              {pingBusy ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />}
-              {pingBusy ? 'Pinging…' : 'Ping'}
+              {faceGatePingBusy ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />}
+              {faceGatePingBusy ? 'Pinging…' : 'Ping'}
             </button>
-            <button onClick={() => runTestOpen()} disabled={pingBusy || testOpenBusy}
+            <button onClick={() => runFaceGateOpen()} disabled={faceGatePingBusy || faceGateOpenBusy}
               className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-              {testOpenBusy ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
-              {testOpenBusy ? 'Opening…' : 'Test open'}
+              {faceGateOpenBusy ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
+              {faceGateOpenBusy ? 'Opening…' : 'Test open'}
             </button>
           </div>
         </div>
-        {faceGateTest && (
-          <div className={`rounded-lg border px-3 py-2 text-xs font-mono ${faceGateTest.startsWith('✓') ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
-            {faceGateTest}
+        {faceGateTestResult && (
+          <div className={`rounded-lg border px-3 py-2 text-xs font-mono ${faceGateTestResult.startsWith('✓') ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+            {faceGateTestResult}
           </div>
         )}
       </section>
@@ -347,8 +411,8 @@ export function Settings() {
           <input
             type="checkbox"
             className="mt-0.5 w-4 h-4 accent-gray-900"
-            checked={s.entryCameraHandlesExit}
-            onChange={(e) => setS({ ...s, entryCameraHandlesExit: e.target.checked })}
+            checked={settings.entryCameraHandlesExit}
+            onChange={(e) => setSettings({ ...settings, entryCameraHandlesExit: e.target.checked })}
           />
           <div>
             <div className="text-sm font-semibold">Single-camera mode: entry cam also handles exits</div>
@@ -376,8 +440,8 @@ export function Settings() {
           <input
             type="checkbox"
             className="mt-0.5 w-4 h-4 accent-gray-900"
-            checked={s.tngEnabled}
-            onChange={(e) => setS({ ...s, tngEnabled: e.target.checked })}
+            checked={settings.tngEnabled}
+            onChange={(e) => setSettings({ ...settings, tngEnabled: e.target.checked })}
           />
           <div>
             <div className="text-sm font-semibold">Enable Touch'n'Go W4G acquirer</div>
@@ -388,19 +452,19 @@ export function Settings() {
         </label>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="W4G device IP">
-            <input className="input font-mono" value={s.tngHost} onChange={(e) => setS({ ...s, tngHost: e.target.value })} placeholder="192.168.1.105" />
+            <input className="input font-mono" value={settings.tngHost} onChange={(e) => setSettings({ ...settings, tngHost: e.target.value })} placeholder="192.168.1.105" />
           </Field>
           <Field label="W4G HTTP port">
-            <input type="number" className="input" value={s.tngPort} onChange={(e) => setS({ ...s, tngPort: Number(e.target.value) })} />
+            <input type="number" className="input" value={settings.tngPort} onChange={(e) => setSettings({ ...settings, tngPort: Number(e.target.value) })} />
           </Field>
           <Field label="Our callback port (PayResult)">
-            <input type="number" className="input" value={s.tngCallbackPort} onChange={(e) => setS({ ...s, tngCallbackPort: Number(e.target.value) })} />
+            <input type="number" className="input" value={settings.tngCallbackPort} onChange={(e) => setSettings({ ...settings, tngCallbackPort: Number(e.target.value) })} />
             <p className="text-[11px] text-gray-500 mt-1">
-              The W4G device POSTs results to <code className="font-mono">http://&lt;our-lan-ip&gt;:{s.tngCallbackPort}/w4g/PayResult</code>. Make sure this port is open on the host firewall.
+              The W4G device POSTs results to <code className="font-mono">http://&lt;our-lan-ip&gt;:{settings.tngCallbackPort}/w4g/PayResult</code>. Make sure this port is open on the host firewall.
             </p>
           </Field>
           <Field label="Per-transaction timeout (seconds)">
-            <input type="number" className="input" value={s.tngTimeoutSeconds} onChange={(e) => setS({ ...s, tngTimeoutSeconds: Number(e.target.value) })} />
+            <input type="number" className="input" value={settings.tngTimeoutSeconds} onChange={(e) => setSettings({ ...settings, tngTimeoutSeconds: Number(e.target.value) })} />
           </Field>
         </div>
         {tngStatus && (
@@ -426,7 +490,7 @@ export function Settings() {
               </div>
             )}
             {tngStatus.pending.length > 0 && (
-              <div>Pending orders: {tngStatus.pending.map((p) => `${p.orderId.slice(0, 8)}…(${p.payAmount}c)`).join(', ')}</div>
+              <div>Pending orders: {tngStatus.pending.map((order) => `${order.orderId.slice(0, 8)}…(${order.payAmount}c)`).join(', ')}</div>
             )}
             {tngStatus.lastResult && (
               <div>Last result: orderId={tngStatus.lastResult.orderId.slice(0, 8)}… status={tngStatus.lastResult.status} payType={tngStatus.lastResult.payType ?? '-'} at {new Date(tngStatus.lastResult.at).toLocaleTimeString()}</div>
@@ -439,7 +503,7 @@ export function Settings() {
         <div className="flex flex-wrap items-end gap-2 pt-1">
           <div>
             <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">Test amount (cents)</label>
-            <input type="number" min="1" className="input w-32" value={tngTestAmount} onChange={(e) => setTngTestAmount(Math.max(1, Number(e.target.value) || 1))} />
+            <input type="number" min="1" className="input w-32" value={tngTestAmountCents} onChange={(e) => setTngTestAmountCents(Math.max(1, Number(e.target.value) || 1))} />
           </div>
           <button onClick={() => runTngPing()} disabled={tngPinging || tngProbing || tngPayBusy || tngCancelBusy}
             className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
@@ -481,7 +545,7 @@ export function Settings() {
               return (
                 <div key={idx} className={kindColor}>
                   <div className="break-all">
-                    <span className="text-gray-500">{line.ts}</span>{' '}
+                    <span className="text-gray-500">{line.at}</span>{' '}
                     <span className="uppercase">{line.kind}</span>{' '}
                     {line.text}
                   </div>
@@ -513,7 +577,7 @@ export function Settings() {
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
         <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Operations</h2>
         <Field label="Exit grace period (seconds)">
-          <input type="number" className="input" value={s.exitGracePeriodSeconds} onChange={(e) => setS({ ...s, exitGracePeriodSeconds: Number(e.target.value) })} />
+          <input type="number" className="input" value={settings.exitGracePeriodSeconds} onChange={(e) => setSettings({ ...settings, exitGracePeriodSeconds: Number(e.target.value) })} />
           <p className="text-[11px] text-gray-500 mt-1">If payment terminal doesn't complete within this window, the operator gets a manual-release prompt.</p>
         </Field>
       </section>
@@ -525,83 +589,83 @@ export function Settings() {
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={() => checkUpdate()}
-            disabled={checking || downloading || applying}
+            onClick={() => runUpdateCheck()}
+            disabled={checkingForUpdate || downloadingUpdate || installingUpdate}
             className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50"
           >
-            {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-            {checking ? 'Checking…' : 'Check for updates'}
+            {checkingForUpdate ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {checkingForUpdate ? 'Checking…' : 'Check for updates'}
           </button>
-          {appUpdate?.checkedAt && (
+          {updateCheck?.checkedAt && (
             <span className="text-[11px] text-gray-500">
-              Last checked {new Date(appUpdate.checkedAt).toLocaleTimeString()}
+              Last checked {new Date(updateCheck.checkedAt).toLocaleTimeString()}
             </span>
           )}
         </div>
 
-        {appUpdate?.error && (
+        {updateCheck?.error && (
           <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">
-            <strong>Error:</strong> {appUpdate.error}
+            <strong>Error:</strong> {updateCheck.error}
           </div>
         )}
 
-        {appUpdate?.currentVersion && appUpdate.latestVersion && (
+        {updateCheck?.currentVersion && updateCheck.latestVersion && (
           <div className={`rounded-lg border px-3 py-2.5 text-xs space-y-1 ${
-            appUpdate.isNewer ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'
+            updateCheck.isNewer ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'
           }`}>
             <div className="flex items-center justify-between gap-2">
               <div className="inline-flex items-center gap-1.5">
-                <Package size={13} className={appUpdate.isNewer ? 'text-amber-700' : 'text-emerald-700'} />
+                <Package size={13} className={updateCheck.isNewer ? 'text-amber-700' : 'text-emerald-700'} />
                 <span className="font-bold">
-                  {appUpdate.isNewer
-                    ? `Update available: ${appUpdate.latestVersion}`
-                    : `You're on the latest (${appUpdate.currentVersion})`}
+                  {updateCheck.isNewer
+                    ? `Update available: ${updateCheck.latestVersion}`
+                    : `You're on the latest (${updateCheck.currentVersion})`}
                 </span>
               </div>
               <span className="font-mono text-[11px] text-gray-600">
-                installed: {appUpdate.currentVersion}
-                {appUpdate.releasedAt && appUpdate.isNewer && (
-                  <> · released: {new Date(appUpdate.releasedAt).toLocaleDateString()}</>
+                installed: {updateCheck.currentVersion}
+                {updateCheck.releasedAt && updateCheck.isNewer && (
+                  <> · released: {new Date(updateCheck.releasedAt).toLocaleDateString()}</>
                 )}
               </span>
             </div>
-            {appUpdate.notes && (
-              <p className="text-[11px] text-gray-700 mt-1 whitespace-pre-wrap">{appUpdate.notes}</p>
+            {updateCheck.notes && (
+              <p className="text-[11px] text-gray-700 mt-1 whitespace-pre-wrap">{updateCheck.notes}</p>
             )}
           </div>
         )}
 
-        {appUpdate?.isNewer && (appUpdate.portable || appUpdate.installer) && !downloadedPath && (
+        {updateCheck?.isNewer && (updateCheck.portable || updateCheck.installer) && !downloadedUpdatePath && (
           <div className="space-y-2">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">Choose how to update</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {appUpdate.installer && (
+              {updateCheck.installer && (
                 <button
-                  onClick={() => downloadUpdate('installer')}
-                  disabled={downloading || applying}
+                  onClick={() => runUpdateDownload('installer')}
+                  disabled={downloadingUpdate || installingUpdate}
                   className="flex flex-col items-start gap-1 rounded-lg border border-gray-200 hover:border-gray-900 px-3 py-2.5 text-left disabled:opacity-50"
                 >
                   <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide">
                     <Download size={13} /> Installer (.exe)
                   </div>
-                  <div className="text-[11px] text-gray-500 font-mono">{appUpdate.installer.filename}</div>
+                  <div className="text-[11px] text-gray-500 font-mono">{updateCheck.installer.filename}</div>
                   <div className="text-[11px] text-gray-400">
-                    {appUpdate.installer.size ? `${(appUpdate.installer.size / 1024 / 1024).toFixed(1)} MB` : '—'} · NSIS wizard, in-place upgrade
+                    {updateCheck.installer.size ? `${(updateCheck.installer.size / 1024 / 1024).toFixed(1)} MB` : '—'} · NSIS wizard, in-place upgrade
                   </div>
                 </button>
               )}
-              {appUpdate.portable && (
+              {updateCheck.portable && (
                 <button
-                  onClick={() => downloadUpdate('portable')}
-                  disabled={downloading || applying}
+                  onClick={() => runUpdateDownload('portable')}
+                  disabled={downloadingUpdate || installingUpdate}
                   className="flex flex-col items-start gap-1 rounded-lg border border-gray-200 hover:border-gray-900 px-3 py-2.5 text-left disabled:opacity-50"
                 >
                   <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide">
                     <Download size={13} /> Portable (.exe)
                   </div>
-                  <div className="text-[11px] text-gray-500 font-mono">{appUpdate.portable.filename}</div>
+                  <div className="text-[11px] text-gray-500 font-mono">{updateCheck.portable.filename}</div>
                   <div className="text-[11px] text-gray-400">
-                    {appUpdate.portable.size ? `${(appUpdate.portable.size / 1024 / 1024).toFixed(1)} MB` : '—'} · single-file, no installer
+                    {updateCheck.portable.size ? `${(updateCheck.portable.size / 1024 / 1024).toFixed(1)} MB` : '—'} · single-file, no installer
                   </div>
                 </button>
               )}
@@ -609,31 +673,31 @@ export function Settings() {
           </div>
         )}
 
-        {downloadPct !== null && !downloadedPath && (
+        {downloadProgressPct !== null && !downloadedUpdatePath && (
           <div className="space-y-1">
             <div className="flex items-center justify-between text-[11px] text-gray-600">
               <span className="inline-flex items-center gap-1.5"><Loader2 size={11} className="animate-spin" /> Downloading…</span>
-              <span className="font-mono">{downloadPct}%</span>
+              <span className="font-mono">{downloadProgressPct}%</span>
             </div>
             <div className="h-2 rounded-full overflow-hidden bg-gray-100">
-              <div className="h-full bg-gray-900 transition-all" style={{ width: `${downloadPct}%` }} />
+              <div className="h-full bg-gray-900 transition-all" style={{ width: `${downloadProgressPct}%` }} />
             </div>
           </div>
         )}
 
-        {downloadedPath && (
+        {downloadedUpdatePath && (
           <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs space-y-2">
             <div className="inline-flex items-center gap-1.5 font-bold text-emerald-800">
               <Check size={13} /> Download complete
             </div>
-            <div className="font-mono text-[10px] text-gray-600 break-all">{downloadedPath}</div>
+            <div className="font-mono text-[10px] text-gray-600 break-all">{downloadedUpdatePath}</div>
             <button
-              onClick={() => applyUpdate()}
-              disabled={applying}
+              onClick={() => runUpdateInstall()}
+              disabled={installingUpdate}
               className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
             >
-              {applying ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
-              {applying ? 'Restarting…' : 'Install & restart'}
+              {installingUpdate ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              {installingUpdate ? 'Restarting…' : 'Install & restart'}
             </button>
           </div>
         )}
@@ -656,10 +720,10 @@ export function Settings() {
       </section>
 
       <div className="mt-5 flex items-center gap-2">
-        <button onClick={() => save()} disabled={saving}
+        <button onClick={() => saveSettings()} disabled={savingSettings}
           className="inline-flex items-center gap-2 h-11 px-5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-          {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-          {saving ? 'Saving…' : saved ? 'Saved' : 'Save settings'}
+          {savingSettings ? <Loader2 size={14} className="animate-spin" /> : justSaved ? <Check size={14} /> : <Save size={14} />}
+          {savingSettings ? 'Saving…' : justSaved ? 'Saved' : 'Save settings'}
         </button>
       </div>
 
@@ -668,6 +732,7 @@ export function Settings() {
   );
 }
 
+/** Labelled form row — tiny uppercase label above whatever input is passed in. */
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>

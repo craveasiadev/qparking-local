@@ -89,7 +89,6 @@ const api: BridgeApi = {
   syncScopesNow: () => ipcRenderer.invoke('scopes:sync'),
   syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
 
-
   // Mirrored config from qparking SaaS (read-only locally)
   listSpaces: () => ipcRenderer.invoke('spaces:list'),
   syncSpacesNow: () => ipcRenderer.invoke('spaces:sync'),
@@ -118,6 +117,7 @@ const api: BridgeApi = {
   // settings + diagnostics
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (s: unknown) => ipcRenderer.invoke('settings:save', s),
+  getCurrentSite: () => ipcRenderer.invoke('site:get-current'),
   diagnoseLpr: () => ipcRenderer.invoke('diagnose:lpr'),
 
   // gate simulator
@@ -149,6 +149,8 @@ const api: BridgeApi = {
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };
   },
+
+  debug: () => ipcRenderer.invoke('debug'),
 };
 
 contextBridge.exposeInMainWorld('bridge', api);

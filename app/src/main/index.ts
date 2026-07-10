@@ -80,6 +80,7 @@ import {
   updateSessionFields,
   listScopes, getScope,
   listParkingSpaces, listActivePasses,
+  getCurrentSite,
 } from './services/db';
 import { computeFee, retriggerSessionExit, simulateScopeFee } from './services/parking-flow';
 import {
@@ -90,7 +91,8 @@ import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncScopes, pushScopeRate, syncSpaces,
   startGatePoll, setGateOpenHandler,
-  syncAll,
+  syncAll, syncSite,
+  handleDebug,
 } from './services/qparking-sync';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
 import { openFaceGate, pingFaceGate } from './services/face-gate';
@@ -673,6 +675,7 @@ ipcMain.handle('app:clear-cache', async () => {
 });
 
 ipcMain.handle('settings:get', () => getSettings());
+ipcMain.handle('site:get-current', () => getCurrentSite());
 ipcMain.handle('settings:save', (_e, patch) => {
   const next = saveSettings(patch);
   // If the LPR port changed, restart the server.
@@ -782,3 +785,5 @@ ipcMain.handle('gate:test', (_e, opts: { plate?: string; direction?: 'in'|'out'|
 });
 
 ipcMain.handle('sync:all-tables', () => syncAll());
+
+ipcMain.handle('debug', () => handleDebug());
