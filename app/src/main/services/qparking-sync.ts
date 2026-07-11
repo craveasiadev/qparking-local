@@ -416,7 +416,7 @@ export function stopGatePoll(): void {
 // ─── push: rate edits up to the SaaS ─────────────────────────────────────────
 
 /**
- * Push a rate edit up to the qparking SaaS (PUT /scopes/rate). On success
+ * Push a rate edit up to the qparking SaaS (PUT /rate-policies/upsert). On success
  * we immediately re-pull the policies so the cached row reflects whatever
  * the SaaS canonicalised (and the rest of the app sees the new fee math).
  */
@@ -430,7 +430,7 @@ export async function pushRatePolicy(rateInput: {
   const cloud = getCloudApi();
   if (!cloud) return NOT_CONFIGURED;
   try {
-    await cloud.put('/scopes/rate', {
+    await cloud.put('/rate-policies/upsert', {
       first_block_cents: rateInput.firstBlockCents,
       per_block_cents: rateInput.perBlockCents,
       block_minutes: rateInput.blockMinutes,
