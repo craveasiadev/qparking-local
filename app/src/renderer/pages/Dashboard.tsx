@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Activity, Car, CreditCard, Camera, AlertCircle, MonitorPlay, Bolt, Cloud, CloudOff, RefreshCw, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { ParkingSession, PaymentTerminal, LprCamera, TerminalStatus, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useCurrentSite } from '../hooks/useCurrentSite';
 
 interface PlateEvent {
   cameraId: number;
@@ -19,6 +20,9 @@ export function Dashboard() {
   const [recentPlates, setRecentPlates] = useState<PlateEvent[]>([]);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  // Shared with the global not-connected banner — gates the sync panel below so
+  // "all caught up" never shows while this server is unlinked from a site.
+  const site = useCurrentSite();
 
   async function refresh() {
     const [o, r, t, c, syncStatus] = await Promise.all([
@@ -73,7 +77,7 @@ export function Dashboard() {
   const onlineTerminals = Object.values(statuses).filter((s) => s.conn === 'ready' || s.conn === 'connected' || s.conn === 'transacting').length;
 
   return (
-    <div className="p-5 sm:p-8 max-w-6xl mx-auto">
+    <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
@@ -98,8 +102,12 @@ export function Dashboard() {
       </header>
 
       {/* Cloud-sync health panel — surfaces failures to qparking SaaS so the
-          operator notices a broken link before reconciliation hell sets in. */}
-      {sync && <SyncPanel sync={sync} retrying={retrying} draining={draining} backfilling={backfilling}
+          operator notices a broken link before reconciliation hell sets in.
+          Only meaningful once this local server is actually linked to a site;
+          while unlinked the global NotConnectedNotice (App) covers it, so we
+          just suppress the panel here rather than show a misleading
+          "all caught up". */}
+      {site && sync && <SyncPanel sync={sync} retrying={retrying} draining={draining} backfilling={backfilling}
         onRetry={() => retrySync()} onDrain={() => drainSync()} onBackfill={() => backfillSessions()} />}
       {backfillMsg && (
         <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs px-3 py-2">{backfillMsg}</div>

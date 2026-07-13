@@ -46,7 +46,7 @@ export function Lanes() {
   }
 
   return (
-    <div className="p-5 sm:p-8 max-w-5xl mx-auto">
+    <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       {confirmDialog}
       <header className="flex items-center justify-between mb-5">
         <div>

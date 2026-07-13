@@ -15,6 +15,8 @@ import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
 import { SeasonPasses } from './pages/SeasonPasses';
 import { ParkingSpaces } from './pages/ParkingSpaces';
+import { NotConnectedNotice } from './components/NotConnectedNotice';
+import { useCurrentSite } from './hooks/useCurrentSite';
 
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
@@ -27,6 +29,12 @@ type Page =
 
 interface NavItem { id: Page; label: string; icon: any }
 interface NavSection { key: string; label: string; items: NavItem[] }
+
+// Every page centres its content at this width (matches each page's root
+// container). The global not-connected banner reuses it so it lines up with
+// the page below instead of running full-bleed. Change here + in the page
+// containers together if the app-wide content width ever changes.
+const PAGE_MAX_WIDTH = 'max-w-7xl';
 
 // Sidebar matches the cloud SaaS operator menu groupings so an operator who
 // uses both surfaces sees the same mental map. Categories that don't exist
@@ -73,6 +81,7 @@ interface DebugLogEntry {
 
 export function App() {
   const [page, setPage] = useState<Page>('dashboard');
+  const site = useCurrentSite();
   const [buildInfo, setBuildInfo] = useState<{ version: string; isPackaged: boolean } | null>(null);
   const [debugLog, setDebugLog] = useState<DebugLogEntry[]>([]);
   const [debugOpen, setDebugOpen] = useState(true);
@@ -198,6 +207,14 @@ export function App() {
       </aside>
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <div className="flex-1 min-h-0 overflow-y-auto">
+          {/* Global connection banner — every page except Settings (where the
+              operator fixes the link) gets the "not connected" notice until a
+              site syncs down. */}
+          {page !== 'settings' && !site && (
+            <div className={`px-5 sm:px-8 pt-5 sm:pt-8 mx-auto ${PAGE_MAX_WIDTH}`}>
+              <NotConnectedNotice />
+            </div>
+          )}
           {page === 'dashboard' && <Dashboard />}
           {page === 'live' && <LiveDisplay />}
           {page === 'cameras' && <Cameras />}

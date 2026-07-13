@@ -39,7 +39,7 @@ export function Sites() {
   // First read still in flight → show the skeleton in place of the content.
   if (loading) {
     return (
-      <div className="p-5 sm:p-8 max-w-3xl mx-auto animate-pulse">
+      <div className="p-5 sm:p-8 max-w-7xl mx-auto animate-pulse">
         {/* Title + subtitle */}
         <div className="h-7 w-40 rounded bg-gray-200" />
         <div className="mt-2 h-4 w-96 max-w-full rounded bg-gray-100" />
@@ -100,7 +100,7 @@ export function Sites() {
   // Read finished but nothing synced yet (e.g. fresh install before first sync).
   if (!currentSite) {
     return (
-      <div className="p-5 sm:p-8 max-w-3xl mx-auto">
+      <div className="p-5 sm:p-8 max-w-7xl mx-auto">
         <h1 className="text-2xl font-bold tracking-tight">Sites</h1>
         <div className="mt-5 rounded-xl border border-dashed border-gray-300 bg-white p-10 text-center">
           <MapPin size={28} className="mx-auto text-gray-300" />
@@ -115,7 +115,7 @@ export function Sites() {
   const occupancyPct = currentSite.totalSpaces > 0 ? Math.round((currentSite.occupiedSpaces / currentSite.totalSpaces) * 100) : 0;
 
   return (
-    <div className="p-5 sm:p-8 max-w-3xl mx-auto">
+    <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <h1 className="text-2xl font-bold tracking-tight">Sites</h1>
       <p className="text-sm text-gray-500 mt-1">Read-only site profile, mirrored from qparking SaaS. Edit these values in the cloud admin panel.</p>
 

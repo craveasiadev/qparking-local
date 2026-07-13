@@ -1184,9 +1184,9 @@ export async function simulateCompletedSession(
 
   // Rate resolves the same way a real exit does: this lane plays the ENTRY role
   // (its plan governs pricing), falling back to the site-default plan.
-  const scope = (lane.scopeId ? getScope(lane.scopeId) : null) ?? getSiteDefaultScope();
+  const policy = (lane.policyId ? getRatePolicy(lane.policyId) : null) ?? getSiteDefaultRatePolicy();
   const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  const feeCents = computeFee(durationMinutes, scope, entryIso, exitIso);
+  const feeCents = computeFee(durationMinutes, policy, entryIso, exitIso);
   const paymentStatus: ParkingSession['paymentStatus'] = feeCents > 0 ? 'paid' : 'free';
 
   // Snapshot off the lane camera's live SDK feed (if any) so the record shows a
@@ -1208,8 +1208,8 @@ export async function simulateCompletedSession(
     cardScheme: null,
     paymentTimestamp: paymentStatus === 'paid' ? new Date(exitMs).toISOString() : null,
   });
-  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min scope=${scope?.scopeName ?? 'NONE'} img=${imagePath ? 'yes' : 'none'} → fee=${feeCents}c status=${paymentStatus}`);
-  return { ok: true, sessionId: session.id, durationMinutes, feeCents, scopeName: scope?.scopeName, currency: scope?.currency, paymentStatus };
+  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min policy=${policy?.policyName ?? 'NONE'} img=${imagePath ? 'yes' : 'none'} → fee=${feeCents}c status=${paymentStatus}`);
+  return { ok: true, sessionId: session.id, durationMinutes, feeCents, scopeName: policy?.policyName, currency: policy?.currency, paymentStatus };
 }
 
 /**

@@ -127,9 +127,14 @@ function paymentFields(session: ParkingSession) {
   };
 }
 
+// site_id must equal the ENTRY record's site_id — the cloud correlates
+// entry↔exit by (site_id + plate_number). So resolve the lane ENTRY-first here
+// (and in update/delete) even when the car exits through a different lane whose
+// rate plan (scope) differs; otherwise the exit lands under a different site and
+// never closes the open entry record.
 export function enqueueExit(session: ParkingSession): void {
-  const lane = session.exitLaneId ? getLane(session.exitLaneId)
-    : (session.entryLaneId ? getLane(session.entryLaneId) : null);
+  const lane = session.entryLaneId ? getLane(session.entryLaneId)
+    : (session.exitLaneId ? getLane(session.exitLaneId) : null);
   if (!lane?.policyId) return;
   // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
   // and the freshly-captured exit image. Cloud upsert is idempotent per column
@@ -151,8 +156,8 @@ export function enqueueExit(session: ParkingSession): void {
 }
 
 export function enqueueUpdate(session: ParkingSession): void {
-  const lane = session.exitLaneId ? getLane(session.exitLaneId)
-    : (session.entryLaneId ? getLane(session.entryLaneId) : null);
+  const lane = session.entryLaneId ? getLane(session.entryLaneId)
+    : (session.exitLaneId ? getLane(session.exitLaneId) : null);
   if (!lane?.policyId) return;
   // The same upsertParkingRecord endpoint handles updates — re-posting an
   // open entry refreshes it; posting with an exit_time closes it. So an
@@ -179,8 +184,8 @@ export function enqueueUpdate(session: ParkingSession): void {
 }
 
 export function enqueueDelete(session: ParkingSession): void {
-  const lane = session.exitLaneId ? getLane(session.exitLaneId)
-    : (session.entryLaneId ? getLane(session.entryLaneId) : null);
+  const lane = session.entryLaneId ? getLane(session.entryLaneId)
+    : (session.exitLaneId ? getLane(session.exitLaneId) : null);
   if (!lane?.policyId) return;
   enqueueSync('session.delete', {
     site_id: lane.policyId,

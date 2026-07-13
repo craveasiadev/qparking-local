@@ -8,7 +8,7 @@
  * matches the lane.policyId. Terminals don't have their own policyId, so we
  * resolve site via the lane that references them.
  */
-import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection } from './db';
+import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection, getCurrentSite } from './db';
 import { getCloudApi, describeRequestError } from './cloud-api';
 
 interface PushResult { ok: boolean; error?: string }
@@ -34,6 +34,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
 
   return postToCloud('/terminals', {
     external_id: `local-${terminal.id}`,
+    site_id: getCurrentSite()?.id ?? null, // this install's single cloud site
     name: terminal.name,
     host: terminal.host,
     port: terminal.port,
@@ -55,6 +56,7 @@ export async function pushLane(laneId: number): Promise<PushResult> {
 
   return postToCloud('/lanes', {
     external_id: `local-${lane.id}`,
+    site_id: getCurrentSite()?.id ?? null, // this install's single cloud site
     name: lane.name,
     // Derived from the lane's cameras (may be 'dual', or null if none wired).
     direction: deriveLaneDirection(lane.id),

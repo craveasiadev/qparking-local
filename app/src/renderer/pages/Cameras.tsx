@@ -40,7 +40,7 @@ export function Cameras() {
   });
 
   return (
-    <div className="p-5 sm:p-8 max-w-5xl mx-auto">
+    <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">LPR cameras</h1>
