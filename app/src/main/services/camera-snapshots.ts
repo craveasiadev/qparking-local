@@ -110,7 +110,10 @@ async function uploadAllSnapshots(): Promise<void> {
     const snapshot = await fetchSnapshot(camera.id);
     if (!snapshot.ok || !snapshot.base64) continue;
     try {
-      await cloud.post(`/cameras/${camera.id}/snapshot`, {
+      // Path param must match the external_id the camera was registered under
+      // (`local-{id}` — see camera-push.ts), because uploadSnapshot looks the
+      // camera up by site-scoped external_id, not the raw local numeric id.
+      await cloud.post(`/camera-devices/local-${camera.id}/snapshot`, {
         content_type: snapshot.contentType,
         base64: snapshot.base64,
         fetched_at: snapshot.fetchedAt,

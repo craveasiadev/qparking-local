@@ -32,7 +32,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
   const owningLane = listLanes().find((lane) => lane.terminalId === terminal.id);
   if (!owningLane?.policyId) return { ok: false, error: 'terminal_not_attached_to_scoped_lane' };
 
-  return postToCloud('/terminals', {
+  return postToCloud('/local-terminals/upsert', {
     external_id: `local-${terminal.id}`,
     name: terminal.name,
     host: terminal.host,
@@ -53,7 +53,7 @@ export async function pushLane(laneId: number): Promise<PushResult> {
   if (!lane.policyId) return { ok: false, error: 'lane_has_no_scope' };
   const terminal = lane.terminalId ? getTerminal(lane.terminalId) : null;
 
-  return postToCloud('/lanes', {
+  return postToCloud('/local-lanes/upsert', {
     external_id: `local-${lane.id}`,
     name: lane.name,
     // Derived from the lane's cameras (may be 'dual', or null if none wired).

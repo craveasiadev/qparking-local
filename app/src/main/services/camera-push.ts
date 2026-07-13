@@ -20,7 +20,7 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
   if (!lane?.policyId) return { ok: false, error: 'camera_lane_has_no_scope' };
 
   try {
-    await cloud.post('/cameras', {
+    await cloud.post('/camera-devices/upsert', {
       external_id: `local-${camera.id}`, // stable across pushes
       site_id: lane.policyId,
       name: camera.name,
