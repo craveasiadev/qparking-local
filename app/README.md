@@ -295,7 +295,7 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 | `ecpi-terminal.ts` | Payment-terminal driver over a raw TCP socket (heartbeat + state machine). |
 | `w4g-tng.ts` | Touch'n'Go integration — a parallel payment path via the W4G IO-controller. Deliberately hand-rolled HTTP (no axios): the device firmware is byte-picky about header order + JSON spacing. |
 | `face-gate.ts` | Calls the face-auth turnstile's HTTP API to raise the barrier (its own axios client — different server, different token). |
-| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /scopes`, `/passes`, `/spaces`, `/gate-commands/pending`; `PUT /scopes/rate` pushes rate edits back up. |
+| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /scopes`, `/passes`, `/spaces`, `/gate-commands/pending`; `PUT /rate-policies/upsert` pushes rate edits back up. |
 | `sync-queue.ts` | **Push** to the Laravel API: `POST /parking-records`, with exponential-backoff retries so a WAN outage never drops a record. |
 | `camera-snapshots.ts` | Fetches live JPEG snapshots from cameras (UI preview) and uploads them to the cloud on a 10s timer. |
 | `camera-push.ts` | Mirrors the local camera registry up to the cloud. |
@@ -603,7 +603,7 @@ export async function syncAll(): Promise<{
 }> {
   const [scopes, passes, spaces] = await Promise.all([
     syncScopes().catch(toFailedSyncResult),
-    syncPasses().catch(toFailedSyncResult),
+    syncSeasonPasses().catch(toFailedSyncResult),
     syncSpaces().catch(toFailedSyncResult),
   ]);
   return { scopes, passes, spaces };

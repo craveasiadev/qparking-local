@@ -8,20 +8,20 @@ import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
 import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
-import { Scopes } from './pages/Scopes';
+import { ParkingPolicies } from './pages/ParkingPolicies';
 import { Sessions } from './pages/Sessions';
 import { Sites } from './pages/Sites';
 import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
-import { Passes } from './pages/Passes';
-import { Spaces } from './pages/Spaces';
+import { SeasonPasses } from './pages/SeasonPasses';
+import { ParkingSpaces } from './pages/ParkingSpaces';
 
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
   // Parking Management
-  | 'spaces' | 'passes'
+  | 'parking-spaces' | 'season-passes'
   // Pricing & Tariffs
-  | 'scopes'
+  | 'policies'
   // System
   | 'settings' | 'sites';
 
@@ -47,14 +47,14 @@ const SECTIONS: NavSection[] = [
   {
     key: 'mgmt', label: 'Parking management',
     items: [
-      { id: 'spaces', label: 'Space management', icon: Grid3x3 },
-      { id: 'passes', label: 'Passes', icon: Ticket },
+      { id: 'parking-spaces', label: 'Parking Spaces', icon: Grid3x3 },
+      { id: 'season-passes', label: 'Season Passes', icon: Ticket },
     ],
   },
   {
     key: 'pricing', label: 'Pricing & tariffs',
     items: [
-      { id: 'scopes', label: 'Parking rates', icon: Tag },
+      { id: 'policies', label: 'Parking Rates', icon: Tag },
     ],
   },
   {
@@ -204,9 +204,9 @@ export function App() {
           {page === 'terminals' && <Terminals />}
           {page === 'lanes' && <Lanes />}
           {page === 'sessions' && <Sessions devMode={devMode} />}
-          {page === 'spaces' && <Spaces />}
-          {page === 'passes' && <Passes />}
-          {page === 'scopes' && <Scopes />}
+          {page === 'parking-spaces' && <ParkingSpaces />}
+          {page === 'season-passes' && <SeasonPasses />}
+          {page === 'policies' && <ParkingPolicies />}
           {page === 'sites' && <Sites />}
           {page === 'settings' && <Settings />}
         </div>

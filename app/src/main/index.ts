@@ -60,13 +60,20 @@ function migrateUserData() {
 
     fs.mkdirSync(newDir, { recursive: true });
     for (const src of sources) {
-      for (const f of ['qparking-local.db', 'qparking-local.db-shm', 'qparking-local.db-wal']) {
-        const from = path.join(src, f);
-        const to = path.join(newDir, f);
-        if (fs.existsSync(from) && !fs.existsSync(to)) {
-          fs.copyFileSync(from, to);
-          console.log(`[boot] migrated ${f} from ${src} → ${newDir}`);
-        }
+      // Copy ONLY the .db — never the -wal/-shm sidecars. Those journal files
+      // are meaningful only when paired with the exact .db they were written
+      // from; copying them across databases (or independently of the .db)
+      // replays foreign schema pages on open and corrupts the target with
+      // "malformed database schema … invalid rootpage". SQLite recreates a
+      // fresh -wal/-shm on first open, so the .db alone is sufficient. Any
+      // un-checkpointed data in the source WAL is intentionally left behind —
+      // a lossless seed would require checkpointing the source first, which
+      // isn't worth it for this one-shot dev convenience copy.
+      const from = path.join(src, 'qparking-local.db');
+      const to = path.join(newDir, 'qparking-local.db');
+      if (fs.existsSync(from) && !fs.existsSync(to)) {
+        fs.copyFileSync(from, to);
+        console.log(`[boot] migrated qparking-local.db from ${src} → ${newDir}`);
       }
     }
   } catch (e: any) {
@@ -81,18 +88,18 @@ import {
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
-  listScopes, getScope, getSiteDefaultScope,
-  listParkingSpaces, listActivePasses,
+  listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
+  listParkingSpaces, listSeasonPasses,
   getCurrentSite,
 } from './services/db';
-import { computeFee, retriggerSessionExit, simulateScopeFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './services/ecpi-terminal';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
-  startBackgroundSync, syncScopes, pushScopeRate, syncSpaces,
+  startBackgroundSync, syncRatePolicies, pushRatePolicy, syncParkingSpaces,
   startGatePoll, setGateOpenHandler,
   syncAll, syncSite,
   handleDebug,
@@ -501,7 +508,7 @@ ipcMain.handle('lanes:save', (_e, input: any) => {
 
   pushLane(saved.id).catch(() => null);
   // Lanes are how terminals get attributed to a cloud site (the lane's
-  // scopeId), so re-push the terminal too whenever the lane changes.
+  // policyId), so re-push the terminal too whenever the lane changes.
   if (saved.terminalId) pushTerminal(saved.terminalId).catch(() => null);
   // Re-mirror any cameras whose lane assignment we just changed so the cloud
   // registry reflects the new coverage.
@@ -594,8 +601,8 @@ ipcMain.handle('sessions:image', (_e, filePath: string) => {
  * Admin session editor — recalculates duration + fee whenever entry/exit
  * times change so the operator can verify the live fee calc is right.
  * Body fields: plate, entryAt, exitAt, paymentStatus, notes. Fee/duration
- * are recomputed server-side using the session's exit-lane scope, OR a
- * scopeIdOverride if passed (useful for "what would this cost under scope
+ * are recomputed server-side using the session's exit-lane policy, OR a
+ * policyIdOverride if passed (useful for "what would this cost under policy
  * X" exploration).
  */
 ipcMain.handle('sessions:update', (_e, id: number, patch: {
@@ -604,7 +611,7 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   exitAt?: string | null;
   paymentStatus?: 'pending'|'paid'|'declined'|'cancelled'|'free'|'manual_release';
   notes?: string;
-  scopeIdOverride?: string | null;
+  policyIdOverride?: string | null;
 }) => {
   const session = getSessionById(id);
   if (!session) throw new Error('not_found');
@@ -628,16 +635,16 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
     const exitMs  = Date.parse(working.exitAt);
     const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
 
-    let scope = patch.scopeIdOverride ? getScope(patch.scopeIdOverride) : null;
-    if (!scope) {
+    let policy = patch.policyIdOverride ? getRatePolicy(patch.policyIdOverride) : null;
+    if (!policy) {
       const entryLane = working.entryLaneId ? getLane(working.entryLaneId) : null;
       const exitLane  = working.exitLaneId ? getLane(working.exitLaneId) : null;
-      scope =
-        (entryLane?.scopeId ? getScope(entryLane.scopeId) : null)
-        ?? (exitLane?.scopeId ? getScope(exitLane.scopeId) : null)
-        ?? getSiteDefaultScope();
+      policy =
+        (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
+        ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
+        ?? getSiteDefaultRatePolicy();
     }
-    const feeCents = computeFee(durationMinutes, scope, working.entryAt);
+    const feeCents = computeFee(durationMinutes, policy, working.entryAt);
 
     working = updateSessionFields(id, { durationMinutes, feeCents });
   }
@@ -660,22 +667,22 @@ ipcMain.handle('sync:backfill-sessions', async () => {
   return result;
 });
 
-ipcMain.handle('scopes:list', () => listScopes());
-ipcMain.handle('scopes:sync', () => syncScopes());
+ipcMain.handle('policies:list', () => listRatePolicies());
+ipcMain.handle('policies:sync', () => syncRatePolicies());
 
 // Mirrored config from qparking SaaS — read-only locally. Sync handlers
 // each force a fresh pull from the cloud + return the new count. The
 // background sync also refreshes these on its 60s timer.
-ipcMain.handle('spaces:list', () => listParkingSpaces());
-ipcMain.handle('spaces:sync', () => syncSpaces());
-ipcMain.handle('passes:list', () => listActivePasses());
-ipcMain.handle('scopes:save-rate', (_e, input: {
+ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
+ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
+ipcMain.handle('season-passes:list', () => listSeasonPasses());
+ipcMain.handle('policies:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;
-}) => pushScopeRate(input));
+}) => pushRatePolicy(input));
 // "Test price" — simulate the fee a rate plan charges for an entry→exit window.
-ipcMain.handle('scopes:simulate', (_e, input: { scopeId: string; entry: string; exit: string }) =>
-  simulateScopeFee(input.scopeId, input.entry, input.exit));
+ipcMain.handle('policies:simulate', (_e, input: { policyId: string; entry: string; exit: string }) =>
+  simulateRatePolicyFee(input.policyId, input.entry, input.exit));
 
 // Build version — used by the renderer sidebar to confirm the live build.
 // Reads from package.json baked at build time via electron's app.getVersion().
@@ -693,7 +700,7 @@ ipcMain.handle('app:version', () => ({
  * build).
  *
  * Does NOT touch the SQLite app DB — sessions, terminals, cameras, lanes,
- * scopes, sync queue, settings all survive. That's intentional: a clear-
+ * policies, sync queue, settings all survive. That's intentional: a clear-
  * cache must never destroy operational data, only browser-layer state.
  *
  * After clearing, the window auto-reloads so the operator sees a fresh

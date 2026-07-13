@@ -9,8 +9,8 @@ import path from 'node:path';
 import { app } from 'electron';
 import Database from 'better-sqlite3';
 import type {
-  ActivePass,
-  AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, ScopeRate, TariffRule,
+  SeasonPass,
+  AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule,
   ParkingSpace, Site, SyncOp, SyncQueueRow,
 } from '../../shared/types';
 
@@ -22,8 +22,65 @@ export function getDb(): Database.Database {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL'); // concurrent reads while writing
   db.pragma('foreign_keys = OFF');
+  migrateScopesToRatePolicies(db);
+  migrateActivePassesToSeasonPasses(db);
   applySchema(db);
   return db;
+}
+
+/**
+ * 2026-07-10 rename: the local "scope" concept was unified with the cloud's
+ * "rate policy" (they were always 1:1). Rename the legacy `scopes` table →
+ * `rate_policies`, its identity columns `scope_id`/`scope_name` →
+ * `policy_id`/`policy_name`, and the `scope_id` FK on lanes / active_passes /
+ * tariff_rules → `policy_id`. Runs BEFORE applySchema so the table RENAME
+ * isn't blocked by a freshly-created empty `rate_policies`. Every step is
+ * guarded, so a fresh install (no legacy tables) and an already-migrated
+ * install both no-op.
+ */
+function migrateScopesToRatePolicies(db: Database.Database): void {
+  const hasLegacyScopes = db
+    .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='scopes'`)
+    .get();
+  if (hasLegacyScopes) {
+    // The legacy scopes table carried BOTH scope_id (PK) and a redundant
+    // policy_id extra column (same value — scope and policy were 1:1). Drop
+    // the extras first so promoting scope_id → policy_id can't collide.
+    // DROP COLUMN needs SQLite ≥ 3.35 (bundled by better-sqlite3).
+    try { db.exec('ALTER TABLE scopes DROP COLUMN policy_id'); } catch { /* absent / old SQLite */ }
+    try { db.exec('ALTER TABLE scopes DROP COLUMN policy_name'); } catch { /* absent / old SQLite */ }
+    try { db.exec('ALTER TABLE scopes RENAME COLUMN scope_id TO policy_id'); } catch { /* already renamed */ }
+    try { db.exec('ALTER TABLE scopes RENAME COLUMN scope_name TO policy_name'); } catch { /* already renamed */ }
+    try { db.exec('ALTER TABLE scopes RENAME TO rate_policies'); } catch { /* already renamed */ }
+  }
+  // FK columns on the other tables — renamed independently (guarded, idempotent:
+  // once renamed, scope_id no longer exists and the ALTER just throws + skips).
+  for (const table of ['lanes', 'active_passes', 'tariff_rules']) {
+    try { db.exec(`ALTER TABLE ${table} RENAME COLUMN scope_id TO policy_id`); } catch { /* absent / already renamed */ }
+  }
+  // Legacy index name — applySchema recreates it as idx_tariff_rules_policy.
+  try { db.exec('DROP INDEX IF EXISTS idx_tariff_rules_scope'); } catch { /* ignore */ }
+}
+
+/**
+ * 2026-07-11 rename: `active_passes` → `season_passes`, aligning the local
+ * table with the cloud's SeasonPass model it has always mirrored. Also folds
+ * in the earlier site-scoping cleanup (drop the vestigial `policy_id` column
+ * and the index that referenced it) so both run while the table still has its
+ * old name, THEN renames. Runs BEFORE applySchema so the RENAME isn't blocked
+ * by a freshly-created empty `season_passes`. Order is load-bearing: the index
+ * must be dropped before the column it depends on, and the column before the
+ * table rename. Every step is guarded — a fresh install (no `active_passes`)
+ * and an already-migrated install (`season_passes` present) both no-op.
+ */
+function migrateActivePassesToSeasonPasses(db: Database.Database): void {
+  // Legacy site-scoping cleanup: the vestigial policy_id FK and its index.
+  // Index first — SQLite refuses to drop a column an index still depends on.
+  try { db.exec('DROP INDEX IF EXISTS idx_passes_lookup'); } catch { /* absent */ }
+  try { db.exec('ALTER TABLE active_passes DROP COLUMN policy_id'); } catch { /* column absent, old SQLite, or already renamed */ }
+  // The rename itself. Indexes and the composite PK follow automatically
+  // (SQLite ≥ 3.25 rewrites schema references on RENAME TO).
+  try { db.exec('ALTER TABLE active_passes RENAME TO season_passes'); } catch { /* already renamed or table absent */ }
 }
 
 function applySchema(db: Database.Database) {
@@ -59,7 +116,7 @@ function applySchema(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS lanes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      scope_id TEXT,
+      policy_id TEXT,
       terminal_id INTEGER,
       gate_relay_address TEXT,
       enabled INTEGER NOT NULL DEFAULT 1
@@ -88,9 +145,9 @@ function applySchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_sessions_plate_open ON sessions (plate) WHERE exit_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_sessions_entry_at ON sessions (entry_at DESC);
 
-    CREATE TABLE IF NOT EXISTS scopes (
-      scope_id TEXT PRIMARY KEY,
-      scope_name TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS rate_policies (
+      policy_id TEXT PRIMARY KEY,
+      policy_name TEXT NOT NULL,
       free_minutes INTEGER NOT NULL DEFAULT 0,
       first_block_cents INTEGER NOT NULL DEFAULT 0,
       per_block_cents INTEGER NOT NULL DEFAULT 0,
@@ -99,20 +156,18 @@ function applySchema(db: Database.Database) {
       currency TEXT NOT NULL DEFAULT 'MYR',
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       -- Policy-level extras from qparking SaaS RatePolicy (added 2026-06).
-      policy_id TEXT,
-      policy_name TEXT,
       grace_exceeded_behavior TEXT,
       cutoff_enabled INTEGER NOT NULL DEFAULT 0,
       cutoff_time TEXT,
       cutoff_behavior TEXT
     );
 
-    -- Full active rule schedule per scope. Each row is one time-windowed
+    -- Full active rule schedule per policy. Each row is one time-windowed
     -- TariffRule from qparking SaaS. The fee calculator picks the row
     -- matching the SESSION moment, not the moment we polled the cloud.
     CREATE TABLE IF NOT EXISTS tariff_rules (
       rule_id TEXT PRIMARY KEY,
-      scope_id TEXT NOT NULL,
+      policy_id TEXT NOT NULL,
       name TEXT NOT NULL,
       priority INTEGER NOT NULL DEFAULT 0,
       days_of_week TEXT,                -- JSON array of ints, NULL = all days
@@ -130,15 +185,15 @@ function applySchema(db: Database.Database) {
       is_overnight INTEGER NOT NULL DEFAULT 0,
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE INDEX IF NOT EXISTS idx_tariff_rules_scope ON tariff_rules (scope_id);
+    CREATE INDEX IF NOT EXISTS idx_tariff_rules_policy ON tariff_rules (policy_id);
 
-    -- Active season/visitor/free-access passes pulled down from qparking SaaS.
-    -- Indexed by (scope_id, plate_number) for the gate's "is this plate
-    -- already paid?" check at exit time. The same plate can have multiple
-    -- rows (e.g. visitor + corporate); the gate uses the lowest-cost match.
-    CREATE TABLE IF NOT EXISTS active_passes (
+    -- Season / visitor / free-access passes mirrored from qparking SaaS (the
+    -- cloud SeasonPass model). Site-scoped — one site per install — so the gate
+    -- looks a plate up directly. A plate can ride on more than one pass (e.g. a
+    -- personal + a corporate entitlement), hence the composite PK on
+    -- (pass_id, plate_number); the gate prefers the free / longest-coverage row.
+    CREATE TABLE IF NOT EXISTS season_passes (
       pass_id TEXT NOT NULL,
-      scope_id TEXT NOT NULL,
       plate_number TEXT NOT NULL,
       pass_type TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -149,7 +204,8 @@ function applySchema(db: Database.Database) {
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (pass_id, plate_number)
     );
-    CREATE INDEX IF NOT EXISTS idx_passes_lookup ON active_passes (scope_id, plate_number);
+    -- Gate lookup is by plate alone (passes are already site-scoped).
+    CREATE INDEX IF NOT EXISTS idx_passes_plate ON season_passes (plate_number);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -187,7 +243,7 @@ function applySchema(db: Database.Database) {
 
     -- Cached parking space inventory from qparking SaaS. Read-only mirror —
     -- written by the periodic sync; the on-prem operator views this on the
-    -- Space Management page. Refreshed on the same cadence as scopes/passes.
+    -- Space Management page. Refreshed on the same cadence as policies/passes.
     CREATE TABLE IF NOT EXISTS parking_spaces (
       id TEXT PRIMARY KEY,
       building TEXT,
@@ -272,7 +328,7 @@ function applySchema(db: Database.Database) {
   try { db.exec('ALTER TABLE cameras DROP COLUMN poll_interval_seconds'); } catch { /* column absent or old SQLite */ }
 
   // 2026-07-10: the site page was slimmed to identity / occupancy / contact,
-  // so receipt-branding, season-pass logo and scope-override columns are no
+  // so receipt-branding, season-pass logo and policy-override columns are no
   // longer synced or read. Drop them on installs whose `sites` table predates
   // this. Idempotent / best-effort (DROP COLUMN needs SQLite ≥ 3.35).
   for (const col of [
@@ -315,11 +371,9 @@ function applySchema(db: Database.Database) {
   // to 6002 (rare).
   try { db.prepare(`DELETE FROM settings WHERE key='tngCallbackPort' AND value='6002'`).run(); } catch { /* ignore */ }
 
-  // Idempotent ALTERs for scopes — installs predating the 2026-06 schedule
-  // expansion lack the policy + cutoff columns.
+  // Idempotent ALTERs for rate_policies — installs predating the 2026-06
+  // schedule expansion lack the cutoff + policy-detail columns.
   for (const col of [
-    'policy_id TEXT',
-    'policy_name TEXT',
     'grace_exceeded_behavior TEXT',
     'cutoff_enabled INTEGER NOT NULL DEFAULT 0',
     'cutoff_time TEXT',
@@ -336,10 +390,10 @@ function applySchema(db: Database.Database) {
     // effective-rule mirror in daily_cap_cents. NULL = uncapped.
     'policy_daily_cap_cents INTEGER',
     // Site-wide default plan flag (cloud RatePolicy.is_site_default). Used as
-    // the pricing fallback when a lane/session has no scope of its own.
+    // the pricing fallback when a lane/session has no policy of its own.
     'is_site_default INTEGER NOT NULL DEFAULT 0',
   ]) {
-    try { db.exec(`ALTER TABLE scopes ADD COLUMN ${col}`); } catch { /* already there */ }
+    try { db.exec(`ALTER TABLE rate_policies ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // 2026-06-22: per-rule is_active flag — mirrors the Activations tab so
   // operators can see which rules are dimmed and the exit flow can skip
@@ -498,7 +552,7 @@ export function deleteCamera(id: number) {
 
 function rowToLane(row: any): ParkingLane {
   return {
-    id: row.id, name: row.name, scopeId: row.scope_id,
+    id: row.id, name: row.name, policyId: row.policy_id,
     terminalId: row.terminal_id, gateRelayAddress: row.gate_relay_address,
     enabled: !!row.enabled,
   };
@@ -516,12 +570,12 @@ export function getLane(id: number): ParkingLane | null {
 export function upsertLane(lane: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
   const db = getDb();
   if (lane.id) {
-    db.prepare(`UPDATE lanes SET name=?, scope_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`)
-      .run(lane.name, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, lane.id);
+    db.prepare(`UPDATE lanes SET name=?, policy_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`)
+      .run(lane.name, lane.policyId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, lane.id);
     return getLane(lane.id)!;
   }
-  const info = db.prepare(`INSERT INTO lanes (name, scope_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?)`)
-    .run(lane.name, lane.scopeId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0);
+  const info = db.prepare(`INSERT INTO lanes (name, policy_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?)`)
+    .run(lane.name, lane.policyId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0);
   return getLane(Number(info.lastInsertRowid))!;
 }
 
@@ -655,7 +709,7 @@ export function manualReleaseSession(sessionId: number, reason: string): Parking
  * needs to verify the fee calculation. Pass only the fields you want to
  * change; everything else stays put. `durationMinutes` / `feeCents` are
  * NOT pulled from the patch — they're always recomputed from the new
- * entry/exit pair using the supplied scope rate (passed by the caller
+ * entry/exit pair using the supplied policy rate (passed by the caller
  * so this stays a pure data update; the caller decides the rate).
  */
 export function updateSessionFields(sessionId: number, patch: {
@@ -847,16 +901,14 @@ export function deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recen
   return 0;
 }
 
-// ─── scopes ────────────────────────────────────────────────────────────────
+// ─── policies ────────────────────────────────────────────────────────────────
 
-function rowToScope(row: any, rules: TariffRule[] = []): ScopeRate {
+function rowToRatePolicy(row: any, rules: TariffRule[] = []): RatePolicy {
   return {
-    scopeId: row.scope_id, scopeName: row.scope_name, freeMinutes: row.free_minutes,
+    policyId: row.policy_id, policyName: row.policy_name, freeMinutes: row.free_minutes,
     firstBlockCents: row.first_block_cents, perBlockCents: row.per_block_cents,
     blockMinutes: row.block_minutes, dailyCapCents: row.daily_cap_cents,
     currency: row.currency, fetchedAt: row.fetched_at,
-    policyId: row.policy_id ?? null,
-    policyName: row.policy_name ?? null,
     policyDescription: row.policy_description ?? null,
     graceExceededBehavior: (row.grace_exceeded_behavior ?? null) as any,
     cutoffEnabled: !!row.cutoff_enabled,
@@ -893,19 +945,19 @@ function rowToTariffRule(row: any): TariffRule {
   };
 }
 
-function listTariffRulesForScope(scopeId: string): TariffRule[] {
-  return (getDb().prepare('SELECT * FROM tariff_rules WHERE scope_id = ? ORDER BY priority DESC, rule_id ASC').all(scopeId) as any[]).map(rowToTariffRule);
+function listTariffRulesForRatePolicy(policyId: string): TariffRule[] {
+  return (getDb().prepare('SELECT * FROM tariff_rules WHERE policy_id = ? ORDER BY priority DESC, rule_id ASC').all(policyId) as any[]).map(rowToTariffRule);
 }
 
-export function listScopes(): ScopeRate[] {
-  const rows = getDb().prepare('SELECT * FROM scopes ORDER BY scope_name').all() as any[];
-  return rows.map((row) => rowToScope(row, listTariffRulesForScope(row.scope_id)));
+export function listRatePolicies(): RatePolicy[] {
+  const rows = getDb().prepare('SELECT * FROM rate_policies ORDER BY policy_name').all() as any[];
+  return rows.map((row) => rowToRatePolicy(row, listTariffRulesForRatePolicy(row.policy_id)));
 }
 
-export function getScope(id: string): ScopeRate | null {
-  const row = getDb().prepare('SELECT * FROM scopes WHERE scope_id = ?').get(id) as any;
+export function getRatePolicy(id: string): RatePolicy | null {
+  const row = getDb().prepare('SELECT * FROM rate_policies WHERE policy_id = ?').get(id) as any;
   if (!row) return null;
-  return rowToScope(row, listTariffRulesForScope(id));
+  return rowToRatePolicy(row, listTariffRulesForRatePolicy(id));
 }
 
 
@@ -982,30 +1034,30 @@ export function upsertSite(site: Site): Site {
 
 /** The site-wide default rate plan (cloud RatePolicy flagged is_site_default).
  *  Used as the pricing fallback when neither the entry nor exit lane carries a
- *  scope. Null if the cloud hasn't flagged a default. */
-export function getSiteDefaultScope(): ScopeRate | null {
-  const r = getDb().prepare('SELECT * FROM scopes WHERE is_site_default = 1 LIMIT 1').get() as any;
+ *  policy. Null if the cloud hasn't flagged a default. */
+export function getSiteDefaultRatePolicy(): RatePolicy | null {
+  const r = getDb().prepare('SELECT * FROM rate_policies WHERE is_site_default = 1 LIMIT 1').get() as any;
   if (!r) return null;
-  return rowToScope(r, listTariffRulesForScope(r.scope_id));
+  return rowToRatePolicy(r, listTariffRulesForRatePolicy(r.policy_id));
 }
 
 /**
- * Idempotent upsert. Replaces the full rule set for this scope on every
+ * Idempotent upsert. Replaces the full rule set for this policy on every
  * call — the SaaS is the source of truth, so a rule removed in the cloud
  * UI should disappear locally on the very next poll.
  */
-export function upsertScope(scope: ScopeRate): ScopeRate {
+export function upsertRatePolicy(policy: RatePolicy): RatePolicy {
   const db = getDb();
   const tx = db.transaction(() => {
-    db.prepare(`INSERT INTO scopes (
-        scope_id, scope_name, free_minutes, first_block_cents, per_block_cents,
+    db.prepare(`INSERT INTO rate_policies (
+        policy_id, policy_name, free_minutes, first_block_cents, per_block_cents,
         block_minutes, daily_cap_cents, currency, fetched_at,
-        policy_id, policy_name, grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
+        grace_exceeded_behavior, cutoff_enabled, cutoff_time, cutoff_behavior,
         policy_description, new_day_fixed_fee_cents,
         rate_basis, flat_multi_rate, first_block_once_per_entry, policy_daily_cap_cents, is_site_default
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(scope_id) DO UPDATE SET
-        scope_name=excluded.scope_name,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(policy_id) DO UPDATE SET
+        policy_name=excluded.policy_name,
         free_minutes=excluded.free_minutes,
         first_block_cents=excluded.first_block_cents,
         per_block_cents=excluded.per_block_cents,
@@ -1013,8 +1065,6 @@ export function upsertScope(scope: ScopeRate): ScopeRate {
         daily_cap_cents=excluded.daily_cap_cents,
         currency=excluded.currency,
         fetched_at=excluded.fetched_at,
-        policy_id=excluded.policy_id,
-        policy_name=excluded.policy_name,
         grace_exceeded_behavior=excluded.grace_exceeded_behavior,
         cutoff_enabled=excluded.cutoff_enabled,
         cutoff_time=excluded.cutoff_time,
@@ -1027,27 +1077,27 @@ export function upsertScope(scope: ScopeRate): ScopeRate {
         policy_daily_cap_cents=excluded.policy_daily_cap_cents,
         is_site_default=excluded.is_site_default`)
       .run(
-        scope.scopeId, scope.scopeName, scope.freeMinutes, scope.firstBlockCents, scope.perBlockCents,
-        scope.blockMinutes, scope.dailyCapCents, scope.currency, scope.fetchedAt,
-        scope.policyId ?? null, scope.policyName ?? null, scope.graceExceededBehavior ?? null,
-        scope.cutoffEnabled ? 1 : 0, scope.cutoffTime ?? null, scope.cutoffBehavior ?? null,
-        scope.policyDescription ?? null, scope.newDayFixedFeeCents ?? null,
-        scope.rateBasis ?? null, scope.flatMultiRate ?? null, scope.firstBlockOncePerEntry ? 1 : 0,
-        scope.policyDailyCapCents ?? null,
-        scope.isSiteDefault ? 1 : 0,
+        policy.policyId, policy.policyName, policy.freeMinutes, policy.firstBlockCents, policy.perBlockCents,
+        policy.blockMinutes, policy.dailyCapCents, policy.currency, policy.fetchedAt,
+        policy.graceExceededBehavior ?? null,
+        policy.cutoffEnabled ? 1 : 0, policy.cutoffTime ?? null, policy.cutoffBehavior ?? null,
+        policy.policyDescription ?? null, policy.newDayFixedFeeCents ?? null,
+        policy.rateBasis ?? null, policy.flatMultiRate ?? null, policy.firstBlockOncePerEntry ? 1 : 0,
+        policy.policyDailyCapCents ?? null,
+        policy.isSiteDefault ? 1 : 0,
       );
 
-    db.prepare('DELETE FROM tariff_rules WHERE scope_id = ?').run(scope.scopeId);
+    db.prepare('DELETE FROM tariff_rules WHERE policy_id = ?').run(policy.policyId);
     const insertRule = db.prepare(`INSERT INTO tariff_rules (
-        rule_id, scope_id, name, priority, days_of_week,
+        rule_id, policy_id, name, priority, days_of_week,
         time_from, time_to, valid_from, valid_to, rule_type,
         flat_amount_cents, first_block_amount_cents, first_block_minutes,
         subsequent_block_amount_cents, subsequent_block_minutes,
         daily_cap_cents, is_overnight, is_active, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const rule of scope.rules ?? []) {
+    for (const rule of policy.rules ?? []) {
       insertRule.run(
-        rule.ruleId, scope.scopeId, rule.name, rule.priority,
+        rule.ruleId, policy.policyId, rule.name, rule.priority,
         rule.daysOfWeek ? JSON.stringify(rule.daysOfWeek) : null,
         rule.timeFrom, rule.timeTo,
         rule.validFrom ?? null, rule.validTo ?? null,
@@ -1063,32 +1113,30 @@ export function upsertScope(scope: ScopeRate): ScopeRate {
     }
   });
   tx();
-  return getScope(scope.scopeId)!;
+  return getRatePolicy(policy.policyId)!;
 }
 
 /**
- * Delete every scope (and its rules) whose id isn't in `keepIds`. Called
+ * Delete every policy (and its rules) whose id isn't in `keepIds`. Called
  * after a multi-policy sync so a RatePolicy that was deleted / deactivated
  * on the cloud stops governing sessions locally. Without this, a lane
- * still pointing at a stale scope would keep charging the retired rate.
+ * still pointing at a stale policy would keep charging the retired rate.
  */
-export function pruneStaleScopes(keepIds: string[]): number {
+export function pruneStaleRatePolicies(keepIds: string[]): number {
   const db = getDb();
-  const existing = db.prepare('SELECT scope_id FROM scopes').all() as { scope_id: string }[];
-  const stale = existing
-    .map((row) => row.scope_id)
-    .filter((id) => !keepIds.includes(id));
+  const existing = db.prepare('SELECT policy_id FROM rate_policies').all() as { policy_id: string }[];
+  const stale = existing.map((row) => row.policy_id).filter((id) => !keepIds.includes(id));
   if (stale.length === 0) return 0;
   const tx = db.transaction((ids: string[]) => {
-    const delRule = db.prepare('DELETE FROM tariff_rules WHERE scope_id = ?');
-    const delScope = db.prepare('DELETE FROM scopes WHERE scope_id = ?');
-    // Any lane still bound to a stale scope loses its binding — it'll
+    const delRule = db.prepare('DELETE FROM tariff_rules WHERE policy_id = ?');
+    const delPolicy = db.prepare('DELETE FROM rate_policies WHERE policy_id = ?');
+    // Any lane still bound to a stale policy loses its binding — it'll
     // fall back to the site-default policy on the next resolver call.
-    const clearLane = db.prepare('UPDATE lanes SET scope_id = NULL WHERE scope_id = ?');
+    const clearLane = db.prepare('UPDATE lanes SET policy_id = NULL WHERE policy_id = ?');
     for (const id of ids) {
       delRule.run(id);
       clearLane.run(id);
-      delScope.run(id);
+      delPolicy.run(id);
     }
   });
   tx(stale);
@@ -1097,13 +1145,13 @@ export function pruneStaleScopes(keepIds: string[]): number {
 
 // ─── active passes ─────────────────────────────────────────────────────────
 // Plate-keyed cache of active season/visitor/free-access passes. Refreshed
-// from qparking SaaS on the same cadence as scopes. The gate looks up the
+// from qparking SaaS on the same cadence as policies. The gate looks up the
 // inbound plate here BEFORE driving the terminal — a match means "already
 // paid, just open the gate".
 
-function rowToActivePass(row: any): ActivePass {
+function rowToSeasonPass(row: any): SeasonPass {
   return {
-    passId: row.pass_id, scopeId: row.scope_id, plateNumber: row.plate_number,
+    passId: row.pass_id, plateNumber: row.plate_number,
     passType: row.pass_type, status: row.status,
     startDate: row.start_date ?? null, endDate: row.end_date ?? null,
     isFree: !!row.is_free, spaceNumber: row.space_number ?? null,
@@ -1111,30 +1159,28 @@ function rowToActivePass(row: any): ActivePass {
   };
 }
 
-/** Find an active pass for the given plate at the given scope (cloud site
- *  uuid). Returns the longest-coverage pass first so a plate with a
- *  free_access + corporate match prefers the broader entitlement. */
-export function findActivePassByPlate(scopeId: string, plate: string): ActivePass | null {
+/** Find an active pass for the given plate. Season passes are site-scoped (one
+ *  site per install), so the lookup is purely by plate. Returns the
+ *  longest-coverage pass first so a plate with a free_access + corporate match
+ *  prefers the broader entitlement. */
+export function findSeasonPassByPlate(plate: string): SeasonPass | null {
   const normalisedPlate = plate.toUpperCase().replace(/\s+/g, '');
   const row = getDb().prepare(`
-    SELECT * FROM active_passes
-    WHERE scope_id = ? AND plate_number = ? AND status = 'active'
+    SELECT * FROM season_passes
+    WHERE plate_number = ? AND status = 'active'
     ORDER BY is_free DESC, end_date DESC
     LIMIT 1
-  `).get(scopeId, normalisedPlate) as any;
-  return row ? rowToActivePass(row) : null;
+  `).get(normalisedPlate) as any;
+  return row ? rowToSeasonPass(row) : null;
 }
 
 /**
- * Cached active passes, optionally filtered to one scope. With no argument
- * this is what the Passes page shows: every pass the gate currently
- * recognises (cached from `/api/v1/local-server/passes`).
+ * Every active pass the gate currently recognises (cached from
+ * `/api/v1/local-server/passes`). Backs the Passes page.
  */
-export function listActivePasses(scopeId?: string): ActivePass[] {
-  const rows = (scopeId
-    ? getDb().prepare('SELECT * FROM active_passes WHERE scope_id = ? ORDER BY plate_number').all(scopeId)
-    : getDb().prepare('SELECT * FROM active_passes ORDER BY scope_id, plate_number').all()) as any[];
-  return rows.map(rowToActivePass);
+export function listSeasonPasses(): SeasonPass[] {
+  const rows = getDb().prepare('SELECT * FROM season_passes ORDER BY plate_number').all() as any[];
+  return rows.map(rowToSeasonPass);
 }
 
 // ─── parking spaces (mirror) ───────────────────────────────────────────────
@@ -1164,7 +1210,7 @@ export function listParkingSpaces(): ParkingSpace[] {
 }
 
 /** Replace the entire cached space inventory in one transaction. */
-export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
+export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
   const db = getDb();
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM parking_spaces').run();
@@ -1173,11 +1219,11 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
         customer_name, vehicle_plate, pass_type, pass_id,
         start_date, end_date, notes, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
-    for (const space of spaces) {
+    for (const parkingSpace of parkingSpaces) {
       insert.run(
-        space.id, space.building, space.level, space.zone, space.spaceNumber, space.spaceCode, space.status,
-        space.customerName, space.vehiclePlate, space.passType, space.passId,
-        space.startDate, space.endDate, space.notes,
+        parkingSpace.id, parkingSpace.building, parkingSpace.level, parkingSpace.zone, parkingSpace.spaceNumber, parkingSpace.spaceCode, parkingSpace.status,
+        parkingSpace.customerName, parkingSpace.vehiclePlate, parkingSpace.passType, parkingSpace.passId,
+        parkingSpace.startDate, parkingSpace.endDate, parkingSpace.notes,
       );
     }
   });
@@ -1185,22 +1231,21 @@ export function replaceParkingSpaces(spaces: ParkingSpace[]): void {
 }
 
 /**
- * Replace the entire cached pass set for a given scope. The SaaS is the
- * source of truth — a pass that disappeared from the cloud (revoked,
- * expired, holder unenrolled) must vanish from the local cache on the
- * very next sync.
+ * Replace the entire cached pass set (site-wide). The SaaS is the source of
+ * truth — a pass that disappeared from the cloud (revoked, expired, holder
+ * unenrolled) must vanish from the local cache on the very next sync.
  */
-export function replaceActivePassesForScope(scopeId: string, passes: ActivePass[]): void {
+export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
   const db = getDb();
   const tx = db.transaction(() => {
-    db.prepare('DELETE FROM active_passes WHERE scope_id = ?').run(scopeId);
-    const insert = db.prepare(`INSERT INTO active_passes (
-        pass_id, scope_id, plate_number, pass_type, status,
+    db.prepare('DELETE FROM season_passes').run();
+    const insert = db.prepare(`INSERT INTO season_passes (
+        pass_id, plate_number, pass_type, status,
         start_date, end_date, is_free, space_number, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
     for (const pass of passes) {
       insert.run(
-        pass.passId, pass.scopeId, pass.plateNumber.toUpperCase().replace(/\s+/g, ''),
+        pass.passId, pass.plateNumber.toUpperCase().replace(/\s+/g, ''),
         pass.passType, pass.status,
         pass.startDate, pass.endDate,
         pass.isFree ? 1 : 0,

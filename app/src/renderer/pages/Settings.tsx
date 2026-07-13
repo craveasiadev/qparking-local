@@ -55,7 +55,7 @@ interface CloudSyncResult { ok: boolean; fetched: number; error?: string }
 /** Per-model outcome of a full cloud pull, as returned by syncAllNow(). */
 interface CloudSyncReport {
   site: CloudSyncResult;
-  scopes: CloudSyncResult;
+  policies: CloudSyncResult;
   passes: CloudSyncResult;
   spaces: CloudSyncResult;
 }
@@ -90,28 +90,33 @@ export function Settings() {
   // `settings` is the whole AppSettings row, edited in place by the inputs
   // below and persisted as one unit by the Save button.
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [justSaved, setJustSaved] = useState(false);
+  const [justSaved, setJustSaved] = useState<boolean>(false);
+  const [syncError , setSyncError] = useState<string | null>(null);
 
   useEffect(() => { window.bridge.getSettings().then(setSettings); }, []);
 
   const [saveSettings, savingSettings] = useAsyncAction(async () => {
-    if (!settings) return;
-    const persisted = await window.bridge.saveSettings(settings);
-    setSettings(persisted);
+    if (!settings) return null;
+    const savedSetting = await window.bridge.saveSettings(settings);
+    setSettings(savedSetting);
     setJustSaved(true);
     setTimeout(() => setJustSaved(false), 2000);
   });
 
   // ─── qparking cloud sync ───────────────────────────────────────────────────
   // "Sync now" saves the URL/key currently on screen, pulls every cloud-owned
-  // model (site, scopes, passes, spaces) and shows the per-model outcome.
+  // model (site, policies, passes, spaces) and shows the per-model outcome.
   const [cloudSyncReport, setCloudSyncReport] = useState<CloudSyncReport | null>(null);
 
-  const [runCloudSyncNow, cloudSyncing] = useAsyncAction(async () => {
-    if (!settings) return;
-    setSettings(await window.bridge.saveSettings(settings));
-    setCloudSyncReport(await window.bridge.syncAllNow());
-  });
+  const [runCloudSyncNow, cloudSyncing] = useAsyncAction(
+    async () => {
+      setSyncError(null);
+      if (!settings) return;
+      if (!settings.qparkingApiKey) { setSyncError('Set an API key before syncing'); return; }
+      setCloudSyncReport(await window.bridge.syncAllNow());
+    },
+    { onError: (error) => setSyncError(String((error as any)?.message ?? error)) },
+  );
 
   // ─── Face-auth turnstile test ──────────────────────────────────────────────
   const [faceGateTestResult, setFaceGateTestResult] = useState<string | null>(null);
@@ -327,9 +332,14 @@ export function Settings() {
         <Field label="API key">
           <input type="password" className="input font-mono text-xs" value={settings.qparkingApiKey} onChange={(e) => setSettings({ ...settings, qparkingApiKey: e.target.value })} placeholder="issued by qparking admin" />
         </Field>
+        {syncError && (
+          <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-[11px] px-3 py-2">
+            {syncError}
+          </div>
+        )}
         {cloudSyncReport && (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
-            {(['site', 'scopes', 'passes', 'spaces'] as const).map((model) => {
+            {(['site', 'policies', 'passes', 'spaces'] as const).map((model) => {
               const result = cloudSyncReport[model];
               return (
                 <div key={model} className={result.ok ? 'text-emerald-700' : 'text-red-700'}>
@@ -339,7 +349,7 @@ export function Settings() {
             })}
           </div>
         )}
-        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, scopes, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>. Background sync re-pulls everything every 60 seconds.</p>
+        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>. Background sync re-pulls everything every 60 seconds.</p>
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
@@ -712,7 +722,7 @@ export function Settings() {
           Wipes Electron-side browser caches (HTTP responses, localStorage,
           IndexedDB, service workers, cookies) and reloads the window.
           Useful after an app update when the UI shows stale data. <strong>Does NOT
-          delete parking sessions, terminals, cameras, lanes, scopes, or settings</strong> —
+          delete parking sessions, terminals, cameras, lanes, policies, or settings</strong> —
           those live in the SQLite database and survive a cache clear.
         </p>
         <button onClick={() => runClearCache()} disabled={clearingCache}

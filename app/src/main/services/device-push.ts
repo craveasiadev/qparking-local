@@ -4,8 +4,8 @@
  * Best-effort like camera-push.ts: a failure here doesn't block the operator
  * from saving the local change.
  *
- * Site attribution: a terminal/lane belongs to the cloud Site whose scope_id
- * matches the lane.scopeId. Terminals don't have their own scopeId, so we
+ * Site attribution: a terminal/lane belongs to the cloud Site whose policy_id
+ * matches the lane.policyId. Terminals don't have their own policyId, so we
  * resolve site via the lane that references them.
  */
 import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection } from './db';
@@ -30,7 +30,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
   const terminal = getTerminal(terminalId);
   if (!terminal) return { ok: false, error: 'unknown_terminal' };
   const owningLane = listLanes().find((lane) => lane.terminalId === terminal.id);
-  if (!owningLane?.scopeId) return { ok: false, error: 'terminal_not_attached_to_scoped_lane' };
+  if (!owningLane?.policyId) return { ok: false, error: 'terminal_not_attached_to_scoped_lane' };
 
   return postToCloud('/terminals', {
     external_id: `local-${terminal.id}`,
@@ -50,7 +50,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
 export async function pushLane(laneId: number): Promise<PushResult> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'unknown_lane' };
-  if (!lane.scopeId) return { ok: false, error: 'lane_has_no_scope' };
+  if (!lane.policyId) return { ok: false, error: 'lane_has_no_scope' };
   const terminal = lane.terminalId ? getTerminal(lane.terminalId) : null;
 
   return postToCloud('/lanes', {

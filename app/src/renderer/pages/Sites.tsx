@@ -80,7 +80,7 @@ export function Sites() {
           </div>
         ))}
 
-        {/* Scope-override tiles */}
+        {/* Policy-override tiles */}
         <div className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-3">
           <div className="h-3 w-36 rounded bg-gray-100" />
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">

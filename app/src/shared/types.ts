@@ -12,14 +12,14 @@
 export * from './db-models';
 
 import type {
-  ActivePass,
+  SeasonPass,
   AppSettings,
   LprCamera,
   ParkingLane,
   ParkingSession,
   ParkingSpace,
   PaymentTerminal,
-  ScopeRate,
+  RatePolicy,
   Site,
   SyncQueueRow,
 } from './db-models';
@@ -168,22 +168,22 @@ export interface BridgeApi {
     exitAt?: string | null;
     paymentStatus?: 'pending'|'paid'|'declined'|'cancelled'|'free'|'manual_release';
     notes?: string;
-    scopeIdOverride?: string | null;
+    policyIdOverride?: string | null;
   }): Promise<ParkingSession>;
 
   // Mirrored config from qparking SaaS (read-only locally)
-  listSpaces(): Promise<ParkingSpace[]>;
-  syncSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  listParkingSpaces(): Promise<ParkingSpace[]>;
+  syncParkingSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** Read every active pass cached from the cloud. Already populated by the
-   *  periodic syncPasses(); this just lets the UI display them. */
-  listActivePasses(): Promise<ActivePass[]>;
+   *  periodic syncSeasonPasses(); this just lets the UI display them. */
+  listSeasonPasses(): Promise<SeasonPass[]>;
 
-  // Scopes / rates
-  listScopes(): Promise<ScopeRate[]>;
-  syncScopesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  // Rate policies
+  listRatePolicies(): Promise<RatePolicy[]>;
+  syncRatePoliciesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
 
   syncAllNow(): Promise<{
-    scopes: { ok: boolean; fetched: number; error?: string };
+    policies: { ok: boolean; fetched: number; error?: string };
     passes: { ok: boolean; fetched: number; error?: string };
     spaces: { ok: boolean; fetched: number; error?: string };
     site: { ok: boolean; fetched: number; error?: string };
@@ -197,14 +197,14 @@ export interface BridgeApi {
 
   /** Push a rate edit to qparking SaaS, then re-pull. The SaaS becomes the
    *  source of truth; the local cache reflects whatever it canonicalised. */
-  saveScopeRate(input: {
+  saveRatePolicy(input: {
     firstBlockCents: number; perBlockCents: number;
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;
   }): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** "Test price" — simulate a rate plan's fee for an entry→exit window. */
-  simulateScopeFee(input: { scopeId: string; entry: string; exit: string }): Promise<{
+  simulateRatePolicyFee(input: { policyId: string; entry: string; exit: string }): Promise<{
     ok: boolean; feeCents?: number; durationMinutes?: number;
-    scopeName?: string; currency?: string; error?: string;
+    policyName?: string; currency?: string; error?: string;
   }>;
 
   // App build metadata — operator-visible version stamp.

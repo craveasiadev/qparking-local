@@ -1,21 +1,21 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator } from 'lucide-react';
-import type { ScopeRate, TariffRule } from '@shared/types';
+import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
-export function Scopes() {
-  const [list, setList] = useState<ScopeRate[]>([]);
+export function ParkingPolicies() {
+  const [list, setList] = useState<RatePolicy[]>([]);
   const [result, setResult] = useState<{ ok: boolean; fetched: number; error?: string } | null>(null);
-  const [editing, setEditing] = useState<ScopeRate | null>(null);
+  const [editing, setEditing] = useState<RatePolicy | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   function toggle(id: string) { setExpanded((m) => ({ ...m, [id]: !m[id] })); }
 
-  async function refresh() { setList(await window.bridge.listScopes()); }
+  async function refresh() { setList(await window.bridge.listRatePolicies()); }
   useEffect(() => { void refresh(); }, []);
 
   const [sync, syncing] = useAsyncAction(async () => {
-    const r = await window.bridge.syncScopesNow();
+    const r = await window.bridge.syncRatePoliciesNow();
     setResult(r as any);
     await refresh();
   });
@@ -24,7 +24,7 @@ export function Scopes() {
     <div className="p-4 sm:p-6 lg:p-8 max-w-5xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Parking rates</h1>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Parking Rates</h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every active parking rate configured on the cloud, cached here so the gate can price sessions even if WAN is offline. Expand a rate to test a price.
           </p>
@@ -45,7 +45,7 @@ export function Scopes() {
           <p className="font-bold uppercase tracking-wide text-[10px]">Managed in cloud</p>
           <p className="mt-1">
             Create + edit plans in <strong>qparking → Pricing &amp; Tariffs</strong>. Each active plan appears
-            here as a scope; lanes bind to a specific plan via <strong>Lanes → assign rate plan</strong>.
+            here as a policy; lanes bind to a specific plan via <strong>Lanes → assign rate plan</strong>.
             Weekday, weekend, overnight, public holiday and promotion rules layer within a single plan
             by priority (higher wins).
           </p>
@@ -54,13 +54,13 @@ export function Scopes() {
 
       {result && (
         <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${result.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
-          {result.ok ? `Fetched ${result.fetched} scope(s).` : `Sync failed: ${result.error}`}
+          {result.ok ? `Fetched ${result.fetched} policy(s).` : `Sync failed: ${result.error}`}
         </div>
       )}
 
       {list.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500 inline-flex items-center justify-center gap-2 w-full">
-          <AlertCircle size={14} /> No scopes cached yet. Configure qparking URL + API key in Settings, then click Sync now.
+          <AlertCircle size={14} /> No policies cached yet. Configure qparking URL + API key in Settings, then click Sync now.
         </div>
       ) : (
         <>
@@ -70,7 +70,7 @@ export function Scopes() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
                   <tr>
-                    <th className="text-left px-3 py-2 font-bold">Scope</th>
+                    <th className="text-left px-3 py-2 font-bold">Policy</th>
                     <th className="text-right px-3 py-2 font-bold">Free</th>
                     <th className="text-right px-3 py-2 font-bold">1st block</th>
                     <th className="text-right px-3 py-2 font-bold">Per block</th>
@@ -84,21 +84,21 @@ export function Scopes() {
                   {list.map((s) => {
                     const zero = s.firstBlockCents === 0 && s.perBlockCents === 0;
                     const ruleCount = s.rules?.length ?? 0;
-                    const isOpen = !!expanded[s.scopeId];
+                    const isOpen = !!expanded[s.policyId];
                     return (
                       <>
-                        <tr key={s.scopeId} className={`border-t border-gray-100 ${zero ? 'bg-amber-50/40' : ''}`}>
+                        <tr key={s.policyId} className={`border-t border-gray-100 ${zero ? 'bg-amber-50/40' : ''}`}>
                           <td className="px-3 py-2">
                             <button
                               type="button"
-                              onClick={() => toggle(s.scopeId)}
+                              onClick={() => toggle(s.policyId)}
                               className="inline-flex items-center gap-1.5 text-left hover:opacity-75"
                               title="Click to expand — view rules & test a price"
                             >
                               {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                               <div>
-                                <div className="font-semibold">{s.scopeName}</div>
-                                <div className="text-[11px] text-gray-500 font-mono">{s.scopeId}</div>
+                                <div className="font-semibold">{s.policyName}</div>
+                                <div className="text-[11px] text-gray-500 font-mono">{s.policyId}</div>
                               </div>
                             </button>
                             {ruleCount > 0 && (
@@ -130,7 +130,7 @@ export function Scopes() {
                         {isOpen && (
                           <tr className="bg-gray-50/60 border-t border-gray-100">
                             <td colSpan={8} className="px-3 py-3">
-                              <RulesTable scope={s} />
+                              <RulesTable policy={s} />
                             </td>
                           </tr>
                         )}
@@ -147,15 +147,15 @@ export function Scopes() {
             {list.map((s) => {
               const zero = s.firstBlockCents === 0 && s.perBlockCents === 0;
               const ruleCount = s.rules?.length ?? 0;
-              const isOpen = !!expanded[s.scopeId];
+              const isOpen = !!expanded[s.policyId];
               return (
-                <div key={s.scopeId} className={`rounded-xl border bg-white p-3 ${zero ? 'border-amber-300 bg-amber-50/40' : 'border-gray-200'}`}>
+                <div key={s.policyId} className={`rounded-xl border bg-white p-3 ${zero ? 'border-amber-300 bg-amber-50/40' : 'border-gray-200'}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <button type="button" onClick={() => toggle(s.scopeId)} className="min-w-0 text-left inline-flex items-start gap-1.5">
+                    <button type="button" onClick={() => toggle(s.policyId)} className="min-w-0 text-left inline-flex items-start gap-1.5">
                       {isOpen ? <ChevronDown size={13} className="mt-1" /> : <ChevronRight size={13} className="mt-1" />}
                       <div>
-                        <div className="font-semibold">{s.scopeName}</div>
-                        <div className="text-[11px] text-gray-500 font-mono break-all">{s.scopeId}</div>
+                        <div className="font-semibold">{s.policyName}</div>
+                        <div className="text-[11px] text-gray-500 font-mono break-all">{s.policyId}</div>
                         {ruleCount > 0 && (
                           <div className="mt-0.5 text-[10px] text-gray-500">{ruleCount} tariff rule{ruleCount === 1 ? '' : 's'} from cloud</div>
                         )}
@@ -176,7 +176,7 @@ export function Scopes() {
                   </div>
                   {isOpen && (
                     <div className="mt-3 pt-3 border-t border-gray-200">
-                      <RulesTable scope={s} compact />
+                      <RulesTable policy={s} compact />
                     </div>
                   )}
                 </div>
@@ -194,7 +194,7 @@ export function Scopes() {
 
       {editing && (
         <EditRateModal
-          scope={editing}
+          policy={editing}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await refresh(); }}
         />
@@ -203,17 +203,17 @@ export function Scopes() {
   );
 }
 
-function EditRateModal({ scope, onClose, onSaved }: { scope: ScopeRate; onClose: () => void; onSaved: () => void }) {
-  const [firstBlockRm, setFirstBlockRm] = useState((scope.firstBlockCents / 100).toFixed(2));
-  const [perBlockRm, setPerBlockRm] = useState((scope.perBlockCents / 100).toFixed(2));
-  const [freeMinutes, setFreeMinutes] = useState(String(scope.freeMinutes));
-  const [blockMinutes, setBlockMinutes] = useState(String(scope.blockMinutes));
-  const [dailyCapRm, setDailyCapRm] = useState((scope.dailyCapCents / 100).toFixed(2));
+function EditRateModal({ policy, onClose, onSaved }: { policy: RatePolicy; onClose: () => void; onSaved: () => void }) {
+  const [firstBlockRm, setFirstBlockRm] = useState((policy.firstBlockCents / 100).toFixed(2));
+  const [perBlockRm, setPerBlockRm] = useState((policy.perBlockCents / 100).toFixed(2));
+  const [freeMinutes, setFreeMinutes] = useState(String(policy.freeMinutes));
+  const [blockMinutes, setBlockMinutes] = useState(String(policy.blockMinutes));
+  const [dailyCapRm, setDailyCapRm] = useState((policy.dailyCapCents / 100).toFixed(2));
   const [error, setError] = useState<string | null>(null);
 
   const [save, saving] = useAsyncAction(async () => {
     setError(null);
-    const r = await window.bridge.saveScopeRate({
+    const r = await window.bridge.saveRatePolicy({
       firstBlockCents: Math.round(parseFloat(firstBlockRm || '0') * 100),
       perBlockCents:   Math.round(parseFloat(perBlockRm   || '0') * 100),
       blockMinutes:    parseInt(blockMinutes || '60', 10),
@@ -232,7 +232,7 @@ function EditRateModal({ scope, onClose, onSaved }: { scope: ScopeRate; onClose:
       <div onClick={(e) => e.stopPropagation()} className="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden">
         <header className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
           <div>
-            <h2 className="text-base font-bold">Edit rate — {scope.scopeName}</h2>
+            <h2 className="text-base font-bold">Edit rate — {policy.policyName}</h2>
             <p className="text-xs text-gray-500 mt-0.5">Saves to qparking SaaS, then re-syncs the local cache.</p>
           </div>
           <button onClick={onClose} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500"><X size={18} /></button>
@@ -338,8 +338,8 @@ function ruleMatchesNow(r: TariffRule): boolean {
   return time >= from || time < to;
 }
 
-function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: boolean }) {
-  const rules = [...(scope.rules ?? [])].sort((a, b) => b.priority - a.priority);
+function RulesTable({ policy, compact = false }: { policy: RatePolicy; compact?: boolean }) {
+  const rules = [...(policy.rules ?? [])].sort((a, b) => b.priority - a.priority);
 
   // Find the single "active now" rule (highest-priority match amongst
   // is_active=true rules). Mirrors the exit-flow rule selection — pricing is
@@ -354,21 +354,21 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
           on-prem operator sees the same context (grace, daily reset, etc). */}
       <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] text-gray-700 space-y-0.5">
         <div className="flex flex-wrap gap-x-4 gap-y-0.5">
-          <span><span className="text-gray-500">Grace:</span> <span className="font-mono">{scope.freeMinutes} min</span></span>
-          {scope.graceExceededBehavior && (
-            <span><span className="text-gray-500">After grace:</span> <span className="font-mono">{scope.graceExceededBehavior.replace(/_/g, ' ')}</span></span>
+          <span><span className="text-gray-500">Grace:</span> <span className="font-mono">{policy.freeMinutes} min</span></span>
+          {policy.graceExceededBehavior && (
+            <span><span className="text-gray-500">After grace:</span> <span className="font-mono">{policy.graceExceededBehavior.replace(/_/g, ' ')}</span></span>
           )}
           <span><span className="text-gray-500">Daily reset:</span>{' '}
-            {scope.cutoffEnabled
-              ? <span className="font-mono">{(scope.cutoffTime ?? '').slice(0, 5) || '00:00'} → {scope.cutoffBehavior?.replace(/_/g, ' ') ?? 'restart'}</span>
+            {policy.cutoffEnabled
+              ? <span className="font-mono">{(policy.cutoffTime ?? '').slice(0, 5) || '00:00'} → {policy.cutoffBehavior?.replace(/_/g, ' ') ?? 'restart'}</span>
               : <span className="text-gray-400">off</span>}
           </span>
-          {scope.cutoffEnabled && scope.cutoffBehavior === 'new_day_fixed_fee' && scope.newDayFixedFeeCents !== null && (
-            <span><span className="text-gray-500">New-day fee:</span> <span className="font-mono">{scope.currency} {(scope.newDayFixedFeeCents / 100).toFixed(2)}</span></span>
+          {policy.cutoffEnabled && policy.cutoffBehavior === 'new_day_fixed_fee' && policy.newDayFixedFeeCents !== null && (
+            <span><span className="text-gray-500">New-day fee:</span> <span className="font-mono">{policy.currency} {(policy.newDayFixedFeeCents / 100).toFixed(2)}</span></span>
           )}
           <span><span className="text-gray-500">Daily cap:</span>{' '}
-            {(scope.policyDailyCapCents ?? 0) > 0
-              ? <span className="font-mono">{scope.currency} {((scope.policyDailyCapCents ?? 0) / 100).toFixed(2)}</span>
+            {(policy.policyDailyCapCents ?? 0) > 0
+              ? <span className="font-mono">{policy.currency} {((policy.policyDailyCapCents ?? 0) / 100).toFixed(2)}</span>
               : <span className="text-gray-400">no cap</span>}
           </span>
         </div>
@@ -409,9 +409,9 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
                           {r.ruleType === 'flat_rate' ? 'Flat' : 'Block hourly'}
                         </span>
                       </td>
-                      <td className="px-2 py-1.5 font-mono text-gray-700">{fmtRuleAmounts(r, scope.currency)}</td>
+                      <td className="px-2 py-1.5 font-mono text-gray-700">{fmtRuleAmounts(r, policy.currency)}</td>
                       {!compact && <td className="px-2 py-1.5 text-right font-mono">{r.priority}</td>}
-                      {!compact && <td className="px-2 py-1.5 text-right font-mono">{r.dailyCapCents > 0 ? `${scope.currency} ${(r.dailyCapCents / 100).toFixed(2)}` : '—'}</td>}
+                      {!compact && <td className="px-2 py-1.5 text-right font-mono">{r.dailyCapCents > 0 ? `${policy.currency} ${(r.dailyCapCents / 100).toFixed(2)}` : '—'}</td>}
                     </tr>
                   );
                 })}
@@ -423,7 +423,7 @@ function RulesTable({ scope, compact = false }: { scope: ScopeRate; compact?: bo
         Rules are read-only here — edit them in qparking SaaS (Pricing &amp; Tariffs). The local exit-flow picks the highest-priority rule matching the session's moment.
       </p>
 
-      <TestPrice scope={scope} />
+      <TestPrice policy={policy} />
     </div>
   );
 }
@@ -439,7 +439,7 @@ function toLocalInput(d: Date): string {
  * entry + exit, see the exact fee THIS rate plan would charge locally. Use it
  * to confirm the on-prem gate agrees with the cloud for the same inputs.
  */
-function TestPrice({ scope }: { scope: ScopeRate }) {
+function TestPrice({ policy }: { policy: RatePolicy }) {
   const now = new Date();
   const hourAgo = new Date(now.getTime() - 60 * 60_000);
   const [entry, setEntry] = useState(toLocalInput(hourAgo));
@@ -454,7 +454,7 @@ function TestPrice({ scope }: { scope: ScopeRate }) {
       // datetime-local has no timezone; the ISO the input yields (":ss" absent)
       // is parsed as LOCAL time by the main process — same wall-clock the gate
       // and the cloud simulator use.
-      const r = await window.bridge.simulateScopeFee({ scopeId: scope.scopeId, entry, exit });
+      const r = await window.bridge.simulateRatePolicyFee({ policyId: policy.policyId, entry, exit });
       if (!r.ok) { setErr(r.error ?? 'calc_failed'); return; }
       setRes({ feeCents: r.feeCents ?? 0, durationMinutes: r.durationMinutes ?? 0 });
     } catch (e: any) {
@@ -493,9 +493,9 @@ function TestPrice({ scope }: { scope: ScopeRate }) {
         <div className="mt-2 flex items-baseline gap-3">
           <div>
             <div className="text-[9px] font-bold uppercase tracking-widest text-gray-500">Customer pays</div>
-            <div className="text-2xl font-black tabular-nums text-blue-700">{fmtCents(res.feeCents, scope.currency)}</div>
+            <div className="text-2xl font-black tabular-nums text-blue-700">{fmtCents(res.feeCents, policy.currency)}</div>
           </div>
-          <div className="text-[11px] text-gray-500">{res.durationMinutes} min · {scope.scopeName}</div>
+          <div className="text-[11px] text-gray-500">{res.durationMinutes} min · {policy.policyName}</div>
         </div>
       )}
       <p className="mt-2 text-[10px] text-gray-400">

@@ -4,7 +4,7 @@ import {
   Trash2, Loader2, ChevronLeft, ChevronRight, CheckSquare, Square,
   Image as ImageIcon, Zap, ArrowDown, ArrowUp, Eye, Filter,
 } from 'lucide-react';
-import type { ParkingLane, ParkingSession, ScopeRate } from '@shared/types';
+import type { ParkingLane, ParkingSession, RatePolicy } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 const PAGE_SIZE = 20;
@@ -215,7 +215,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [retriggerNotice, setRetriggerNotice] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [scopes, setScopes] = useState<ScopeRate[]>([]);
+  const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
@@ -252,7 +252,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   }
 
   async function fetchAux() {
-    setScopes(await window.bridge.listScopes());
+    setPolicies(await window.bridge.listRatePolicies());
     setLanes(await window.bridge.listLanes());
   }
 
@@ -268,12 +268,12 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange]);
   useEffect(() => { setSelected(new Set()); }, [tab, page]);
 
-  function scopeForSession(s: ParkingSession): ScopeRate | null {
+  function policyForSession(s: ParkingSession): RatePolicy | null {
     const laneId = s.exitLaneId ?? s.entryLaneId;
     if (!laneId) return null;
     const lane = lanes.find((l) => l.id === laneId);
-    if (!lane?.scopeId) return null;
-    return scopes.find((sc) => sc.scopeId === lane.scopeId) ?? null;
+    if (!lane?.policyId) return null;
+    return policies.find((sc) => sc.policyId === lane.policyId) ?? null;
   }
 
   function laneNameForId(id?: number | null): string {
@@ -493,8 +493,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 let displayFeeCents: number | null = s.feeCents ?? null;
                 let isLivePreview = false;
                 if (displayFeeCents == null && !s.exitAt && mins != null) {
-                  const sc = scopeForSession(s);
-                  if (sc) { displayFeeCents = computeFeeFromScope(mins, sc); isLivePreview = true; }
+                  const sc = policyForSession(s);
+                  if (sc) { displayFeeCents = computeFeeFromPolicy(mins, sc); isLivePreview = true; }
                 }
                 const isSelected = selected.has(s.id);
                 return (
@@ -553,8 +553,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           let displayFeeCents: number | null = s.feeCents ?? null;
           let isLivePreview = false;
           if (displayFeeCents == null && !s.exitAt && mins != null) {
-            const sc = scopeForSession(s);
-            if (sc) { displayFeeCents = computeFeeFromScope(mins, sc); isLivePreview = true; }
+            const sc = policyForSession(s);
+            if (sc) { displayFeeCents = computeFeeFromPolicy(mins, sc); isLivePreview = true; }
           }
           const isSelected = selected.has(s.id);
           return (
@@ -637,7 +637,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       {viewing && (
         <ViewSessionModal
           session={viewing}
-          scope={scopeForSession(viewing)}
+          policy={policyForSession(viewing)}
           entryLaneName={laneNameForId(viewing.entryLaneId)}
           exitLaneName={laneNameForId(viewing.exitLaneId)}
           retriggering={retriggering}
@@ -654,8 +654,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       {editing && (
         <EditSessionModal
           session={editing}
-          scopes={scopes}
-          defaultScope={scopeForSession(editing)}
+          policies={policies}
+          defaultPolicy={policyForSession(editing)}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await fetchPage(); }}
         />
@@ -804,7 +804,7 @@ function ThumbCell({
   );
 }
 
-function computeFeeFromScope(durationMinutes: number, sc: ScopeRate): number {
+function computeFeeFromPolicy(durationMinutes: number, sc: RatePolicy): number {
   const billable = Math.max(0, durationMinutes - sc.freeMinutes);
   if (billable === 0) return 0;
   const blocks = Math.ceil(billable / Math.max(1, sc.blockMinutes));
@@ -820,12 +820,12 @@ function computeFeeFromScope(durationMinutes: number, sc: ScopeRate): number {
  * modals — this is a hub, not a replacement.
  */
 function ViewSessionModal({
-  session, scope, entryLaneName, exitLaneName,
+  session, policy, entryLaneName, exitLaneName,
   retriggering, deleting,
   onClose, onOpenImage, onEdit, onRelease, onRetrigger, onDelete,
 }: {
   session: ParkingSession;
-  scope: ScopeRate | null;
+  policy: RatePolicy | null;
   entryLaneName: string;
   exitLaneName: string;
   retriggering: boolean;
@@ -842,8 +842,8 @@ function ViewSessionModal({
   const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
   let displayFeeCents: number | null = s.feeCents ?? null;
   let isLivePreview = false;
-  if (displayFeeCents == null && !s.exitAt && mins != null && scope) {
-    displayFeeCents = computeFeeFromScope(mins, scope);
+  if (displayFeeCents == null && !s.exitAt && mins != null && policy) {
+    displayFeeCents = computeFeeFromPolicy(mins, policy);
     isLivePreview = true;
   }
   const isOpen = !s.exitAt;
@@ -893,8 +893,8 @@ function ViewSessionModal({
                   ? <span className={isLivePreview ? 'text-amber-700' : ''}>RM {(displayFeeCents / 100).toFixed(2)}{isLivePreview && ' (live preview)'}</span>
                   : '—'}
               </div>
-              {scope && (
-                <div className="text-[11px] text-gray-500 mt-0.5">Scope: {scope.scopeName}</div>
+              {policy && (
+                <div className="text-[11px] text-gray-500 mt-0.5">Policy: {policy.policyName}</div>
               )}
             </DetailRow>
           </div>
@@ -1067,8 +1067,8 @@ function ReleaseSessionModal({
 }
 
 function EditSessionModal({
-  session, scopes, defaultScope, onClose, onSaved,
-}: { session: ParkingSession; scopes: ScopeRate[]; defaultScope: ScopeRate | null; onClose: () => void; onSaved: () => void }) {
+  session, policies, defaultPolicy, onClose, onSaved,
+}: { session: ParkingSession; policies: RatePolicy[]; defaultPolicy: RatePolicy | null; onClose: () => void; onSaved: () => void }) {
   const [plate, setPlate] = useState(session.plate);
   const [entryAt, setEntryAt] = useState(toLocalInput(session.entryAt));
   // Default exit BLANK when the session is still open — so an operator can't
@@ -1077,7 +1077,7 @@ function EditSessionModal({
   const [exitAt, setExitAt] = useState(session.exitAt ? toLocalInput(session.exitAt) : '');
   const [paymentStatus, setPaymentStatus] = useState<ParkingSession['paymentStatus']>(session.paymentStatus);
   const [notes, setNotes] = useState(session.notes ?? '');
-  const [scopeOverride, setScopeOverride] = useState('');
+  const [policyOverride, setScopeOverride] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const previewDurationMinutes = (() => {
@@ -1087,15 +1087,15 @@ function EditSessionModal({
     if (isNaN(e) || isNaN(x)) return null;
     return Math.max(0, Math.ceil((x - e) / 60_000));
   })();
-  const previewScope = scopeOverride ? scopes.find((s) => s.scopeId === scopeOverride) ?? null : defaultScope;
+  const previewPolicy = policyOverride ? policies.find((s) => s.policyId === policyOverride) ?? null : defaultPolicy;
   const previewFee = (() => {
     if (previewDurationMinutes == null) return null;
-    if (!previewScope) return null;
-    const billable = Math.max(0, previewDurationMinutes - previewScope.freeMinutes);
+    if (!previewPolicy) return null;
+    const billable = Math.max(0, previewDurationMinutes - previewPolicy.freeMinutes);
     if (billable === 0) return 0;
-    const blocks = Math.ceil(billable / Math.max(1, previewScope.blockMinutes));
-    let cents = previewScope.firstBlockCents + Math.max(0, blocks - 1) * previewScope.perBlockCents;
-    if (previewScope.dailyCapCents > 0 && cents > previewScope.dailyCapCents) cents = previewScope.dailyCapCents;
+    const blocks = Math.ceil(billable / Math.max(1, previewPolicy.blockMinutes));
+    let cents = previewPolicy.firstBlockCents + Math.max(0, blocks - 1) * previewPolicy.perBlockCents;
+    if (previewPolicy.dailyCapCents > 0 && cents > previewPolicy.dailyCapCents) cents = previewPolicy.dailyCapCents;
     return cents;
   })();
 
@@ -1107,7 +1107,7 @@ function EditSessionModal({
       exitAt: exitAt ? toIso(exitAt) : null,
       paymentStatus,
       notes: notes.trim() || undefined,
-      scopeIdOverride: scopeOverride || null,
+      policyIdOverride: policyOverride || null,
     });
     onSaved();
   }, { onError: (e: any) => setError(e?.message ?? String(e)) });
@@ -1159,10 +1159,10 @@ function EditSessionModal({
                 )}
               </div>
             </Field>
-            <Field label={`Scope (default: ${defaultScope?.scopeName ?? 'lane has no scope'})`}>
-              <select className="input" value={scopeOverride} onChange={(e) => setScopeOverride(e.target.value)}>
-                <option value="">— use lane's scope ({defaultScope?.scopeName ?? 'none'}) —</option>
-                {scopes.map((sc) => <option key={sc.scopeId} value={sc.scopeId}>{sc.scopeName}</option>)}
+            <Field label={`Policy (default: ${defaultPolicy?.policyName ?? 'lane has no policy'})`}>
+              <select className="input" value={policyOverride} onChange={(e) => setScopeOverride(e.target.value)}>
+                <option value="">— use lane's policy ({defaultPolicy?.policyName ?? 'none'}) —</option>
+                {policies.map((sc) => <option key={sc.policyId} value={sc.policyId}>{sc.policyName}</option>)}
               </select>
             </Field>
             <div className="sm:col-span-2">
@@ -1186,7 +1186,7 @@ function EditSessionModal({
                 <div className="font-mono font-bold mt-0.5">
                   {previewFee != null
                     ? `RM ${(previewFee / 100).toFixed(2)}`
-                    : <span className="text-gray-400 italic">{previewScope ? 'set entry & exit to preview' : 'session has no scope — pick one above'}</span>}
+                    : <span className="text-gray-400 italic">{previewPolicy ? 'set entry & exit to preview' : 'session has no policy — pick one above'}</span>}
                 </div>
               </div>
             </div>

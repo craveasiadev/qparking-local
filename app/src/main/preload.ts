@@ -77,31 +77,31 @@ const api: BridgeApi = {
     ipcRenderer.invoke('sessions:delete-bulk', opts),
   manualReleaseSession: (id: number, reason: string) => ipcRenderer.invoke('sessions:release', id, reason),
   /** Edit entry/exit/plate/status/notes on a session. Server-side recomputes
-   *  duration + fee from the new times against the session's scope rate. */
+   *  duration + fee from the new times against the session's policy rate. */
   updateSession: (id: number, patch: {
     plate?: string;
     entryAt?: string;
     exitAt?: string | null;
     paymentStatus?: 'pending'|'paid'|'declined'|'cancelled'|'free'|'manual_release';
     notes?: string;
-    scopeIdOverride?: string | null;
+    policyIdOverride?: string | null;
   }) => ipcRenderer.invoke('sessions:update', id, patch),
 
-  // scopes
-  listScopes: () => ipcRenderer.invoke('scopes:list'),
-  syncScopesNow: () => ipcRenderer.invoke('scopes:sync'),
+  // policies
+  listRatePolicies: () => ipcRenderer.invoke('policies:list'),
+  syncRatePoliciesNow: () => ipcRenderer.invoke('policies:sync'),
   syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
 
   // Mirrored config from qparking SaaS (read-only locally)
-  listSpaces: () => ipcRenderer.invoke('spaces:list'),
-  syncSpacesNow: () => ipcRenderer.invoke('spaces:sync'),
-  listActivePasses: () => ipcRenderer.invoke('passes:list'),
-  saveScopeRate: (input: {
+  listParkingSpaces: () => ipcRenderer.invoke('parking-spaces:list'),
+  syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
+  listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
+  saveRatePolicy: (input: {
     firstBlockCents: number; perBlockCents: number;
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;
-  }) => ipcRenderer.invoke('scopes:save-rate', input),
-  simulateScopeFee: (input: { scopeId: string; entry: string; exit: string }) =>
-    ipcRenderer.invoke('scopes:simulate', input),
+  }) => ipcRenderer.invoke('policies:save-rate', input),
+  simulateRatePolicyFee: (input: { policyId: string; entry: string; exit: string }) =>
+    ipcRenderer.invoke('policies:simulate', input),
 
   // sync queue (outbound to qparking SaaS)
   getSyncStatus: () => ipcRenderer.invoke('sync:status'),

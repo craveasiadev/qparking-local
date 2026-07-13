@@ -1,34 +1,27 @@
 import { useEffect, useState } from 'react';
-import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Building2, Car, Cloud } from 'lucide-react';
-import type { ActivePass, ScopeRate } from '@shared/types';
+import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud } from 'lucide-react';
+import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 /**
- * Active passes view — every plate the gate currently honours without
+ * Season passes view — every plate the gate currently honours without
  * driving the payment terminal. Includes season passes (monthly /
  * quarterly / yearly), corporate fleet, staff, VIP, and free-access
  * permits. The list is cached locally from `/api/v1/local-server/passes`
  * (refreshed by the periodic sync); the operator can also force a
  * refresh here.
  */
-export function Passes() {
-  const [passes, setPasses] = useState<ActivePass[]>([]);
-  const [scopes, setScopes] = useState<ScopeRate[]>([]);
+export function SeasonPasses() {
+  const [passes, setPasses] = useState<SeasonPass[]>([]);
   const [filter, setFilter] = useState<'all' | 'free' | 'paid' | 'expiring'>('all');
   const [search, setSearch] = useState('');
 
   const [load, loading] = useAsyncAction(async () => {
-    const [p, s] = await Promise.all([
-      window.bridge.listActivePasses(),
-      window.bridge.listScopes(),
-    ]);
-    setPasses(p);
-    setScopes(s);
+    setPasses(await window.bridge.listSeasonPasses());
   });
 
   useEffect(() => { void load(); }, []);
 
-  const scopeName = (id: string) => scopes.find((s) => s.scopeId === id)?.scopeName ?? id;
   const today = new Date().toISOString().slice(0, 10);
   const in7Days = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
 
@@ -57,7 +50,7 @@ export function Passes() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Ticket size={22} /> Passes
+            <Ticket size={22} /> Season Passes
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every plate the gate opens for without charging. Cached from the cloud.
@@ -79,10 +72,11 @@ export function Passes() {
         <div className="text-xs text-blue-900 leading-relaxed">
           <p className="font-bold uppercase tracking-wide text-[10px]">Managed in cloud</p>
           <p className="mt-1">
-            Passes are created by customers in the qparking cloud portal
-            (Profile → My vehicles + Passes → Apply) and approved by
-            operators. This local view refreshes every few minutes so the
-            LPR gate always sees the latest roster.
+            Season passes are created by customers in the qparking cloud portal
+            (the Passes tab → "Apply for a new pass", after adding a vehicle
+            under Profile → My vehicles) and approved by operators. This local
+            view refreshes every few minutes so the LPR gate always sees the
+            latest roster.
           </p>
         </div>
       </div>
@@ -130,7 +124,6 @@ export function Passes() {
                 <tr>
                   <th className="text-left px-3 py-2 font-bold">Plate</th>
                   <th className="text-left px-3 py-2 font-bold">Type</th>
-                  <th className="text-left px-3 py-2 font-bold">Scope</th>
                   <th className="text-left px-3 py-2 font-bold">Valid</th>
                   <th className="text-left px-3 py-2 font-bold">Space</th>
                   <th className="text-right px-3 py-2 font-bold">Status</th>
@@ -150,10 +143,6 @@ export function Passes() {
                         }`}>
                           {p.isFree && <Crown size={9} />} {p.passType}
                         </span>
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        <Building2 size={11} className="inline mr-1 text-gray-400" />
-                        {scopeName(p.scopeId)}
                       </td>
                       <td className="px-3 py-2 text-[12px] font-mono text-gray-700">
                         {p.startDate ?? '—'} → {p.endDate ?? '—'}
