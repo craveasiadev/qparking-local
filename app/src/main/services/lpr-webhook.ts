@@ -55,14 +55,14 @@ const latestFrames = new Map<number, { base64: string; contentType: string; at: 
 export function getLatestFrame(cameraId: number): { base64: string; contentType: string; at: string } | null {
   return latestFrames.get(cameraId) ?? null;
 }
-/** Set the latest frame for a camera — used by the SDK stream grabber
- *  (camera-stream.ts) to feed a continuous CCTV feed into the same cache the
- *  Live display already reads. */
+/** Set the latest frame for a camera — used by the RTSP feed (rtsp-stream.ts)
+ *  to keep a ~1/s snapshot in the same cache the Live display and plate-event
+ *  capture read. */
 export function setLatestFrame(cameraId: number, frame: { base64: string; contentType: string; at: string }): void {
   latestFrames.set(cameraId, frame);
 }
 
-/** Capture a camera's current live frame (from the SDK grabber's cache) to a
+/** Capture a camera's current live frame (from the RTSP feed's cache) to a
  *  JPEG under userData/plates and return its path — or null if there's no frame
  *  yet. Lets the parking flow attach a real snapshot when the plate event itself
  *  carries no image (SDK cameras / the dev simulator). */
@@ -74,9 +74,9 @@ export async function captureFrameToFile(cameraId: number, plate: string): Promi
 
 /**
  * MJPEG fan-out for the Live display. A GET /live/<id> response is an
- * `multipart/x-mixed-replace` stream; the SDK grabber (camera-stream.ts) calls
- * pushJpegFrame() as fast as it grabs, and every viewer of that camera gets the
- * frame pushed. No polling, no base64, no per-frame IPC — the browser renders
+ * `multipart/x-mixed-replace` stream; the RTSP feed (rtsp-stream.ts) calls
+ * pushJpegFrame() as ffmpeg decodes frames, and every viewer of that camera gets
+ * the frame pushed. No polling, no base64, no per-frame IPC — the browser renders
  * each part natively, which is what makes the wall smooth instead of a 1 fps
  * slideshow.
  */

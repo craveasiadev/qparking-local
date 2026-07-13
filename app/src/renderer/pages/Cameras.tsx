@@ -142,14 +142,18 @@ function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
               <option value="entry">Entry</option><option value="exit">Exit</option><option value="dual">Dual</option>
             </select>
           </Field>
-          {/* Camera LAN IP — used for the ping / test-connection check and as the
-              SDK connect host for live video. */}
+          {/* Camera LAN IP — all that live video needs. The main process pulls
+              rtsp://<host>:8557/h264 and transcodes it for the Live display. */}
           <Field label="Camera host / LAN IP">
             <input className="input font-mono" value={value.host ?? ''} onChange={(e) => set('host', e.target.value)} placeholder="192.168.1.50" />
           </Field>
-          {/* Device login for pulling live video off the camera via the VZ SDK.
-              host (above) = camera IP; these feed VzLPRClient_OpenV2. */}
-          <Field label="Device username (live video)">
+          {/* Device login is NOT needed for video (RTSP is token-free). It's used
+              only to open the camera's onboard IO relay for "Open barrier" — leave
+              blank if the barrier isn't wired to this camera. */}
+          <p className="sm:col-span-2 text-xs text-gray-500 mt-1">
+            <strong>Barrier relay (optional)</strong> — only if the barrier is wired to this camera's IO output. Live video doesn't need these.
+          </p>
+          <Field label="Device username">
             <input className="input" value={value.deviceUser ?? ''} onChange={(e) => set('deviceUser', e.target.value)} placeholder="admin" />
           </Field>
           <Field label="Device password">

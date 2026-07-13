@@ -117,7 +117,8 @@ import {
 import { pingCamera, pingHost } from './services/camera-snapshots';
 import { pingTerminalHost } from './services/terminal-probe';
 import { pushCamera, pushAllCameras } from './services/camera-push';
-import { startStreamGrabbers, stopStreamGrabbers, resync as resyncStreamGrabbers, pulseBarrier } from './services/camera-stream';
+import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier } from './services/camera-stream';
+import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } from './services/rtsp-stream';
 import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
@@ -218,10 +219,12 @@ app.whenReady().then(async () => {
   // Subsequent updates push on every save.
   pushAllDevices().then(() => pushAllCameras()).catch(() => null);
 
-  // Start the live-video grabbers for the Live display wall — one per camera
-  // with device credentials. They pull JPEG frames off the device via the VZ
-  // SDK and fan them out as MJPEG, independent of the webhook record snaps.
-  startStreamGrabbers();
+  // Live-display video + plate snapshots come from the RTSP/ffmpeg feed
+  // (rtsp-stream) — camera IP only. The VZ SDK now holds a warm handle per
+  // credentialed camera solely so an operator "Open barrier" pulses the camera's
+  // onboard relay instantly.
+  startRtspGrabbers();
+  startCameraRelay();
 
   // Stream parking + lpr events to renderer.
   wireRendererEvents();
@@ -235,7 +238,7 @@ app.whenReady().then(async () => {
   createTray();
 });
 
-app.on('before-quit', () => { stopStreamGrabbers(); });
+app.on('before-quit', () => { stopRtspGrabbers(); stopCameraRelay(); });
 
 app.on('window-all-closed', () => {
   // Keep the process alive on Windows so the background services keep running.
@@ -478,11 +481,12 @@ ipcMain.handle('cameras:save', async (_e, input) => {
   const saved = upsertCamera(input);
   // Mirror to cloud — best-effort, doesn't block the local save.
   pushCamera(saved.id).catch(() => null);
-  // Start/stop/refresh the SDK live-video grabber if the device creds changed.
-  resyncStreamGrabbers();
+  // Refresh the RTSP video feed and the warm relay connection if host/creds changed.
+  resyncRtspGrabbers();
+  resyncCameraRelay();
   return saved;
 });
-ipcMain.handle('cameras:delete', (_e, id: number) => { deleteCamera(id); resyncStreamGrabbers(); });
+ipcMain.handle('cameras:delete', (_e, id: number) => { deleteCamera(id); resyncRtspGrabbers(); resyncCameraRelay(); });
 // Latest frame the camera pushed with a plate event — Live display fallback
 // for WebSocket/RTSP-only cameras with no pullable HTTP snapshot URL.
 ipcMain.handle('cameras:latest-frame', (_e, cameraId: number) => getLatestFrame(cameraId));

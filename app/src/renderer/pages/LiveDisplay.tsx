@@ -7,10 +7,11 @@ import type { LprCamera, ParkingLane } from '@shared/types';
  * 3-column grid.
  *
  * VZ cameras with device credentials stream as MJPEG straight from the local
- * server: the main process grabs frames off the device via the native SDK and
- * fans them out at /live/<id>, and the browser renders that continuously in an
- * <img> — a smooth feed, not a 1 fps slideshow. Cameras with only an HTTP
- * snapshot URL (or webhook-only cameras) fall back to a ~1s polled frame.
+ * server: the main process runs FFmpeg to pull the camera's RTSP/H.264 feed
+ * (rtsp://<host>:8557/h264), transcodes it to JPEG frames, and fans them out at
+ * /live/<id>, and the browser renders that continuously in an <img> — a smooth
+ * feed, not a 1 fps slideshow. Cameras with only an HTTP snapshot URL (or
+ * webhook-only cameras) fall back to a ~1s polled frame.
  * Unreachable feeds surface the error so an operator can spot a dropped camera.
  */
 export function LiveDisplay() {
@@ -45,7 +46,7 @@ export function LiveDisplay() {
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Live display</h1>
-          <p className="text-sm text-gray-500 mt-1">Live video streamed straight from each device. A camera needs its username / password set on the LPR cameras page to appear here.</p>
+          <p className="text-sm text-gray-500 mt-1">Live video streamed straight from each device over RTSP. A camera needs its IP address set on the LPR cameras page to appear here.</p>
         </div>
         <button onClick={() => refresh()} disabled={loading}
           className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
@@ -69,10 +70,11 @@ export function LiveDisplay() {
   );
 }
 
-/** Pick the delivery: a credentialed VZ camera streams MJPEG from the local
- *  server; everything else uses the polled-frame fallback. */
+/** Pick the delivery: any enabled camera with a host (IP) streams the RTSP feed
+ *  as MJPEG from the local server; everything else uses the polled-frame
+ *  fallback (webhook-only cameras with no host). */
 function LiveTile({ cam, port, lane }: { cam: LprCamera; port: number | null; lane: ParkingLane | null }) {
-  const streams = !!(cam.enabled && cam.host && cam.deviceUser && cam.devicePassword);
+  const streams = !!(cam.enabled && cam.host);
   if (streams && port) return <StreamTile cam={cam} port={port} lane={lane} />;
   return <PollTile cam={cam} lane={lane} />;
 }
@@ -189,6 +191,15 @@ function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }
   const [busy, setBusy] = useState<null | 'open' | 'pay'>(null);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [plate, setPlate] = useState('');
+
+  // Auto-dismiss the action result banner a few seconds after it appears so it
+  // doesn't linger on the wall. Any new action replaces `result`, which resets
+  // the timer via the dependency.
+  useEffect(() => {
+    if (!result) return;
+    const t = window.setTimeout(() => setResult(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [result]);
 
   // Retrigger is an EXIT action — show it on exit/dual tiles. We don't gate on
   // a wired terminal: the fee may be collected via the TNG controller (no

@@ -2,8 +2,8 @@
  * Camera connectivity probe. Cameras are LAN-local hardware, so only the
  * on-prem qparking-local server can reach them. Backs the "Test connection"
  * button on the LPR cameras page — confirms the camera IP is reachable before
- * saving. (Live view + capture snapshots now come from the device SDK, not an
- * HTTP snapshot URL.)
+ * saving. (Live view + capture snapshots now come from the camera's RTSP feed
+ * via ffmpeg, not an HTTP snapshot URL.)
  */
 import axios from 'axios';
 import { getCamera } from './db';
