@@ -527,6 +527,28 @@ ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));
 
 ipcMain.handle('sessions:open', () => listOpenSessions());
 ipcMain.handle('sessions:recent', (_e, limit: number) => listRecentSessions(limit));
+// Live "what does this car owe right now" preview for an OPEN session, using
+// the SAME rules-aware computeFee the exit flow uses (the entry lane's policy
+// governs, then the site default). The renderer can't run computeFee (it lives
+// in the main process and honours the tariff_rules schedule), so we compute it
+// here and attach it to each open row — otherwise the UI's simplified legacy
+// calc shows RM0 for schedule-based policies.
+function previewFeeForOpenSession(s: ReturnType<typeof listSessionsPage>[number]): number | null {
+  if (s.exitAt) return null;
+  const entryLane = s.entryLaneId ? getLane(s.entryLaneId) : null;
+  const exitLane = s.exitLaneId ? getLane(s.exitLaneId) : null;
+  const policy = (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
+    ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
+    ?? getSiteDefaultRatePolicy();
+  if (!policy) return 0;
+  const nowIso = new Date().toISOString();
+  const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
+  let fee = computeFee(durationMinutes, policy, s.entryAt, nowIso);
+  const minCharge = getSettings().minimumChargeCents ?? 0;
+  if (minCharge > 0 && fee < minCharge) fee = minCharge;
+  return fee;
+}
+
 ipcMain.handle('sessions:page', (_e, opts: {
   tab: 'open' | 'recent';
   limit: number;
@@ -537,7 +559,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
   exitFrom?: string | null;
   exitTo?: string | null;
 }) => ({
-  rows: listSessionsPage(opts),
+  rows: listSessionsPage(opts).map((s) => ({ ...s, livePreviewFeeCents: previewFeeForOpenSession(s) })),
   counts: countSessions({
     plateSearch: opts.plateSearch ?? null,
     entryFrom: opts.entryFrom ?? null,
@@ -549,7 +571,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
 
 // Manual retrigger — synthesizes an exit LPR event for a session so the
 // normal parking-flow can drive the terminal for a stuck / mis-read exit.
-ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number) => retriggerSessionExit(sessionId));
+ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number, laneId?: number | null) => retriggerSessionExit(sessionId, laneId));
 // Live-display "retrigger payment" — operator types the plate they can read off
 // the feed; we find that car's open session and re-run its exit-payment flow.
 ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string, laneId?: number | null) => retriggerSessionExitByPlate(plate, laneId));
@@ -577,9 +599,14 @@ ipcMain.handle('sessions:delete-bulk', (_e, opts: { ids?: number[]; tab?: 'open'
   toSync.forEach((s: any) => { if (s) enqueueDelete(s); });
   return { deleted };
 });
-ipcMain.handle('sessions:release', (_e, id: number, reason: string) => {
+ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
   const session = manualReleaseSession(id, reason);
   if (session) enqueueUpdate(session);
+  // Let the car out — open the barrier at the operator-chosen lane (falling
+  // back to the session's own exit/entry lane). Fire-and-forget so the release
+  // returns promptly; the barrier open is best-effort.
+  const gateLaneId = laneId ?? session?.exitLaneId ?? session?.entryLaneId ?? null;
+  if (gateLaneId) openBarrier({ laneId: gateLaneId, reason: 'manual-release' }).catch(() => null);
   return session;
 });
 // DEV/QA lane simulator — drives the real parking flow for a lane+plate.
@@ -845,25 +872,26 @@ ipcMain.handle('gate:test', (_e, opts: { plate?: string; direction?: 'in'|'out'|
   setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
 });
 
-// Manual operator "open barrier" from the Live display. Mirrors the remote
-// gate-open path: pop/flash the gate simulator so the operator sees it, and
-// best-effort raise the face-auth turnstile (the one real barrier device wired
-// today). The physical GPIO relay (gateRelayAddress) isn't driven yet — same
-// TODO as the entry flow.
-ipcMain.handle('gate:manual-open', async (_e, opts: { cameraId?: number | null; laneId?: number | null } = {}) => {
-  const camera = opts.cameraId ? (listCameras().find((c) => c.id === opts.cameraId) ?? null) : null;
+// Open the barrier for a lane/camera. Mirrors the remote gate-open path: flash
+// the gate simulator so the operator sees it, pulse the camera's onboard relay
+// (the real barrier wired to the LPR camera's IO output), and best-effort raise
+// the face-auth turnstile. Shared by the Live-display "Open barrier" button and
+// the Sessions "Manual release" (which lets the car out on release).
+async function openBarrier(opts: { cameraId?: number | null; laneId?: number | null; reason?: string } = {}) {
+  let camera = opts.cameraId ? (listCameras().find((c) => c.id === opts.cameraId) ?? null) : null;
   const lane = opts.laneId ? getLane(opts.laneId) : (camera?.laneId ? getLane(camera.laneId) : null);
+  // Given only a lane, resolve one of its enabled cameras so we can pulse the
+  // relay wired to it.
+  if (!camera && lane) camera = listCameras().find((c) => c.laneId === lane.id && c.enabled) ?? null;
   const laneName = lane?.name ?? camera?.name ?? 'MANUAL OPEN';
   const direction = camera?.direction === 'entry' ? 'in' : 'out';
+  const reason = opts.reason ?? 'manual-operator-open';
   openGateSimulator(isDev);
-  sendGateEvent({ state: 'open', laneName, direction, reason: 'manual-operator-open', holdMs: 5_000 });
+  sendGateEvent({ state: 'open', laneName, direction, reason, holdMs: 5_000 });
   setTimeout(() => sendGateEvent({ state: 'closed' }), 5_000);
-  // Physical barrier: pulse the camera's onboard relay (best-effort). Real
-  // hardware where the barrier is wired to the LPR camera's IO output.
   const relay = camera ? pulseBarrier(camera.id) : { ok: false, error: 'no_camera' };
-  // Face-auth turnstile (best-effort) — the other real barrier device.
   let face: { ok: boolean; status?: number; error?: string } | null = null;
-  try { face = await openFaceGate({ reason: `manual-open:${laneName}` }); }
+  try { face = await openFaceGate({ reason: `${reason}:${laneName}` }); }
   catch (e: any) { face = { ok: false, error: e?.message ?? String(e) }; }
   return {
     ok: true,
@@ -871,7 +899,10 @@ ipcMain.handle('gate:manual-open', async (_e, opts: { cameraId?: number | null; 
       + (relay.ok ? ' · camera-relay pulsed' : camera ? ` · relay ${relay.error}` : '')
       + (face?.ok ? ' · face-gate ok' : ''),
   };
-});
+}
+
+// Manual operator "open barrier" from the Live display.
+ipcMain.handle('gate:manual-open', (_e, opts: { cameraId?: number | null; laneId?: number | null } = {}) => openBarrier(opts));
 
 ipcMain.handle('sync:all-tables', async () => {
   // Pull cloud-owned models down (site/policies/passes/spaces), then push local

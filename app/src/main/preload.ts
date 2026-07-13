@@ -68,7 +68,7 @@ const api: BridgeApi = {
   /** Manually retrigger the exit-payment flow for a session — used by the
    *  Sessions page when the exit LPR misread the plate or the operator
    *  needs to close a stuck session by asking the driver to tap again. */
-  retriggerSessionPayment: (id: number) => ipcRenderer.invoke('sessions:retrigger-payment', id),
+  retriggerSessionPayment: (id: number, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-payment', id, laneId),
   retriggerSessionPaymentByPlate: (plate: string, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-by-plate', plate, laneId),
   simulateLaneEvent: (laneId: number, plate: string, direction: 'entry'|'exit') => ipcRenderer.invoke('sessions:simulate-lane', laneId, plate, direction),
   simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
@@ -78,7 +78,7 @@ const api: BridgeApi = {
   deleteSession: (id: number) => ipcRenderer.invoke('sessions:delete', id),
   deleteSessionsBulk: (opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) =>
     ipcRenderer.invoke('sessions:delete-bulk', opts),
-  manualReleaseSession: (id: number, reason: string) => ipcRenderer.invoke('sessions:release', id, reason),
+  manualReleaseSession: (id: number, reason: string, laneId?: number | null) => ipcRenderer.invoke('sessions:release', id, reason, laneId),
   /** Edit entry/exit/plate/status/notes on a session. Server-side recomputes
    *  duration + fee from the new times against the session's policy rate. */
   updateSession: (id: number, patch: {

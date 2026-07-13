@@ -151,14 +151,16 @@ export interface BridgeApi {
     exitFrom?: string | null;
     exitTo?: string | null;
   }): Promise<{
-    rows: ParkingSession[];
+    /** Open rows carry `livePreviewFeeCents` — the current fee computed
+     *  server-side with the real rules-aware calc (the UI can't run it). */
+    rows: Array<ParkingSession & { livePreviewFeeCents?: number | null }>;
     counts: { open: number; total: number };
   }>;
   /** Manually retrigger the exit payment flow for a stuck session. Fires
    *  the terminal (ECPI initCard + W4G PayRequest race) using the lane +
    *  terminal wired to the session's lane. Returns immediately; the actual
    *  card tap resolves asynchronously through the normal parking-flow. */
-  retriggerSessionPayment(id: number): Promise<{ ok: boolean; error?: string }>;
+  retriggerSessionPayment(id: number, laneId?: number | null): Promise<{ ok: boolean; error?: string }>;
   /** Retrigger exit payment for whichever open session holds this plate — the
    *  Live-display action where the operator types the plate off the feed.
    *  `laneId` is the exit lane the operator triggered from, so the exit runs on
@@ -184,7 +186,7 @@ export interface BridgeApi {
   readSessionImage(filePath: string): Promise<{ base64: string; contentType: string } | null>;
   deleteSession(id: number): Promise<boolean>;
   deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
-  manualReleaseSession(id: number, reason: string): Promise<void>;
+  manualReleaseSession(id: number, reason: string, laneId?: number | null): Promise<void>;
   updateSession(id: number, patch: {
     plate?: string;
     entryAt?: string;

@@ -9,6 +9,11 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 
 const PAGE_SIZE = 20;
 
+/** A session row plus the server-computed live fee for OPEN sessions. The UI
+ *  can't run the rules-aware fee calc (it lives in the main process and honours
+ *  the tariff_rules schedule), so the page response attaches the real number. */
+type SessionRow = ParkingSession & { livePreviewFeeCents?: number | null };
+
 interface DateRangeFilters {
   entryFrom: string;
   entryTo: string;
@@ -192,7 +197,7 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
 
 export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [tab, setTab] = useState<'open' | 'recent'>('open');
-  const [rows, setRows] = useState<ParkingSession[]>([]);
+  const [rows, setRows] = useState<SessionRow[]>([]);
   const [counts, setCounts] = useState({ open: 0, total: 0 });
   const [page, setPage] = useState(0);
   const [plateSearch, setPlateSearch] = useState('');
@@ -209,9 +214,9 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     return () => clearTimeout(h);
   }, [range]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [viewing, setViewing] = useState<ParkingSession | null>(null);
+  const [viewing, setViewing] = useState<SessionRow | null>(null);
   const [editing, setEditing] = useState<ParkingSession | null>(null);
-  const [releasing, setReleasing] = useState<ParkingSession | null>(null);
+  const [releasing, setReleasing] = useState<{ session: SessionRow; laneId: number | null } | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [retriggerNotice, setRetriggerNotice] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -315,11 +320,11 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     await fetchPage();
   });
 
-  const [runRetrigger, retriggering] = useAsyncAction(async (id: number, plate: string) => {
+  const [runRetrigger, retriggering] = useAsyncAction(async (id: number, plate: string, laneId: number | null) => {
     setRetriggerNotice(null);
-    const r = await window.bridge.retriggerSessionPayment(id);
+    const r = await window.bridge.retriggerSessionPayment(id, laneId);
     if (r.ok) {
-      setRetriggerNotice({ tone: 'ok', text: `Terminal armed for ${plate}. Ask the driver to tap now — the session closes automatically on success.` });
+      setRetriggerNotice({ tone: 'ok', text: `Retrigger sent for ${plate}. If the fee is RM0 the barrier opens; otherwise the selected gate's terminal is armed for the driver to tap.` });
     } else {
       setRetriggerNotice({ tone: 'err', text: `Couldn't retrigger: ${r.error}` });
     }
@@ -492,9 +497,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
                 let displayFeeCents: number | null = s.feeCents ?? null;
                 let isLivePreview = false;
-                if (displayFeeCents == null && !s.exitAt && mins != null) {
-                  const sc = policyForSession(s);
-                  if (sc) { displayFeeCents = computeFeeFromPolicy(mins, sc); isLivePreview = true; }
+                if (displayFeeCents == null && !s.exitAt && s.livePreviewFeeCents != null) {
+                  displayFeeCents = s.livePreviewFeeCents; isLivePreview = true;
                 }
                 const isSelected = selected.has(s.id);
                 return (
@@ -552,9 +556,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
           let displayFeeCents: number | null = s.feeCents ?? null;
           let isLivePreview = false;
-          if (displayFeeCents == null && !s.exitAt && mins != null) {
-            const sc = policyForSession(s);
-            if (sc) { displayFeeCents = computeFeeFromPolicy(mins, sc); isLivePreview = true; }
+          if (displayFeeCents == null && !s.exitAt && s.livePreviewFeeCents != null) {
+            displayFeeCents = s.livePreviewFeeCents; isLivePreview = true;
           }
           const isSelected = selected.has(s.id);
           return (
@@ -638,6 +641,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         <ViewSessionModal
           session={viewing}
           policy={policyForSession(viewing)}
+          lanes={lanes}
           entryLaneName={laneNameForId(viewing.entryLaneId)}
           exitLaneName={laneNameForId(viewing.exitLaneId)}
           retriggering={retriggering}
@@ -645,8 +649,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           onClose={() => setViewing(null)}
           onOpenImage={setPreviewImage}
           onEdit={() => { setEditing(viewing); }}
-          onRelease={() => { setReleasing(viewing); }}
-          onRetrigger={() => runRetrigger(viewing.id, viewing.plate)}
+          onRelease={(laneId) => { setReleasing({ session: viewing, laneId }); }}
+          onRetrigger={(laneId) => runRetrigger(viewing.id, viewing.plate, laneId)}
           onDelete={() => runDeleteOne(viewing.id)}
         />
       )}
@@ -663,7 +667,9 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
 
       {releasing && (
         <ReleaseSessionModal
-          session={releasing}
+          session={releasing.session}
+          lanes={lanes}
+          defaultLaneId={releasing.laneId}
           onClose={() => setReleasing(null)}
           onReleased={async () => { setReleasing(null); await fetchPage(); }}
         />
@@ -804,15 +810,6 @@ function ThumbCell({
   );
 }
 
-function computeFeeFromPolicy(durationMinutes: number, sc: RatePolicy): number {
-  const billable = Math.max(0, durationMinutes - sc.freeMinutes);
-  if (billable === 0) return 0;
-  const blocks = Math.ceil(billable / Math.max(1, sc.blockMinutes));
-  let cents = sc.firstBlockCents + Math.max(0, blocks - 1) * sc.perBlockCents;
-  if (sc.dailyCapCents > 0 && cents > sc.dailyCapCents) cents = sc.dailyCapCents;
-  return cents;
-}
-
 /**
  * View-only detail modal for a session. Consolidates all per-session actions
  * (Edit, Retrigger pay, Manual release, Delete) so the table row can stay
@@ -820,12 +817,13 @@ function computeFeeFromPolicy(durationMinutes: number, sc: RatePolicy): number {
  * modals — this is a hub, not a replacement.
  */
 function ViewSessionModal({
-  session, policy, entryLaneName, exitLaneName,
+  session, policy, lanes, entryLaneName, exitLaneName,
   retriggering, deleting,
   onClose, onOpenImage, onEdit, onRelease, onRetrigger, onDelete,
 }: {
-  session: ParkingSession;
+  session: SessionRow;
   policy: RatePolicy | null;
+  lanes: ParkingLane[];
   entryLaneName: string;
   exitLaneName: string;
   retriggering: boolean;
@@ -833,17 +831,23 @@ function ViewSessionModal({
   onClose: () => void;
   onOpenImage: (url: string) => void;
   onEdit: () => void;
-  onRelease: () => void;
-  onRetrigger: () => void;
+  onRelease: (laneId: number | null) => void;
+  onRetrigger: (laneId: number | null) => void;
   onDelete: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const s = session;
+  // Which gate the operator wants to act on (retrigger charge / release open).
+  // Default to the session's exit lane, else a lane with a terminal wired, else
+  // its entry lane / the first lane.
+  const [actionLaneId, setActionLaneId] = useState<number | null>(
+    s.exitLaneId ?? lanes.find((l) => l.terminalId != null)?.id ?? s.entryLaneId ?? lanes[0]?.id ?? null,
+  );
   const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
   let displayFeeCents: number | null = s.feeCents ?? null;
   let isLivePreview = false;
-  if (displayFeeCents == null && !s.exitAt && mins != null && policy) {
-    displayFeeCents = computeFeeFromPolicy(mins, policy);
+  if (displayFeeCents == null && !s.exitAt && s.livePreviewFeeCents != null) {
+    displayFeeCents = s.livePreviewFeeCents;
     isLivePreview = true;
   }
   const isOpen = !s.exitAt;
@@ -917,6 +921,24 @@ function ViewSessionModal({
           {/* Action bar — everything an operator can do to this row. */}
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">Actions</div>
+            {isOpen && (
+              /* Which gate the retrigger charges on / the manual release opens.
+                 Same idea as the Live-display tile, but here we already know the
+                 plate from the session. */
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <label className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Gate</label>
+                <select
+                  value={actionLaneId ?? ''}
+                  onChange={(e) => setActionLaneId(e.target.value ? Number(e.target.value) : null)}
+                  className="h-8 px-2 rounded-lg border border-gray-300 text-xs min-w-[11rem]"
+                >
+                  {lanes.length === 0 && <option value="">no lanes configured</option>}
+                  {lanes.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}{l.terminalId != null ? ' · terminal' : ''}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={onEdit}
@@ -927,15 +949,15 @@ function ViewSessionModal({
               {isOpen && (
                 <>
                   <button
-                    onClick={onRetrigger}
-                    disabled={retriggering}
+                    onClick={() => onRetrigger(actionLaneId)}
+                    disabled={retriggering || actionLaneId == null}
                     className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
-                    title="Fires the payment terminal for this session — use when the exit LPR misread the plate or the driver needs to tap again"
+                    title="Compute the fee for this car and charge it on the selected gate — RM0 opens the barrier, more than RM0 drives that gate's terminal"
                   >
                     {retriggering ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Retrigger pay
                   </button>
                   <button
-                    onClick={onRelease}
+                    onClick={() => onRelease(actionLaneId)}
                     className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase tracking-wide"
                   >
                     <ShieldAlert size={13} /> Manual release
@@ -952,7 +974,7 @@ function ViewSessionModal({
             </div>
             {isOpen && (
               <p className="mt-2 text-[10px] text-gray-500">
-                <span className="font-bold">Retrigger pay</span> arms the terminal so the driver can tap. <span className="font-bold">Manual release</span> closes the session without a payment (audit-only, gate is not opened).
+                <span className="font-bold">Retrigger pay</span> computes this car's fee and charges it on the selected gate (free → barrier opens). <span className="font-bold">Manual release</span> closes the session without payment AND opens the selected gate's barrier to let the car out.
               </p>
             )}
           </div>
@@ -1014,14 +1036,17 @@ function CaptureBlock({
 }
 
 function ReleaseSessionModal({
-  session, onClose, onReleased,
-}: { session: ParkingSession; onClose: () => void; onReleased: () => void }) {
+  session, lanes, defaultLaneId, onClose, onReleased,
+}: { session: ParkingSession; lanes: ParkingLane[]; defaultLaneId: number | null; onClose: () => void; onReleased: () => void }) {
   const [reason, setReason] = useState('');
+  const [laneId, setLaneId] = useState<number | null>(
+    defaultLaneId ?? session.exitLaneId ?? session.entryLaneId ?? lanes[0]?.id ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [go, busy] = useAsyncAction(async () => {
     if (!reason.trim()) { setError('Reason is required.'); return; }
     setError(null);
-    await window.bridge.manualReleaseSession(session.id, reason.trim());
+    await window.bridge.manualReleaseSession(session.id, reason.trim(), laneId);
     onReleased();
   }, { onError: (e: any) => setError(e?.message ?? String(e)) });
 
@@ -1031,7 +1056,7 @@ function ReleaseSessionModal({
         <header className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
           <div>
             <h2 className="text-base font-bold inline-flex items-center gap-2"><ShieldAlert size={16} className="text-amber-600" /> Manual release</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Closes the session WITHOUT a terminal payment. Audit trail only — gate isn't opened.</p>
+            <p className="text-xs text-gray-500 mt-0.5">Closes the session WITHOUT a terminal payment, and opens the selected gate's barrier to let the car out.</p>
           </div>
           <button onClick={onClose} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500"><X size={18} /></button>
         </header>
@@ -1041,6 +1066,17 @@ function ReleaseSessionModal({
             <span className="text-gray-500">Plate:</span> <span className="font-mono font-bold">{session.plate}</span>
             <span className="text-gray-400 mx-2">·</span>
             <span className="text-gray-500">Entered:</span> <span className="font-mono text-xs">{new Date(session.entryAt).toLocaleString()}</span>
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1">Open barrier at gate</label>
+            <select
+              className="w-full h-9 px-2 text-sm border border-gray-300 rounded-lg outline-none focus:border-gray-900 bg-white"
+              value={laneId ?? ''}
+              onChange={(e) => setLaneId(e.target.value ? Number(e.target.value) : null)}
+            >
+              {lanes.length === 0 && <option value="">no lanes configured</option>}
+              {lanes.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1">Reason (required)</label>
@@ -1143,8 +1179,8 @@ function EditSessionModal({
               <input type="datetime-local" className="input" value={entryAt} onChange={(e) => setEntryAt(e.target.value)} step="1" />
             </Field>
             <Field label="Exit time (blank = still inside)">
-              <div className="flex gap-2">
-                <input type="datetime-local" className="input" value={exitAt} onChange={(e) => setExitAt(e.target.value)} step="1" />
+              <div className="flex gap-2 min-w-0">
+                <input type="datetime-local" className="input flex-1 min-w-0" value={exitAt} onChange={(e) => setExitAt(e.target.value)} step="1" />
                 <button type="button" onClick={() => setExitAt(toLocalInput(new Date().toISOString()))}
                   title="Set exit time to now"
                   className="shrink-0 h-[38px] px-3 rounded-lg border border-gray-300 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700">
@@ -1198,7 +1234,7 @@ function EditSessionModal({
           <button onClick={() => save()} disabled={saving}
             className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-            {saving ? 'Saving…' : 'Save + recalc'}
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </footer>
         <style>{`.input { height: 38px; padding: 0 0.625rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 13px; width: 100%; background: white; } textarea.input { padding: 0.5rem 0.625rem; height: auto; } .input:focus { border-color: #111827; }`}</style>
