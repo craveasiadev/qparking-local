@@ -271,7 +271,7 @@ async function sendOp(op: SyncOp, payload: Record<string, unknown>): Promise<{ o
   // "mark this record cancelled".
   const body = op === 'session.delete' ? { ...payload, _delete: true } : payload;
   try {
-    const response = await cloud.post('/parking-records', body);
+    const response = await cloud.post('/parking-records/upsert', body);
     return { ok: true, status: response.status };
   } catch (error: any) {
     if (axios.isAxiosError(error) && error.response) {
