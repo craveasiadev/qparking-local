@@ -186,6 +186,20 @@ export function Terminals() {
 function TerminalForm({ value, onChange, onCancel, onSave, error, busy }:
   { value: Partial<PaymentTerminal>; onChange: (v: Partial<PaymentTerminal>) => void; onCancel: () => void; onSave: () => void; error: string | null; busy: boolean }) {
   const set = (k: keyof PaymentTerminal, v: any) => onChange({ ...value, [k]: v });
+  const [pingResult, setPingResult] = useState<string | null>(null);
+  const [pinging, setPinging] = useState(false);
+  async function testConnection() {
+    const host = (value.host ?? '').trim();
+    if (!host) { setPingResult('Enter a host / LAN IP first.'); return; }
+    setPinging(true);
+    setPingResult('Connecting…');
+    // Probe the form values directly so this works before the terminal is saved.
+    const r = await window.bridge.pingTerminalHost({ host, port: value.port ?? 5000 });
+    setPingResult(r.ok
+      ? `✓ Reachable · ${r.latencyMs}ms`
+      : `✗ ${r.error ?? 'unreachable'} · ${r.latencyMs ?? '—'}ms`);
+    setPinging(false);
+  }
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onCancel}>
       <div onClick={(e) => e.stopPropagation()} className="w-full max-w-xl bg-white rounded-2xl shadow-2xl overflow-hidden">
@@ -217,6 +231,19 @@ function TerminalForm({ value, onChange, onCancel, onSave, error, busy }:
           <Field label="Enabled">
             <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={value.enabled ?? true} onChange={(e) => set('enabled', e.target.checked)} /> auto-connect on boot</label>
           </Field>
+          <div className="sm:col-span-2">
+            <button type="button" onClick={testConnection} disabled={pinging}
+              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+              {pinging ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />} Test connection
+            </button>
+            {pingResult && (
+              <div className={`mt-2 rounded-md px-2 py-1.5 text-[11px] font-mono ${
+                pingResult.startsWith('✓') ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : pingResult.startsWith('✗') ? 'bg-red-50 text-red-700 border border-red-200'
+                : 'bg-gray-100 text-gray-700'
+              }`}>{pingResult}</div>
+            )}
+          </div>
         </div>
         {error && (
           <div className="mx-5 mb-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>

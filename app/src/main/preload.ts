@@ -17,6 +17,7 @@ const api: BridgeApi = {
   deleteTerminal: (id: number) => ipcRenderer.invoke('terminals:delete', id),
   getTerminalStatus: (id: number) => ipcRenderer.invoke('terminals:status', id),
   terminalConnect: (id: number) => ipcRenderer.invoke('terminals:connect', id),
+  pingTerminalHost: (input: { host: string; port: number }) => ipcRenderer.invoke('terminals:ping-host', input),
   terminalDisconnect: (id: number) => ipcRenderer.invoke('terminals:disconnect', id),
 
   // terminals — full ECPI API surface (used by the TerminalTester modal)
@@ -44,6 +45,7 @@ const api: BridgeApi = {
   deleteCamera: (id: number) => ipcRenderer.invoke('cameras:delete', id),
   getCameraLatestFrame: (cameraId: number) => ipcRenderer.invoke('cameras:latest-frame', cameraId),
   pingCamera: (cameraId: number) => ipcRenderer.invoke('cameras:ping', cameraId),
+  pingCameraHost: (input: { host: string; port?: number }) => ipcRenderer.invoke('cameras:ping-host', input),
 
   // lanes
   listLanes: () => ipcRenderer.invoke('lanes:list'),
@@ -67,6 +69,7 @@ const api: BridgeApi = {
    *  Sessions page when the exit LPR misread the plate or the operator
    *  needs to close a stuck session by asking the driver to tap again. */
   retriggerSessionPayment: (id: number) => ipcRenderer.invoke('sessions:retrigger-payment', id),
+  retriggerSessionPaymentByPlate: (plate: string) => ipcRenderer.invoke('sessions:retrigger-by-plate', plate),
   simulateLaneEvent: (laneId: number, plate: string, direction: 'entry'|'exit') => ipcRenderer.invoke('sessions:simulate-lane', laneId, plate, direction),
   simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
   simulateEntry: (laneId: number, plate: string, entryIso: string) => ipcRenderer.invoke('sessions:simulate-entry', laneId, plate, entryIso),
@@ -126,6 +129,7 @@ const api: BridgeApi = {
   // gate simulator
   openGateSimulator: () => ipcRenderer.invoke('gate:open'),
   testGate: (opts?: { plate?: string; direction?: 'in'|'out'|'test'; laneName?: string }) => ipcRenderer.invoke('gate:test', opts ?? {}),
+  manualOpenGate: (opts: { cameraId?: number | null; laneId?: number | null }) => ipcRenderer.invoke('gate:manual-open', opts),
 
   // face-auth turnstile (faceapp_main)
   pingFaceGate: () => ipcRenderer.invoke('faceGate:ping'),

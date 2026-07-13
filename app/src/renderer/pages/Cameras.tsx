@@ -112,13 +112,18 @@ function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
   const generateSecret = () => set('webhookSecret', Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
   const [pingResult, setPingResult] = useState<string | null>(null);
 
+  const [pinging, setPinging] = useState(false);
   async function testConnection() {
-    if (!value.id) { setPingResult('Save the camera first, then test.'); return; }
+    const host = (value.host ?? '').trim();
+    if (!host) { setPingResult('Enter a camera host / LAN IP first.'); return; }
+    setPinging(true);
     setPingResult('Pinging…');
-    const r = await window.bridge.pingCamera(value.id);
+    // Probe the form values directly so this works before the camera is saved.
+    const r = await window.bridge.pingCameraHost({ host, port: value.devicePort ?? 80 });
     setPingResult(r.ok
       ? `✓ Reachable · status ${r.status} · ${r.latencyMs}ms`
       : `✗ ${r.error ?? `status ${r.status}`} · ${r.latencyMs ?? '—'}ms`);
+    setPinging(false);
   }
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onCancel}>
@@ -154,9 +159,9 @@ function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
             <input type="number" className="input" value={value.devicePort ?? 80} onChange={(e) => set('devicePort', Number(e.target.value))} />
           </Field>
           <div className="sm:col-span-2">
-            <button type="button" onClick={testConnection}
-              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700">
-              <Activity size={13} /> Test connection
+            <button type="button" onClick={testConnection} disabled={pinging}
+              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+              {pinging ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />} Test connection
             </button>
             {pingResult && (
               <div className={`mt-2 rounded-md px-2 py-1.5 text-[11px] font-mono ${

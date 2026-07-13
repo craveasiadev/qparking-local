@@ -81,6 +81,9 @@ export interface BridgeApi {
   getTerminalStatus(id: number): Promise<TerminalStatus>;
   terminalConnect(id: number): Promise<void>;
   terminalDisconnect(id: number): Promise<void>;
+  /** TCP reachability probe by host:port — lets "Test connection" run against
+   *  the form values before the terminal is saved. */
+  pingTerminalHost(input: { host: string; port: number }): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
 
   // Terminals — full ECPI API surface
   terminalInitTerminal(id: number, op?: '0'|'1'|'2'): Promise<void>;
@@ -106,6 +109,9 @@ export interface BridgeApi {
   getCameraLatestFrame(cameraId: number): Promise<{ base64: string; contentType: string; at: string } | null>;
   /** Probe TCP/HTTP reachability — used by the "Test connection" button. */
   pingCamera(cameraId: number): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
+  /** Probe reachability by host:port directly — lets "Test connection" run
+   *  against the form values before the camera is saved. */
+  pingCameraHost(input: { host: string; port?: number }): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
 
   // Lanes
   listLanes(): Promise<ParkingLane[]>;
@@ -141,6 +147,9 @@ export interface BridgeApi {
    *  terminal wired to the session's lane. Returns immediately; the actual
    *  card tap resolves asynchronously through the normal parking-flow. */
   retriggerSessionPayment(id: number): Promise<{ ok: boolean; error?: string }>;
+  /** Retrigger exit payment for whichever open session holds this plate — the
+   *  Live-display action where the operator types the plate off the feed. */
+  retriggerSessionPaymentByPlate(plate: string): Promise<{ ok: boolean; error?: string }>;
   /** DEV/QA: fire a synthetic plate event on a lane (resolving an enabled
    *  camera on it) with a forced direction, exercising the real parking flow
    *  end-to-end. Backs the hidden Sessions lane simulator. */
@@ -232,6 +241,9 @@ export interface BridgeApi {
   // Gate simulator
   openGateSimulator(): Promise<void>;
   testGate(opts?: { plate?: string; direction?: 'in'|'out'|'test'; laneName?: string }): Promise<void>;
+  /** Operator "open barrier" for a lane/camera from the Live display —
+   *  raises the gate (simulator + face turnstile). */
+  manualOpenGate(opts: { cameraId?: number | null; laneId?: number | null }): Promise<{ ok: boolean; note?: string }>;
 
   // Face-auth turnstile bridge (faceapp_main /api/external/*)
   pingFaceGate(): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;

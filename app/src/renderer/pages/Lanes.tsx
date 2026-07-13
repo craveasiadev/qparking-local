@@ -40,10 +40,29 @@ export function Lanes() {
   async function save() {
     setFormError(null);
     if (!editing?.name) { setFormError('Name is required.'); return; }
-    await window.bridge.saveLane(editing as any);
+    // A hidden field must never persist stale data: the rate plan only applies
+    // to entry/dual lanes (it governs the fee), the payment terminal only to
+    // exit/dual lanes (that's where payment is collected). Null whichever the
+    // selected camera's direction doesn't use, so the DB can't carry a value
+    // the form wouldn't even show.
+    const camId = editing.cameraIds?.[0] ?? null;
+    const dir = cameras.find((c) => c.id === camId)?.direction ?? null;
+    const payload = {
+      ...editing,
+      policyId: (dir === 'entry' || dir === 'dual') ? (editing.policyId ?? null) : null,
+      terminalId: (dir === 'exit' || dir === 'dual') ? (editing.terminalId ?? null) : null,
+    };
+    await window.bridge.saveLane(payload as any);
     setEditing(null);
     refresh();
   }
+
+  // Single camera per lane — its direction decides which of rate-plan /
+  // payment-terminal the form exposes (see the save() note above).
+  const selectedCameraId = editing?.cameraIds?.[0] ?? null;
+  const selectedDir = cameras.find((c) => c.id === selectedCameraId)?.direction ?? null;
+  const showRatePlan = selectedDir === 'entry' || selectedDir === 'dual';
+  const showTerminal = selectedDir === 'exit' || selectedDir === 'dual';
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
@@ -94,60 +113,65 @@ export function Lanes() {
             </header>
             <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Display name"><input className="input" value={editing.name ?? ''} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
-              <Field label="Rate plan">
-                {/* Points at a policy_id which now corresponds to a cloud
-                    RatePolicy — different lanes can bind to different
-                    plans (VIP → premium, general → standard). Leaving
-                    it "— site default —" falls back to the plan the
-                    cloud flagged as default. */}
-                <select className="input" value={editing.policyId ?? ''} onChange={(e) => setEditing({ ...editing, policyId: e.target.value || null })}>
-                  <option value="">— site default —</option>
-                  {policies.map((s) => (
-                    <option key={s.policyId} value={s.policyId}>
-                      {s.policyName}{(s as any).isSiteDefault ? ' (default)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Payment terminal">
-                <select className="input" value={editing.terminalId ?? ''} onChange={(e) => setEditing({ ...editing, terminalId: e.target.value ? Number(e.target.value) : null })}>
+              {/* One camera per lane. Two cameras on the same lane would both
+                  fire a plate event for the same car, forcing dedup guesswork —
+                  so a lane binds to exactly one. Grouped by direction so the
+                  right camera is easy to find when there are many. Picking a
+                  camera sets its lane_id to this lane (stealing it off any
+                  other). Direction itself is still set per-camera on the
+                  Cameras page. */}
+              <Field label="Camera">
+                <select className="input" value={selectedCameraId ?? ''}
+                  onChange={(e) => setEditing({ ...editing, cameraIds: e.target.value ? [Number(e.target.value)] : [] })}>
                   <option value="">— none —</option>
-                  {terminals.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </Field>
-              <div className="sm:col-span-2">
-                {/* The lane owns the cameras that cover it. Ticking a camera
-                    sets its lane_id to this lane (moving it off any other
-                    lane). Each camera's entry/exit/dual direction is still
-                    set per-camera on the Cameras page — that's what routes a
-                    plate scan to entry vs exit. */}
-                <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">Cameras</label>
-                <div className="rounded-lg border border-gray-200 divide-y divide-gray-100 max-h-40 overflow-auto">
-                  {cameras.length === 0 && (
-                    <p className="px-3 py-2 text-xs text-gray-400">No cameras yet — add them on the Cameras page first.</p>
-                  )}
-                  {cameras.map((c) => {
-                    const sel = editing.cameraIds ?? [];
-                    const checked = sel.includes(c.id);
-                    const onOtherLane = c.laneId != null && c.laneId !== editing.id;
+                  {(['entry', 'exit', 'dual'] as const).map((group) => {
+                    const groupCams = cameras.filter((c) => c.direction === group);
+                    if (groupCams.length === 0) return null;
                     return (
-                      <label key={c.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            const next = e.target.checked ? [...sel, c.id] : sel.filter((x) => x !== c.id);
-                            setEditing({ ...editing, cameraIds: next });
-                          }}
-                        />
-                        <span className="font-mono text-[10px] uppercase text-gray-400 w-10">{c.direction}</span>
-                        <span className="flex-1 truncate">{c.name}</span>
-                        {onOtherLane && !checked && <span className="text-[10px] text-amber-600">on another lane</span>}
-                      </label>
+                      <optgroup key={group} label={group.toUpperCase()}>
+                        {groupCams.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}{c.laneId != null && c.laneId !== editing.id ? ' (on another lane)' : ''}
+                          </option>
+                        ))}
+                      </optgroup>
                     );
                   })}
-                </div>
+                </select>
+              </Field>
+              <div className="sm:col-span-2 -mt-1">
+                {cameras.length === 0 ? (
+                  <p className="text-[11px] text-amber-600">No cameras yet — add one on the <strong>Cameras</strong> page first. A lane needs an LPR camera to do anything.</p>
+                ) : (
+                  <p className="text-[11px] text-gray-500">The camera's direction decides the rest: <strong>entry</strong> → set the rate plan; <strong>exit</strong> → set the payment terminal; <strong>dual</strong> → both.</p>
+                )}
               </div>
+              {showRatePlan && (
+                <Field label="Rate plan">
+                  {/* Points at a policy_id which now corresponds to a cloud
+                      RatePolicy — different lanes can bind to different plans
+                      (VIP → premium, general → standard). "— site default —"
+                      falls back to the plan the cloud flagged as default. The
+                      fee is governed by the ENTRY lane's plan, which is why
+                      this only shows for entry/dual cameras. */}
+                  <select className="input" value={editing.policyId ?? ''} onChange={(e) => setEditing({ ...editing, policyId: e.target.value || null })}>
+                    <option value="">— site default —</option>
+                    {policies.map((s) => (
+                      <option key={s.policyId} value={s.policyId}>
+                        {s.policyName}{(s as any).isSiteDefault ? ' (default)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              {showTerminal && (
+                <Field label="Payment terminal">
+                  <select className="input" value={editing.terminalId ?? ''} onChange={(e) => setEditing({ ...editing, terminalId: e.target.value ? Number(e.target.value) : null })}>
+                    <option value="">— none —</option>
+                    {terminals.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+              )}
               <Field label="Gate relay (optional)"><input className="input font-mono" value={editing.gateRelayAddress ?? ''} onChange={(e) => setEditing({ ...editing, gateRelayAddress: e.target.value })} placeholder="GPIO addr / relay URL" /></Field>
               <Field label="Enabled">
                 <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={editing.enabled ?? true} onChange={(e) => setEditing({ ...editing, enabled: e.target.checked })} /> active</label>

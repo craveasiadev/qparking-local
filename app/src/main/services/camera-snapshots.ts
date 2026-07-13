@@ -10,14 +10,19 @@ import { getCamera } from './db';
 
 const PING_TIMEOUT_MS = 3_000;
 
-/** Lightweight HTTP reachability probe against the camera host. */
-export async function pingCamera(cameraId: number): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }> {
-  const camera = getCamera(cameraId);
-  if (!camera) return { ok: false, error: 'unknown_camera' };
-  if (!camera.host) return { ok: false, error: 'no_host' };
+export interface PingResult { ok: boolean; status?: number; latencyMs?: number; error?: string }
+
+/**
+ * Lightweight HTTP reachability probe against a camera host:port. Takes the
+ * host directly (not a DB id) so the "Test connection" button can probe the
+ * values typed into the Add/Edit form BEFORE the camera is ever saved.
+ */
+export async function pingHost(host: string, port?: number): Promise<PingResult> {
+  if (!host) return { ok: false, error: 'no_host' };
+  const url = port && port !== 80 ? `http://${host}:${port}/` : `http://${host}/`;
   const startedAt = Date.now();
   try {
-    const response = await axios.get(`http://${camera.host}/`, {
+    const response = await axios.get(url, {
       responseType: 'arraybuffer',
       timeout: PING_TIMEOUT_MS,
       validateStatus: () => true,
@@ -27,4 +32,11 @@ export async function pingCamera(cameraId: number): Promise<{ ok: boolean; statu
   } catch (error: any) {
     return { ok: false, error: error?.message ?? String(error), latencyMs: Date.now() - startedAt };
   }
+}
+
+/** Probe a saved camera by id. Delegates to pingHost. */
+export async function pingCamera(cameraId: number): Promise<PingResult> {
+  const camera = getCamera(cameraId);
+  if (!camera) return { ok: false, error: 'unknown_camera' };
+  return pingHost(camera.host ?? '', camera.devicePort ?? undefined);
 }

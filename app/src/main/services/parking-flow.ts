@@ -1127,6 +1127,21 @@ export function retriggerSessionExit(sessionId: number): { ok: boolean; error?: 
 }
 
 /**
+ * Retrigger the exit-payment flow for whichever open session currently holds
+ * this plate. Backs the Live-display "retrigger payment" action, where the
+ * operator reads the plate off the video feed and types it in. The plate is
+ * normalised the same way the LPR pipeline normalises it, so it matches how
+ * the open session was stored.
+ */
+export function retriggerSessionExitByPlate(plate: string): { ok: boolean; error?: string } {
+  const norm = normalisePlate(plate);
+  if (!norm) return { ok: false, error: 'plate_required' };
+  const session = findOpenSessionByPlate(norm);
+  if (!session) return { ok: false, error: `no car currently inside with plate "${norm}"` };
+  return retriggerSessionExit(session.id);
+}
+
+/**
  * DEV/QA helper — fire a synthetic plate event on a LANE (not a camera) with
  * a forced direction, so a developer can exercise the real parking flow
  * end-to-end from the Sessions page without touching hardware. It resolves an

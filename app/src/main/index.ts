@@ -92,7 +92,7 @@ import {
   listParkingSpaces, listSeasonPasses,
   getCurrentSite,
 } from './services/db';
-import { computeFee, retriggerSessionExit, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
 } from './services/ecpi-terminal';
@@ -114,7 +114,8 @@ import {
 import {
   listFailedSync, retryAllFailedSync, clearFailedSync,
 } from './services/db';
-import { pingCamera } from './services/camera-snapshots';
+import { pingCamera, pingHost } from './services/camera-snapshots';
+import { pingTerminalHost } from './services/terminal-probe';
 import { pushCamera, pushAllCameras } from './services/camera-push';
 import { startStreamGrabbers, stopStreamGrabbers, resync as resyncStreamGrabbers } from './services/camera-stream';
 import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
@@ -445,6 +446,7 @@ ipcMain.handle('terminals:status', (_e, id: number) => {
 });
 ipcMain.handle('terminals:connect', (_e, id: number) => bootTerminal(id));
 ipcMain.handle('terminals:disconnect', (_e, id: number) => shutdownTerminal(id));
+ipcMain.handle('terminals:ping-host', (_e, input: { host: string; port: number }) => pingTerminalHost(input.host, input.port));
 ipcMain.handle('terminals:getStatus', (_e, id: number) => {
   const row = getTerminal(id); if (!row) throw new Error('not_found');
   getTerminalInstance(row).getStatus();
@@ -484,6 +486,7 @@ ipcMain.handle('cameras:delete', (_e, id: number) => { deleteCamera(id); resyncS
 // for WebSocket/RTSP-only cameras with no pullable HTTP snapshot URL.
 ipcMain.handle('cameras:latest-frame', (_e, cameraId: number) => getLatestFrame(cameraId));
 ipcMain.handle('cameras:ping', (_e, cameraId: number) => pingCamera(cameraId));
+ipcMain.handle('cameras:ping-host', (_e, input: { host: string; port?: number }) => pingHost(input.host, input.port));
 
 ipcMain.handle('lanes:list', () => listLanes());
 ipcMain.handle('lanes:save', (_e, input: any) => {
@@ -542,6 +545,9 @@ ipcMain.handle('sessions:page', (_e, opts: {
 // Manual retrigger — synthesizes an exit LPR event for a session so the
 // normal parking-flow can drive the terminal for a stuck / mis-read exit.
 ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number) => retriggerSessionExit(sessionId));
+// Live-display "retrigger payment" — operator types the plate they can read off
+// the feed; we find that car's open session and re-run its exit-payment flow.
+ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string) => retriggerSessionExitByPlate(plate));
 ipcMain.handle('sessions:delete', (_e, id: number) => {
   // Capture session BEFORE deleting so we have lane/plate/entryAt for the
   // qparking sync payload — otherwise the row is gone before we enqueue.
@@ -832,6 +838,25 @@ ipcMain.handle('gate:test', (_e, opts: { plate?: string; direction?: 'in'|'out'|
     holdMs: 4_000,
   });
   setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
+});
+
+// Manual operator "open barrier" from the Live display. Mirrors the remote
+// gate-open path: pop/flash the gate simulator so the operator sees it, and
+// best-effort raise the face-auth turnstile (the one real barrier device wired
+// today). The physical GPIO relay (gateRelayAddress) isn't driven yet — same
+// TODO as the entry flow.
+ipcMain.handle('gate:manual-open', async (_e, opts: { cameraId?: number | null; laneId?: number | null } = {}) => {
+  const camera = opts.cameraId ? (listCameras().find((c) => c.id === opts.cameraId) ?? null) : null;
+  const lane = opts.laneId ? getLane(opts.laneId) : (camera?.laneId ? getLane(camera.laneId) : null);
+  const laneName = lane?.name ?? camera?.name ?? 'MANUAL OPEN';
+  const direction = camera?.direction === 'entry' ? 'in' : 'out';
+  openGateSimulator(isDev);
+  sendGateEvent({ state: 'open', laneName, direction, reason: 'manual-operator-open', holdMs: 5_000 });
+  setTimeout(() => sendGateEvent({ state: 'closed' }), 5_000);
+  let face: { ok: boolean; status?: number; error?: string } | null = null;
+  try { face = await openFaceGate({ reason: `manual-open:${laneName}` }); }
+  catch (e: any) { face = { ok: false, error: e?.message ?? String(e) }; }
+  return { ok: true, note: `Barrier opened for ${laneName}${face?.ok ? ' · face-gate ok' : ''}` };
 });
 
 ipcMain.handle('sync:all-tables', () => syncAll());

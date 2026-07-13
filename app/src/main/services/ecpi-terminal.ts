@@ -38,7 +38,7 @@ const FINISH_DELAY_MS = 5_000;
 const RECONNECT_DELAYS_MS = [2_000, 5_000, 10_000, 15_000, 30_000];
 
 /** Map raw Node socket errors to human-friendly explanations + hint. */
-function explainNetError(msg: string): string {
+export function explainNetError(msg: string): string {
   if (msg.includes('ECONNRESET')) {
     return 'reader dropped the connection (ECONNRESET) — usually a reader reboot, network blip, or another client (Unity / tcsSimulator) opened a session';
   }
