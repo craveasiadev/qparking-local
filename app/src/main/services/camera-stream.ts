@@ -91,6 +91,13 @@ function ensureLib(): boolean {
     // the decode-stream grab rather than disabling the whole SDK.
     try { fns.GetSnapImage = lib.func('int VzLPRClient_GetSnapImage(int, void *, int)'); }
     catch { fns.GetSnapImage = null; log('VzLPRClient_GetSnapImage unavailable — decode-stream grab only'); }
+    // Barrier relay: pulse the camera's onboard IO output, auto-resetting after
+    // nDuration ms. VzLPRClient_SetIOOutputAuto(handle, uChnId, nDuration) — 0 =
+    // success, -1 = fail; nDuration range [500, 5000]. Resolve defensively —
+    // some firmware/DLL builds don't export it; degrade rather than disable the
+    // whole SDK (video must keep working).
+    try { fns.SetIOOutputAuto = lib.func('int VzLPRClient_SetIOOutputAuto(int, uint, int)'); }
+    catch { fns.SetIOOutputAuto = null; log('VzLPRClient_SetIOOutputAuto unavailable — camera relay barrier disabled'); }
     const r = fns.Setup();
     setupOk = true;
     log(`SDK ready (Setup=${r}) from ${dir}`);
@@ -272,6 +279,54 @@ export function resync() {
   }
   for (const c of wanted) {
     if (!grabbers.has(c.id)) startGrabber(c);
+  }
+}
+
+export interface BarrierResult { ok: boolean; error?: string; via?: 'reused' | 'temp' }
+
+/**
+ * Open the barrier wired to a camera by pulsing that camera's onboard relay
+ * (VzLPRClient_SetIOOutputAuto — energises the relay, auto-resets after
+ * `durationMs`). `channel` is the IO output index (0 = the first/only relay on
+ * single-barrier cameras). Reuses the live grabber's already-connected handle
+ * when the camera is streaming (the fast common case); otherwise opens a
+ * short-lived handle just for the pulse. Best-effort — returns { ok:false }
+ * (never throws) if the SDK/camera/relay is unavailable, so a gate-open never
+ * crashes the flow.
+ */
+export function pulseBarrier(cameraId: number, opts: { channel?: number; durationMs?: number } = {}): BarrierResult {
+  if (!ensureLib()) return { ok: false, error: 'sdk_unavailable' };
+  if (!fns.SetIOOutputAuto) return { ok: false, error: 'SetIOOutputAuto_unavailable' };
+  const channel = opts.channel ?? 0;
+  const durationMs = Math.min(5000, Math.max(500, Math.round(opts.durationMs ?? 1000)));
+
+  // Fast path: reuse the live, already-connected streaming handle.
+  const g = grabbers.get(cameraId);
+  if (g && !g.stopped) {
+    try {
+      const r = fns.SetIOOutputAuto(g.handle, channel, durationMs);
+      return r === 0 ? { ok: true, via: 'reused' } : { ok: false, error: `SetIOOutputAuto=${r}`, via: 'reused' };
+    } catch (e: any) { return { ok: false, error: e?.message ?? String(e), via: 'reused' }; }
+  }
+
+  // No live grabber — open a short-lived handle just to pulse the relay, then
+  // close it after a margin (mirrors stopGrabber's deferred Close).
+  const cam = listCameras().find((c) => c.id === cameraId);
+  if (!cam?.host) return { ok: false, error: 'camera_has_no_host' };
+  const port = Number(cam.devicePort) || 80;
+  let handle = 0;
+  try {
+    handle = fns.Open(cam.host, port, cam.deviceUser ?? '', cam.devicePassword ?? '');
+    if (handle === 0) return { ok: false, error: 'open_failed' };
+    const r = fns.SetIOOutputAuto(handle, channel, durationMs);
+    return r === 0 ? { ok: true, via: 'temp' } : { ok: false, error: `SetIOOutputAuto=${r}`, via: 'temp' };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e), via: 'temp' };
+  } finally {
+    if (handle !== 0) {
+      const h = handle;
+      setTimeout(() => { try { fns.Close(h); } catch { /* ignore */ } }, 800);
+    }
   }
 }
 

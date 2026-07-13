@@ -417,6 +417,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   faceGateEnabled: true,
   minimumChargeCents: 0,
   devMode: false,
+  paymentController: 'terminal',
   tngEnabled: false,
   tngHost: '192.168.1.105',
   tngPort: 80,

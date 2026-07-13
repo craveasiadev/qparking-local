@@ -148,8 +148,10 @@ export interface BridgeApi {
    *  card tap resolves asynchronously through the normal parking-flow. */
   retriggerSessionPayment(id: number): Promise<{ ok: boolean; error?: string }>;
   /** Retrigger exit payment for whichever open session holds this plate — the
-   *  Live-display action where the operator types the plate off the feed. */
-  retriggerSessionPaymentByPlate(plate: string): Promise<{ ok: boolean; error?: string }>;
+   *  Live-display action where the operator types the plate off the feed.
+   *  `laneId` is the exit lane the operator triggered from, so the exit runs on
+   *  that gate's controller. */
+  retriggerSessionPaymentByPlate(plate: string, laneId?: number | null): Promise<{ ok: boolean; error?: string }>;
   /** DEV/QA: fire a synthetic plate event on a lane (resolving an enabled
    *  camera on it) with a forced direction, exercising the real parking flow
    *  end-to-end. Backs the hidden Sessions lane simulator. */

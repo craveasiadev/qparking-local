@@ -69,7 +69,7 @@ const api: BridgeApi = {
    *  Sessions page when the exit LPR misread the plate or the operator
    *  needs to close a stuck session by asking the driver to tap again. */
   retriggerSessionPayment: (id: number) => ipcRenderer.invoke('sessions:retrigger-payment', id),
-  retriggerSessionPaymentByPlate: (plate: string) => ipcRenderer.invoke('sessions:retrigger-by-plate', plate),
+  retriggerSessionPaymentByPlate: (plate: string, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-by-plate', plate, laneId),
   simulateLaneEvent: (laneId: number, plate: string, direction: 'entry'|'exit') => ipcRenderer.invoke('sessions:simulate-lane', laneId, plate, direction),
   simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
   simulateEntry: (laneId: number, plate: string, entryIso: string) => ipcRenderer.invoke('sessions:simulate-entry', laneId, plate, entryIso),

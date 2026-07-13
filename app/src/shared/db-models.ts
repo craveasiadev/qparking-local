@@ -352,6 +352,15 @@ export interface AppSettings {
    *  7×. Purely gates UI — it has no effect on the live parking flow. */
   devMode: boolean;
 
+  /** Which controller collects the fee on a paid exit — strict either/or:
+   *   - 'terminal' (default): the ECPI payment terminal wired to the lane.
+   *   - 'tng'      : the Touch'n'Go W4G IO controller (requires tngEnabled +
+   *                  tngHost so the PayResult callback server is running).
+   *  Only the ROUTING changes — each controller's own command sequence
+   *  (ECPI initCard / W4G PayRequest) is unchanged. Replaces the old implicit
+   *  "fire both in parallel" race with an explicit single choice. */
+  paymentController: 'terminal' | 'tng';
+
   // ─── Touch'n'Go W4G IO-controller integration ─────────────────────────
   /** Master switch. When ON, every paid exit ALSO fires a PayRequest at the
    *  W4G IO controller — Touch'n'Go card / e-wallet / Visa / Master / MCCS

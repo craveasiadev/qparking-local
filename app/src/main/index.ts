@@ -117,7 +117,7 @@ import {
 import { pingCamera, pingHost } from './services/camera-snapshots';
 import { pingTerminalHost } from './services/terminal-probe';
 import { pushCamera, pushAllCameras } from './services/camera-push';
-import { startStreamGrabbers, stopStreamGrabbers, resync as resyncStreamGrabbers } from './services/camera-stream';
+import { startStreamGrabbers, stopStreamGrabbers, resync as resyncStreamGrabbers, pulseBarrier } from './services/camera-stream';
 import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
@@ -378,7 +378,7 @@ function wireRendererEvents() {
         reason: 'exit-without-entry', holdMs: 4_000 });
     } else if (kind === 'exit-no-lane') {
       sendGateEvent({ state: 'closed', direction: 'out', reason: 'no-lane', holdMs: 5_000 });
-    } else if (kind === 'exit-no-terminal' || kind === 'exit-terminal-disabled') {
+    } else if (kind === 'exit-no-terminal' || kind === 'exit-terminal-disabled' || kind === 'exit-tng-not-configured') {
       sendGateEvent({ state: 'closed', direction: 'out', reason: 'no-terminal', holdMs: 5_000 });
     } else if (kind === 'exit-terminal-offline') {
       sendGateEvent({ state: 'closed', direction: 'out', reason: 'terminal-offline', holdMs: 5_000 });
@@ -547,7 +547,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
 ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number) => retriggerSessionExit(sessionId));
 // Live-display "retrigger payment" — operator types the plate they can read off
 // the feed; we find that car's open session and re-run its exit-payment flow.
-ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string) => retriggerSessionExitByPlate(plate));
+ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string, laneId?: number | null) => retriggerSessionExitByPlate(plate, laneId));
 ipcMain.handle('sessions:delete', (_e, id: number) => {
   // Capture session BEFORE deleting so we have lane/plate/entryAt for the
   // qparking sync payload — otherwise the row is gone before we enqueue.
@@ -853,10 +853,19 @@ ipcMain.handle('gate:manual-open', async (_e, opts: { cameraId?: number | null; 
   openGateSimulator(isDev);
   sendGateEvent({ state: 'open', laneName, direction, reason: 'manual-operator-open', holdMs: 5_000 });
   setTimeout(() => sendGateEvent({ state: 'closed' }), 5_000);
+  // Physical barrier: pulse the camera's onboard relay (best-effort). Real
+  // hardware where the barrier is wired to the LPR camera's IO output.
+  const relay = camera ? pulseBarrier(camera.id) : { ok: false, error: 'no_camera' };
+  // Face-auth turnstile (best-effort) — the other real barrier device.
   let face: { ok: boolean; status?: number; error?: string } | null = null;
   try { face = await openFaceGate({ reason: `manual-open:${laneName}` }); }
   catch (e: any) { face = { ok: false, error: e?.message ?? String(e) }; }
-  return { ok: true, note: `Barrier opened for ${laneName}${face?.ok ? ' · face-gate ok' : ''}` };
+  return {
+    ok: true,
+    note: `Barrier opened for ${laneName}`
+      + (relay.ok ? ' · camera-relay pulsed' : camera ? ` · relay ${relay.error}` : '')
+      + (face?.ok ? ' · face-gate ok' : ''),
+  };
 });
 
 ipcMain.handle('sync:all-tables', () => syncAll());

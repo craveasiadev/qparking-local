@@ -262,7 +262,40 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
-  // Paid exit — drive the payment terminal.
+  // Paid exit — route to the selected payment controller. Strict either/or
+  // (Settings → "Payment controller"): the ECPI terminal OR the TNG W4G
+  // controller, never both. The busy-guard is shared by both paths.
+  if (exitsInFlight.has(lane.id)) {
+    parkingEvents.emit('warning', { kind: 'exit-busy', laneId: lane.id });
+    return;
+  }
+
+  const markInFlight = () => exitsInFlight.set(lane.id, {
+    sessionId: session.id, plate: event.plate, laneId: lane.id,
+    feeCents, durationMinutes, startedAt: Date.now(),
+  });
+  // Fire-and-forget — the charge helpers are async but handlePlateEvent is
+  // sync. Catch rejections so a buggy promise never crashes the main process.
+  const onChargeCrash = (e: any) => {
+    parkingEvents.emit('warning', {
+      kind: 'exit-charge-crashed',
+      sessionId: session.id, message: e?.message ?? String(e),
+    });
+    exitsInFlight.delete(lane.id);
+  };
+
+  if ((settings.paymentController ?? 'terminal') === 'tng') {
+    // ── TNG W4G controller path ──
+    if (!settings.tngEnabled || !settings.tngHost) {
+      parkingEvents.emit('warning', { kind: 'exit-tng-not-configured', laneId: lane.id });
+      return;
+    }
+    markInFlight();
+    startTngExitCharge(lane, session.plate, feeCents, session.entryAt, event).catch(onChargeCrash);
+    return;
+  }
+
+  // ── ECPI terminal path (the existing flow) ──
   if (!lane.terminalId) {
     parkingEvents.emit('warning', { kind: 'exit-no-terminal', laneId: lane.id });
     return;
@@ -272,28 +305,8 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: lane.terminalId });
     return;
   }
-
-  if (exitsInFlight.has(lane.id)) {
-    parkingEvents.emit('warning', { kind: 'exit-busy', laneId: lane.id });
-    return;
-  }
-
-  exitsInFlight.set(lane.id, {
-    sessionId: session.id, plate: event.plate, laneId: lane.id,
-    feeCents, durationMinutes, startedAt: Date.now(),
-  });
-
-  // Fire-and-forget — startExitCharge is async but handleExit doesn't await
-  // (handlePlateEvent is sync). Catch unhandled rejections so a buggy
-  // promise doesn't crash the main process.
-  startExitCharge(terminalRow, lane, session.plate, feeCents, session.entryAt, event)
-    .catch((e) => {
-      parkingEvents.emit('warning', {
-        kind: 'exit-charge-crashed',
-        sessionId: session.id, message: e?.message ?? String(e),
-      });
-      exitsInFlight.delete(lane.id);
-    });
+  markInFlight();
+  startExitCharge(terminalRow, lane, session.plate, feeCents, session.entryAt, event).catch(onChargeCrash);
 }
 
 /**
@@ -543,7 +556,12 @@ async function startExitCharge(
   // exits work in real Malaysian parks: ECPI for Visa/Master/credit and W4G
   // for TNG card / e-wallet sharing the same fare prompt.
   const settings = getSettings();
-  const tngEnabled = settings.tngEnabled && !!settings.tngHost;
+  // The old ECPI+TNG parallel race is superseded by the explicit "Payment
+  // controller" switch (Settings): strict either/or. startExitCharge now runs
+  // ONLY when the controller is 'terminal' (ECPI), so the in-flight TNG race
+  // is disabled here — TNG has its own dedicated path (startTngExitCharge).
+  // The race wiring below is left intact behind this flag for reference.
+  const tngEnabled = false as boolean;
   const tngOrderId = tngEnabled ? newTngOrderId() : '';
   let tngWinner: { resolved: boolean; body?: any } = { resolved: false };
   let tngPromise: Promise<any> | null = null;
@@ -725,6 +743,71 @@ async function startExitCharge(
       });
     }
   } catch { /* showStatus is best-effort */ }
+
+  parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome });
+}
+
+/**
+ * TNG-only exit payment (Settings → Payment controller = "TNG"). Fires a single
+ * W4G PayRequest and settles the session from the PayResult — no ECPI terminal
+ * involved. Deliberately reuses the SAME tngPayRequest() call and recordExit()
+ * write the rest of the flow uses (identical to how the old race translated a
+ * W4G PayResult); only the standalone orchestration is new. The gate opens via
+ * the existing 'exit-completed' listener on a 'paid' outcome, exactly like the
+ * ECPI path — a declined/timed-out charge leaves the barrier closed.
+ */
+async function startTngExitCharge(
+  lane: ParkingLane,
+  plate: string,
+  feeCents: number,
+  entryAt: string,
+  event: PlateEvent,
+) {
+  const settings = getSettings();
+  const orderId = newTngOrderId();
+  flog(`TNG-only exit: PayRequest → ${settings.tngHost}:${settings.tngPort} orderId=${orderId} plate=${plate} fare=${feeCents}c`);
+
+  let body: { state: string; payType: number; cardNo: string; apprCode: string; payTime: number } | null = null;
+  try {
+    body = await tngPayRequest({
+      orderId,
+      payAmount: feeCents,
+      discountAmount: 0,
+      enterTime: Math.floor(Date.parse(entryAt) / 1000) || Math.floor(Date.now() / 1000),
+      payTime: Math.floor(Date.now() / 1000),
+      timeoutMs: Math.max(15_000, (settings.tngTimeoutSeconds ?? 30) * 1000),
+    }) as any;
+  } catch (e: any) {
+    flog(`TNG PayRequest failed/timeout: ${e?.message ?? e}`);
+  }
+
+  const inflight = exitsInFlight.get(lane.id);
+  if (!inflight) return;
+  exitsInFlight.delete(lane.id);
+
+  if (!body) {
+    // Timeout / network error / device rejection — leave the session open and
+    // let the operator retrigger. Same 'exit-timeout' warning the ECPI path uses.
+    parkingEvents.emit('warning', { kind: 'exit-timeout', sessionId: inflight.sessionId });
+    return;
+  }
+
+  const approved = body.state === '0';
+  const outcome = approved ? 'paid' : 'declined';
+  flog(`TNG-only exit outcome=${outcome} payType=${body.payType} card=${body.cardNo} appr=${body.apprCode}`);
+
+  recordExit(inflight.sessionId, {
+    exitAt: event.exitAtOverride ?? new Date().toISOString(),
+    exitLaneId: lane.id,
+    exitCameraId: event.cameraId,
+    exitImagePath: event.imagePath,
+    durationMinutes: inflight.durationMinutes,
+    feeCents: inflight.feeCents,
+    paymentStatus: outcome,
+    terminalTxnId: body.cardNo || null,
+    cardScheme: payTypeToCardScheme(body.payType),
+    paymentTimestamp: body.payTime ? new Date(body.payTime * 1000).toISOString() : null,
+  });
 
   parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome });
 }
@@ -1096,17 +1179,25 @@ export function simulateRatePolicyFee(
  * The direction is forced to 'exit' so it never accidentally becomes an
  * entry retry.
  */
-export function retriggerSessionExit(sessionId: number): { ok: boolean; error?: string } {
+export function retriggerSessionExit(sessionId: number, laneOverride?: number | null): { ok: boolean; error?: string } {
   const session = getSessionById(sessionId);
   if (!session) return { ok: false, error: 'session_not_found' };
   if (session.exitAt) return { ok: false, error: 'session_already_closed — nothing to retrigger' };
 
-  const laneId = session.exitLaneId ?? session.entryLaneId;
+  // laneOverride is the exit lane the operator is standing at (Live-display
+  // tile). Prefer it so the exit runs on the RIGHT gate, not the car's entry
+  // lane. Falls back to the session's own exit/entry lane (Sessions-page use).
+  const laneId = laneOverride ?? session.exitLaneId ?? session.entryLaneId;
   if (!laneId) return { ok: false, error: 'session_has_no_lane — attach the session to a lane in Edit first' };
 
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'lane_not_found' };
-  if (!lane.terminalId) return { ok: false, error: `lane "${lane.name}" has no payment terminal wired — attach one in Lanes` };
+  // A terminal is only required when the ECPI terminal is the payment
+  // controller. In TNG mode the fee is collected by the W4G controller, so an
+  // exit lane legitimately has no terminal wired.
+  if (getSettings().paymentController !== 'tng' && !lane.terminalId) {
+    return { ok: false, error: `lane "${lane.name}" has no payment terminal wired — attach one in Lanes` };
+  }
 
   // Pick any enabled camera on that lane so laneForCamera() can resolve it
   // back to the same lane during the synthesized event dispatch.
@@ -1133,12 +1224,14 @@ export function retriggerSessionExit(sessionId: number): { ok: boolean; error?: 
  * normalised the same way the LPR pipeline normalises it, so it matches how
  * the open session was stored.
  */
-export function retriggerSessionExitByPlate(plate: string): { ok: boolean; error?: string } {
+export function retriggerSessionExitByPlate(plate: string, laneId?: number | null): { ok: boolean; error?: string } {
   const norm = normalisePlate(plate);
   if (!norm) return { ok: false, error: 'plate_required' };
   const session = findOpenSessionByPlate(norm);
   if (!session) return { ok: false, error: `no car currently inside with plate "${norm}"` };
-  return retriggerSessionExit(session.id);
+  // laneId is the exit lane the operator triggered from (the Live-display tile),
+  // so the exit runs on that gate's terminal / TNG controller.
+  return retriggerSessionExit(session.id, laneId);
 }
 
 /**

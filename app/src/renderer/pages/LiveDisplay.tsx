@@ -190,7 +190,12 @@ function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [plate, setPlate] = useState('');
 
-  const canRetrigger = (cam.direction === 'exit' || cam.direction === 'dual') && !!lane?.terminalId;
+  // Retrigger is an EXIT action — show it on exit/dual tiles. We don't gate on
+  // a wired terminal: the fee may be collected via the TNG controller (no
+  // terminal), and the retrigger-by-plate resolves the car's own session, so
+  // the backend validates payment capability and returns a clear error if the
+  // lane truly can't charge.
+  const canRetrigger = cam.direction === 'exit' || cam.direction === 'dual';
 
   async function openBarrier() {
     setBusy('open'); setResult(null);
@@ -208,7 +213,7 @@ function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }
     if (!p) return;
     setBusy('pay'); setResult(null);
     try {
-      const r = await window.bridge.retriggerSessionPaymentByPlate(p);
+      const r = await window.bridge.retriggerSessionPaymentByPlate(p, lane?.id ?? null);
       setResult({ ok: r.ok, text: r.ok ? `Payment retriggered for ${p.toUpperCase()}` : (r.error ?? 'Failed') });
       if (r.ok) setPlate('');
     } catch (err: any) {

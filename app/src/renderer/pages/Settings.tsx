@@ -421,6 +421,24 @@ export function Settings() {
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
         <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Flow behavior</h2>
+
+        {/* Which device collects the fee on a paid exit — strict either/or.
+            Only the routing changes; each controller's own command sequence is
+            untouched. */}
+        <Field label="Payment controller">
+          <select className="input" value={settings.paymentController ?? 'terminal'}
+            onChange={(e) => setSettings({ ...settings, paymentController: e.target.value as 'terminal' | 'tng' })}>
+            <option value="terminal">Payment terminal (ECPI) — the normal reader</option>
+            <option value="tng">Touch'n'Go W4G controller</option>
+          </select>
+          <p className="text-[11px] text-gray-500 mt-1">
+            On a paid exit the fee is collected by <strong>one</strong> of these — never both.
+            {(settings.paymentController === 'tng')
+              ? ' TNG requires “Enable Touch’n’Go W4G” below to be ON and the device IP set, so the PayResult callback server runs.'
+              : ' The ECPI terminal wired to the exit lane drives the tap prompt.'}
+          </p>
+        </Field>
+
         <label className="flex items-start gap-3 p-3 rounded-lg border border-gray-200 hover:border-gray-300 cursor-pointer">
           <input
             type="checkbox"
@@ -440,13 +458,13 @@ export function Settings() {
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
         <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Touch'n'Go W4G IO controller</h2>
         <p className="text-[11px] text-gray-500">
-          Multi-acquirer payment: a W4G IO controller box on the LAN accepts
-          Touch'n'Go card / e-wallet / Visa / Master / MCCS taps and settles
-          through its own bank rail. When enabled, every paid exit fires a
-          <code className="font-mono"> PayRequest </code>
-          to this device IN PARALLEL with the ECPI terminal — whichever
-          device the driver taps on first wins. Sessions paid via W4G are
-          tagged <code className="font-mono">TNG_CARD</code> / <code className="font-mono">TNG_EWALLET</code> /
+          A W4G IO controller box on the LAN accepts Touch'n'Go card / e-wallet
+          / Visa / Master / MCCS taps and settles through its own bank rail.
+          This switch keeps the integration active — the PayResult callback
+          server and the test panel below. Whether a paid exit is actually
+          routed here is decided by <strong>Payment controller</strong> under
+          Flow behavior (set it to <em>Touch'n'Go W4G</em>). Sessions paid via
+          W4G are tagged <code className="font-mono">TNG_CARD</code> / <code className="font-mono">TNG_EWALLET</code> /
           <code className="font-mono">VISA_W4G</code> etc. so Finance reports
           can split TNG taps from the normal Visa/Master terminal flow.
         </p>
@@ -460,7 +478,7 @@ export function Settings() {
           <div>
             <div className="text-sm font-semibold">Enable Touch'n'Go W4G acquirer</div>
             <div className="text-[11px] text-gray-500 mt-0.5">
-              ON = every paid exit fires PayRequest at the W4G box alongside the ECPI tap prompt. OFF = no W4G calls, parking continues on ECPI only.
+              ON = the W4G PayResult callback server runs and the test panel is live. Required before selecting the W4G controller for payment. OFF = no W4G server; exits use the ECPI terminal.
             </div>
           </div>
         </label>
