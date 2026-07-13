@@ -70,6 +70,18 @@ export interface EcpiEnvelope {
   signature?: string;
 }
 
+/** Per-item outcome of pushing one local equipment row up to the cloud
+ *  registry (lane / terminal / camera), surfaced in the Settings sync report. */
+export interface EquipmentPushItem {
+  id: number;
+  name: string;
+  ok: boolean;
+  /** True when the push was intentionally skipped (e.g. the lane has no rate
+   *  policy), rather than a genuine failure — rendered as a warning, not error. */
+  skipped?: boolean;
+  error?: string;
+}
+
 // ─── the bridge contract ─────────────────────────────────────────────────────
 
 /** What the bridge exposes to the renderer. Every method returns a Promise. */
@@ -198,6 +210,12 @@ export interface BridgeApi {
     passes: { ok: boolean; fetched: number; error?: string };
     spaces: { ok: boolean; fetched: number; error?: string };
     site: { ok: boolean; fetched: number; error?: string };
+    /** Local equipment pushed UP to the cloud registry, per item. */
+    equipment: {
+      lanes: EquipmentPushItem[];
+      terminals: EquipmentPushItem[];
+      cameras: EquipmentPushItem[];
+    };
   }>;
 
   /** The site profile mirrored from qparking SaaS (one site per install).

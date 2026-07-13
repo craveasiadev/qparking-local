@@ -212,10 +212,11 @@ app.whenReady().then(async () => {
   // enabled the TNG integration. Toggling it on/off in Settings restarts
   // it via the settings:save handler below.
   if (settings.tngEnabled) startW4gServer(settings.tngCallbackPort);
-  // First-time camera registry mirror — fire and forget so a slow WAN
-  // doesn't block boot. Subsequent updates push on every save.
-  pushAllCameras().catch(() => null);
-  pushAllDevices().catch(() => null);
+  // First-time equipment registry mirror — fire and forget so a slow WAN
+  // doesn't block boot. Order matters: lanes + terminals first so each
+  // camera's lane_external_id link resolves on its very first push.
+  // Subsequent updates push on every save.
+  pushAllDevices().then(() => pushAllCameras()).catch(() => null);
 
   // Start the live-video grabbers for the Live display wall — one per camera
   // with device credentials. They pull JPEG frames off the device via the VZ
@@ -868,6 +869,17 @@ ipcMain.handle('gate:manual-open', async (_e, opts: { cameraId?: number | null; 
   };
 });
 
-ipcMain.handle('sync:all-tables', () => syncAll());
+ipcMain.handle('sync:all-tables', async () => {
+  // Pull cloud-owned models down (site/policies/passes/spaces), then push local
+  // equipment up. Devices (lanes + terminals) go before cameras so each
+  // camera's lane_external_id link resolves on the cloud side.
+  const pull = await syncAll();
+  const devices = await pushAllDevices();
+  const cameras = await pushAllCameras();
+  return {
+    ...pull,
+    equipment: { lanes: devices.lanes, terminals: devices.terminals, cameras: cameras.cameras },
+  };
+});
 
 ipcMain.handle('debug', () => handleDebug());

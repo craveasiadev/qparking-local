@@ -18,7 +18,7 @@
  */
 import { useEffect, useState } from 'react';
 import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw } from 'lucide-react';
-import type { AppSettings } from '@shared/types';
+import type { AppSettings, EquipmentPushItem } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 
@@ -52,12 +52,18 @@ interface TngStatus {
 /** Outcome of pulling one cloud model (mirrors SyncResult in qparking-sync). */
 interface CloudSyncResult { ok: boolean; fetched: number; error?: string }
 
-/** Per-model outcome of a full cloud pull, as returned by syncAllNow(). */
+/** Per-model outcome of a full cloud pull + equipment push, as returned by
+ *  syncAllNow(). Pull models (site…spaces) come DOWN; equipment goes UP. */
 interface CloudSyncReport {
   site: CloudSyncResult;
   policies: CloudSyncResult;
   passes: CloudSyncResult;
   spaces: CloudSyncResult;
+  equipment?: {
+    lanes: EquipmentPushItem[];
+    terminals: EquipmentPushItem[];
+    cameras: EquipmentPushItem[];
+  };
 }
 
 /** A downloadable build artifact offered by the update endpoint. */
@@ -338,19 +344,50 @@ export function Settings() {
           </div>
         )}
         {cloudSyncReport && (
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-0.5">
-            {(['site', 'policies', 'passes', 'spaces'] as const).map((model) => {
-              const result = cloudSyncReport[model];
-              if (!result) return null;
-              return (
-                <div key={model} className={result.ok ? 'text-emerald-700' : 'text-red-700'}>
-                  {result.ok ? '✓' : '✗'} {model} — {result.ok ? `${result.fetched} pulled` : result.error}
-                </div>
-              );
-            })}
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-1.5">
+            <div className="space-y-0.5">
+              <div className="text-gray-400 uppercase tracking-wide text-[10px] not-italic">Pulled from cloud ↓</div>
+              {(['site', 'policies', 'passes', 'spaces'] as const).map((model) => {
+                const result = cloudSyncReport[model];
+                if (!result) return null;
+                return (
+                  <div key={model} className={result.ok ? 'text-emerald-700' : 'text-red-700'}>
+                    {result.ok ? '✓' : '✗'} {model} — {result.ok ? `${result.fetched} pulled` : result.error}
+                  </div>
+                );
+              })}
+            </div>
+            {cloudSyncReport.equipment && (
+              <div className="space-y-0.5 border-t border-gray-200 pt-1.5">
+                <div className="text-gray-400 uppercase tracking-wide text-[10px]">Pushed to cloud ↑</div>
+                {([
+                  ['lanes', cloudSyncReport.equipment.lanes],
+                  ['terminals', cloudSyncReport.equipment.terminals],
+                  ['cameras', cloudSyncReport.equipment.cameras],
+                ] as const).map(([group, items]) => {
+                  const sent = items.filter((i) => i.ok).length;
+                  const skipped = items.filter((i) => !i.ok && i.skipped);
+                  const failed = items.filter((i) => !i.ok && !i.skipped);
+                  return (
+                    <div key={group}>
+                      <div className={failed.length ? 'text-red-700' : skipped.length ? 'text-amber-700' : 'text-emerald-700'}>
+                        {failed.length ? '✗' : skipped.length ? '⚠' : '✓'} {group} — {sent}/{items.length} sent
+                        {skipped.length ? `, ${skipped.length} skipped` : ''}
+                        {failed.length ? `, ${failed.length} failed` : ''}
+                      </div>
+                      {[...skipped, ...failed].map((item) => (
+                        <div key={item.id} className={`pl-3 ${item.skipped ? 'text-amber-600' : 'text-red-600'}`}>
+                          • {item.name}: {item.error}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
-        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>. Background sync re-pulls everything every 60 seconds.</p>
+        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>; lanes, terminals and cameras are pushed up. Equipment syncs as soon as it exists — no rate policy required. Background sync re-pulls everything every 60 seconds.</p>
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
