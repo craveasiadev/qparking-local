@@ -316,7 +316,7 @@ export function payRequest(opts: {
   payTime?: number;
   timeoutMs?: number;
 }): Promise<PayResultBody> {
-  const s = getSettings();
+  const setting = getSettings();
   const orderId = (opts.orderId ?? newOrderId()).slice(0, 32);
   const payAmount = Math.max(0, Math.round(opts.payAmount));
   const discountAmount = Math.max(0, Math.round(opts.discountAmount ?? 0));
@@ -326,7 +326,7 @@ export function payRequest(opts: {
   // out-of-order timestamps may make the firmware silently skip the
   // terminal trigger even though it still returns State:0 to the request.
   const enterTime = opts.enterTime ?? (payTime - 600);
-  const timeoutMs = Math.max(2_000, (opts.timeoutMs ?? s.tngTimeoutSeconds * 1000));
+  const timeoutMs = Math.max(2_000, (opts.timeoutMs ?? setting.tngTimeoutSeconds * 1000));
 
   const body = {
     PayAmount: payAmount,
@@ -363,7 +363,7 @@ export function payRequest(opts: {
     // Log the OUTBOUND request BEFORE firing it — that way if the HTTP
     // call hangs or throws, the operator can still see what was about to
     // be sent (amount, timestamps, target URL).
-    const targetUrl = `http://${s.tngHost}:${s.tngPort}/w4g/PayRequest`;
+    const targetUrl = `http://${setting.tngHost}:${setting.tngPort}/w4g/PayRequest`;
     w4gLog(
       'send',
       `PayRequest → ${targetUrl} orderId=${orderId} amount=${fmtCents(payAmount)} discount=${fmtCents(discountAmount)} enterTime=${fmtEpoch(enterTime)} payTime=${fmtEpoch(payTime)} timeout=${timeoutMs}ms · body=${spacedJson(body)}`,
@@ -405,14 +405,14 @@ export function payRequest(opts: {
  * waiting on it.
  */
 export async function payCancel(orderId: string): Promise<{ state: number; orderId: string }> {
-  const s = getSettings();
+  const setting = getSettings();
   const pending = pendingByOrderId.get(orderId);
   if (pending) {
     pendingByOrderId.delete(orderId);
     if (pending.timer) clearTimeout(pending.timer);
     pending.reject(new Error('w4g_cancelled'));
   }
-  const targetUrl = `http://${s.tngHost}:${s.tngPort}/w4g/PayCancel`;
+  const targetUrl = `http://${setting.tngHost}:${setting.tngPort}/w4g/PayCancel`;
   const body = { OrderId: orderId };
   w4gLog(
     'send',
@@ -436,7 +436,7 @@ export async function payCancel(orderId: string): Promise<{ state: number; order
 /** TCP-connect to the device's HTTP port. Doesn't send anything — just
  *  verifies the box is reachable on the LAN. */
 export function pingDevice(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
-  const s = getSettings();
+  const setting = getSettings();
   return new Promise((resolve) => {
     const start = Date.now();
     const sock = new Socket();
@@ -452,7 +452,7 @@ export function pingDevice(): Promise<{ ok: boolean; latencyMs?: number; error?:
     sock.once('timeout', () => done({ ok: false, error: 'connect_timeout (>5s)' }));
     sock.once('error', (e) => done({ ok: false, error: e.message }));
     try {
-      sock.connect(s.tngPort, s.tngHost);
+      sock.connect(setting.tngPort, setting.tngHost);
     } catch (e: any) {
       done({ ok: false, error: e?.message ?? String(e) });
     }
@@ -476,14 +476,14 @@ function spacedJson(obj: Record<string, unknown>): string {
 }
 
 function httpPost(pathname: string, body: Record<string, unknown>): Promise<DeviceAck> {
-  const s = getSettings();
+  const setting = getSettings();
   const json = spacedJson(body);
   // 15s gives slow embedded HTTP stacks more room to respond. The earlier
   // 8s was tight enough that legitimate slow firmwares looked like outright
   // failures. Per-transaction overall budget is still capped by
   // tngTimeoutSeconds (default 30s) — this only bounds the SEND leg.
   const TIMEOUT_MS = 15_000;
-  const target = `http://${s.tngHost}:${s.tngPort}${pathname}`;
+  const target = `http://${setting.tngHost}:${setting.tngPort}${pathname}`;
   return new Promise<DeviceAck>((resolve, reject) => {
     const start = Date.now();
     const stage = (label: string, extra?: unknown) => {
@@ -492,8 +492,8 @@ function httpPost(pathname: string, body: Record<string, unknown>): Promise<Devi
     };
 
     const req = http.request({
-      host: s.tngHost,
-      port: s.tngPort,
+      host: setting.tngHost,
+      port: setting.tngPort,
       method: 'POST',
       path: pathname,
       timeout: TIMEOUT_MS,
@@ -582,13 +582,13 @@ export function loopbackPayResult(opts: {
   sentBody?: string;
   error?: string;
 }> {
-  const s = getSettings();
-  if (!s.tngEnabled || activePorts.length === 0) {
+  const setting = getSettings();
+  if (!setting.tngEnabled || activePorts.length === 0) {
     return Promise.resolve({ ok: false, error: 'listener_not_running — enable TNG and save settings first' });
   }
   // Loopback prefers the configured port; falls back to whichever port is
   // actually listening if the configured one didn't bind.
-  const loopbackPort = activePorts.includes(s.tngCallbackPort) ? s.tngCallbackPort : activePorts[0];
+  const loopbackPort = activePorts.includes(setting.tngCallbackPort) ? setting.tngCallbackPort : activePorts[0];
   const payload = {
     State: opts.state ?? '0',
     OrderId: opts.orderId ?? `LOOPBACK${Math.floor(Date.now() / 1000)}`,
@@ -655,7 +655,7 @@ export function probeHttp(): Promise<{
   elapsedMs?: number;
   error?: string;
 }> {
-  const s = getSettings();
+  const setting = getSettings();
   return new Promise((resolve) => {
     const start = Date.now();
     let settled = false;
@@ -666,15 +666,15 @@ export function probeHttp(): Promise<{
       const final = { ...r, elapsedMs: elapsed };
       w4gLog(
         r.ok ? 'recv' : 'error',
-        `Probe HTTP → http://${s.tngHost}:${s.tngPort}/ · ${r.ok ? `${r.status} ${r.statusText ?? ''}` : `FAILED: ${r.error}`} · ${elapsed}ms`,
+        `Probe HTTP → http://${setting.tngHost}:${setting.tngPort}/ · ${r.ok ? `${r.status} ${r.statusText ?? ''}` : `FAILED: ${r.error}`} · ${elapsed}ms`,
         final,
       );
       resolve(final);
     };
     try {
       const req = http.request({
-        host: s.tngHost,
-        port: s.tngPort,
+        host: setting.tngHost,
+        port: setting.tngPort,
         method: 'GET',
         path: '/',
         timeout: 8_000,
@@ -716,7 +716,7 @@ export function w4gStatus(): {
   lastResult?: { orderId: string; status: string; payType?: number; at: string };
   lastError?: string;
 } {
-  const s = getSettings();
+  const setting = getSettings();
   const addresses: string[] = [];
   for (const interfaces of Object.values(os.networkInterfaces())) {
     for (const nic of interfaces ?? []) {
@@ -724,13 +724,13 @@ export function w4gStatus(): {
     }
   }
   return {
-    enabled: s.tngEnabled,
+    enabled: setting.tngEnabled,
     listening: activePorts.length > 0,
     listenPort: activePorts[0] ?? 0,
     listenPorts: [...activePorts],
     listenAddresses: addresses,
-    host: s.tngHost,
-    port: s.tngPort,
+    host: setting.tngHost,
+    port: setting.tngPort,
     pending: [...pendingByOrderId.values()].map((p) => ({
       orderId: p.orderId,
       payAmount: p.payAmount,
