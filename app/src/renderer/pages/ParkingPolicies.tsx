@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator, Search, X } from 'lucide-react';
 import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
@@ -156,8 +156,8 @@ export function ParkingPolicies() {
                     const ruleCount = s.rules?.length ?? 0;
                     const isOpen = !!expanded[s.policyId];
                     return (
-                      <>
-                        <tr key={s.policyId} className={`border-t border-gray-100 ${zero ? 'bg-amber-50/40' : ''}`}>
+                      <Fragment key={s.policyId}>
+                        <tr className={`border-t border-gray-100 ${zero ? 'bg-amber-50/40' : ''}`}>
                           <td className="px-3 py-2">
                             <button
                               type="button"
@@ -204,7 +204,7 @@ export function ParkingPolicies() {
                             </td>
                           </tr>
                         )}
-                      </>
+                      </Fragment>
                     );
                   })}
                 </tbody>
