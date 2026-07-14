@@ -15,6 +15,7 @@
  *   ParkingSpace     → parking_spaces
  *   Site             → sites
  *   SyncQueueRow     → sync_queue
+ *   ActivityLog      → activity_logs
  *   AppSettings      → settings   (key-value rows, coerced by default's type)
  *
  * Shared by BOTH processes (main + renderer) — keep zero runtime code here.
@@ -302,6 +303,53 @@ export interface SyncQueueRow {
   nextAttemptAt: string;
   createdAt: string;
   updatedAt: string;
+}
+
+// ─── activity_logs ─────────────────────────────────────────────────────────
+
+/** One audit-trail row. Operational events generated on this box (gate opens,
+ *  payment outcomes, equipment/config edits, sync failures) are written here
+ *  and pushed up to qparking SaaS; cloud rows mirrored back down for the
+ *  Activity Log page land here too. Mirrors the `activity_logs` table — and
+ *  the cloud ActivityLog model / ActivityLogResource it syncs against. */
+export interface ActivityLog {
+  /** UUID — generated locally so the row keeps its identity when pushed to the
+   *  cloud (the cloud ActivityLog is UUID-keyed too), avoiding a re-key. */
+  id: string;
+  /** Machine slug, e.g. 'gate.manual.opened' | 'payment.declined' | 'sync.failed'. */
+  eventKey: string;
+  /** Verb: 'create' | 'edit' | 'delete' | 'access' | 'failed' | 'retry' | … */
+  action: string;
+  /** Grouping: 'gate' | 'payment' | 'equipment' | 'config' | 'sync' | 'session' | … */
+  category: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  /** Result: 'ok' | 'failed' | 'declined' | 'timeout' | 'skipped' | … null = n/a. */
+  outcome: string | null;
+  /** Affected entity type, e.g. 'gate' | 'local_terminal' | 'rate_policy'. */
+  resourceType: string | null;
+  resourceId: string | null;
+  /** Ties related rows across one action (payment + gate + sync of a single exit). */
+  correlationId: string | null;
+  description: string | null;
+  /** Structured before/after diff. Persisted as a JSON string in the TEXT
+   *  column (same convention as SyncQueueRow.payload); the mapper converts. */
+  changes: Record<string, unknown> | null;
+  /** Origin: 'local' (generated on this box) or 'cloud' (mirrored down). */
+  source: 'local' | 'cloud';
+  /** Who/what triggered it, e.g. 'Site: Main Plaza' | 'System: qparking-local'. */
+  actorName: string | null;
+  /** Cloud site UUID this event belongs to. null until the site has synced. */
+  siteId: string | null;
+  /** When the event actually happened (ISO 8601) — drives ordering. */
+  occurredAt: string;
+  /** When the row was written locally (ISO 8601). */
+  createdAt: string;
+  /** Has this row been delivered to /activity-logs/batch yet? */
+  pushedToCloud: boolean;
+  /** Timestamp of the successful push (ISO 8601). null until pushed. */
+  pushedAt: string | null;
+  /** Last push error, if delivery failed. null = no error. */
+  syncError: string | null;
 }
 
 // ─── settings (key-value) ────────────────────────────────────────────────────

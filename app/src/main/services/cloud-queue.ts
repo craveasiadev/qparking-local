@@ -85,13 +85,13 @@ function readImageAsBase64(imagePath: string | null | undefined): string | null 
     const stat = fs.statSync(imagePath);
     const MAX_BYTES = 500 * 1024;
     if (stat.size > MAX_BYTES) {
-      console.warn(`[sync-queue] skipping oversized plate image ${imagePath} (${stat.size} bytes, cap ${MAX_BYTES})`);
+      console.warn(`[cloud-queue] skipping oversized plate image ${imagePath} (${stat.size} bytes, cap ${MAX_BYTES})`);
       return null;
     }
     const buf = fs.readFileSync(imagePath);
     return buf.toString('base64');
   } catch (e: any) {
-    console.warn(`[sync-queue] failed to read plate image ${imagePath}: ${e?.message ?? e}`);
+    console.warn(`[cloud-queue] failed to read plate image ${imagePath}: ${e?.message ?? e}`);
     return null;
   }
 }
@@ -304,7 +304,7 @@ export async function drainNow(): Promise<SyncStatus> {
  */
 export function backfillAllSessions(): { entries: number; exits: number } {
   // Import here to avoid the circular import that would trigger if we
-  // pulled this in at module-load time (db.ts → sync-queue.ts → db.ts).
+  // pulled this in at module-load time (db.ts → cloud-queue.ts → db.ts).
   const db = require('./db') as typeof import('./db');
   const allSessions = db.listRecentSessions(10_000);
   let entries = 0, exits = 0;

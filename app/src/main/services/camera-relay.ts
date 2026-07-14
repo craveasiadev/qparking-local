@@ -9,7 +9,7 @@
  *   VzLPRClient_SetIOOutputAuto(h, chan, durationMs)     // pulse the relay
  *
  * LIVE VIDEO IS NO LONGER HANDLED HERE. The Live-display wall and the plate-event
- * snapshot cache are both fed by the RTSP/ffmpeg feed (rtsp-stream.ts), which
+ * snapshot cache are both fed by the RTSP/ffmpeg feed (camera-rtsp.ts), which
  * needs only the camera IP. This module keeps one warm, connected SDK handle per
  * credentialed camera purely so an operator "Open barrier" pulses instantly; the
  * device credentials (user/password/port) exist ONLY for this relay path.

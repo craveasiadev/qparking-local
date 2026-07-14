@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
-  Terminal as TerminalIcon, ChevronUp, ChevronDown,
+  Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
   Ticket, Grid3x3, MonitorPlay, MapPin,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
@@ -15,6 +15,7 @@ import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
 import { SeasonPasses } from './pages/SeasonPasses';
 import { ParkingSpaces } from './pages/ParkingSpaces';
+import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
 import { useCurrentSite } from './hooks/useCurrentSite';
 
@@ -25,7 +26,7 @@ type Page =
   // Pricing & Tariffs
   | 'policies'
   // System
-  | 'settings' | 'sites';
+  | 'settings' | 'sites' | 'activity_logs';
 
 interface NavItem { id: Page; label: string; icon: any }
 interface NavSection { key: string; label: string; items: NavItem[] }
@@ -68,6 +69,7 @@ const SECTIONS: NavSection[] = [
   {
     key: 'system', label: 'Administration',
     items: [
+      { id: 'activity_logs', label: 'Activity Log', icon: Activity },
       { id: 'sites', label: 'Sites', icon: MapPin },
       { id: 'settings', label: 'Settings', icon: SettingsIcon },
     ],
@@ -224,6 +226,7 @@ export function App() {
           {page === 'parking-spaces' && <ParkingSpaces />}
           {page === 'season-passes' && <SeasonPasses />}
           {page === 'policies' && <ParkingPolicies />}
+          {page === 'activity_logs' && <ActivityLogs />}
           {page === 'sites' && <Sites />}
           {page === 'settings' && <Settings />}
         </div>

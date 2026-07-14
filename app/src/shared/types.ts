@@ -22,6 +22,7 @@ import type {
   RatePolicy,
   Site,
   SyncQueueRow,
+  ActivityLog,
 } from './db-models';
 
 // ─── runtime status objects (never persisted) ────────────────────────────────
@@ -267,6 +268,8 @@ export interface BridgeApi {
    *  raises the gate (simulator + face turnstile). */
   manualOpenGate(opts: { cameraId?: number | null; laneId?: number | null }): Promise<{ ok: boolean; note?: string }>;
 
+  listActivityLogs(): Promise<ActivityLog[]>;
+  
   // Face-auth turnstile bridge (faceapp_main /api/external/*)
   pingFaceGate(): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
   openFaceGate(opts?: { plate?: string; reason?: string }): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;

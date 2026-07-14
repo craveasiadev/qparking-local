@@ -13,7 +13,7 @@
  * /live/<id>; the frames just originate from FFmpeg now instead of the SDK
  * snapshot loop. This is the Live-display video source ONLY. Barrier open
  * (SetIOOutputAuto) and plate-event frame capture still come from the VZ SDK
- * (camera-stream.ts) exactly as before.
+ * (camera-relay.ts) exactly as before.
  *
  * FFmpeg is bundled via the `ffmpeg-static` package (no operator install).
  */

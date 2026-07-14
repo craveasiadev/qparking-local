@@ -99,6 +99,7 @@ const api: BridgeApi = {
   listParkingSpaces: () => ipcRenderer.invoke('parking-spaces:list'),
   syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
+  listActivityLogs: () => ipcRenderer.invoke('activity-logs:list'),
   saveRatePolicy: (input: {
     firstBlockCents: number; perBlockCents: number;
     blockMinutes: number; freeMinutes: number; dailyCapCents: number;

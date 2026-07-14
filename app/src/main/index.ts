@@ -91,11 +91,12 @@ import {
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses,
   getCurrentSite,
+  listActivityLogs,
 } from './services/db';
 import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
 import {
   getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
-} from './services/ecpi-terminal';
+} from './services/payment-ecpi';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
@@ -103,28 +104,28 @@ import {
   startGatePoll, setGateOpenHandler,
   syncAll, syncSite,
   handleDebug,
-} from './services/qparking-sync';
+} from './services/cloud-sync';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
 import { openFaceGate, pingFaceGate } from './services/face-gate';
 import {
   startSyncDrain, syncEvents, getSyncStatus, drainNow,
   enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete,
   backfillAllSessions,
-} from './services/sync-queue';
+} from './services/cloud-queue';
 import {
   listFailedSync, retryAllFailedSync, clearFailedSync,
 } from './services/db';
-import { pingCamera, pingHost } from './services/camera-snapshots';
-import { pingTerminalHost } from './services/terminal-probe';
+import { pingCamera, pingHost } from './services/camera-probe';
+import { pingTerminalHost } from './services/payment-probe';
 import { pushCamera, pushAllCameras } from './services/camera-push';
-import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier } from './services/camera-stream';
-import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } from './services/rtsp-stream';
+import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier } from './services/camera-relay';
+import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } from './services/camera-rtsp';
 import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
   pingDevice as tngPing, probeHttp as tngProbeHttp, loopbackPayResult as tngLoopback,
   w4gStatus, w4gEvents, newOrderId as newTngOrderId,
-} from './services/w4g-tng';
+} from './services/payment-tng';
 import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -220,7 +221,7 @@ app.whenReady().then(async () => {
   pushAllDevices().then(() => pushAllCameras()).catch(() => null);
 
   // Live-display video + plate snapshots come from the RTSP/ffmpeg feed
-  // (rtsp-stream) — camera IP only. The VZ SDK now holds a warm handle per
+  // (camera-rtsp) — camera IP only. The VZ SDK now holds a warm handle per
   // credentialed camera solely so an operator "Open barrier" pulses the camera's
   // onboard relay instantly.
   startRtspGrabbers();
@@ -714,6 +715,7 @@ ipcMain.handle('policies:sync', () => syncRatePolicies());
 ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
+ipcMain.handle('activity-logs:list', () => listActivityLogs());
 ipcMain.handle('policies:save-rate', (_e, input: {
   firstBlockCents: number; perBlockCents: number;
   blockMinutes: number; freeMinutes: number; dailyCapCents: number;

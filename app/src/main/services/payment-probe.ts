@@ -10,7 +10,7 @@
  * port as busy (ECONNREFUSED) rather than open — that's expected.
  */
 import { Socket } from 'node:net';
-import { explainNetError } from './ecpi-terminal';
+import { explainNetError } from './payment-ecpi';
 
 const PROBE_TIMEOUT_MS = 3_000;
 

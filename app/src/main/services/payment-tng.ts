@@ -195,7 +195,7 @@ export function startW4gServer(primaryPort: number): void {
     const srv = http.createServer(buildListenerHandler());
     srv.listen(port, '0.0.0.0', () => {
       activePorts.push(port);
-      console.log(`[w4g-tng] PayResult listener on :${port}`);
+      console.log(`[payment-tng] PayResult listener on :${port}`);
       const note = port === DEVICE_HARDCODED_CALLBACK_PORT
         ? ' (matches the W4G firmware\'s hardcoded callback port)'
         : '';
@@ -203,7 +203,7 @@ export function startW4gServer(primaryPort: number): void {
     });
     srv.on('error', (e: any) => {
       lastError = e.message;
-      console.error(`[w4g-tng] server error on :${port}: ${e.message}`);
+      console.error(`[payment-tng] server error on :${port}: ${e.message}`);
       const isPort80 = port === DEVICE_HARDCODED_CALLBACK_PORT;
       const hint = e.code === 'EADDRINUSE'
         ? (isPort80
