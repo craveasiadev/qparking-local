@@ -333,8 +333,8 @@ export function payRequest(opts: {
   port?: number;
 }): Promise<PayResultBody> {
   const setting = getSettings();
-  const host = opts.host ?? s.tngHost;
-  const port = opts.port ?? s.tngPort;
+  const host = opts.host ?? setting.tngHost;
+  const port = opts.port ?? setting.tngPort;
   const orderId = (opts.orderId ?? newOrderId()).slice(0, 32);
   const payAmount = Math.max(0, Math.round(opts.payAmount));
   const discountAmount = Math.max(0, Math.round(opts.discountAmount ?? 0));
@@ -424,8 +424,8 @@ export function payRequest(opts: {
  */
 export async function payCancel(orderId: string, device?: { host?: string; port?: number }): Promise<{ state: number; orderId: string }> {
   const setting = getSettings();
-  const host = device?.host ?? s.tngHost;
-  const port = device?.port ?? s.tngPort;
+  const host = device?.host ?? setting.tngHost;
+  const port = device?.port ?? setting.tngPort;
   const pending = pendingByOrderId.get(orderId);
   if (pending) {
     pendingByOrderId.delete(orderId);
@@ -497,8 +497,8 @@ function spacedJson(obj: Record<string, unknown>): string {
 
 function httpPost(pathname: string, body: Record<string, unknown>, device?: { host: string; port: number }): Promise<DeviceAck> {
   const setting = getSettings();
-  const host = device?.host ?? s.tngHost;
-  const port = device?.port ?? s.tngPort;
+  const host = device?.host ?? setting.tngHost;
+  const port = device?.port ?? setting.tngPort;
   const json = spacedJson(body);
   // 15s gives slow embedded HTTP stacks more room to respond. The earlier
   // 8s was tight enough that legitimate slow firmwares looked like outright
