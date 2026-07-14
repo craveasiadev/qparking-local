@@ -1,115 +1,16 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Activity, Filter, Clock, AlertCircle, AlertTriangle, Info, ChevronDown } from 'lucide-react';
+import { useAsyncAction } from '../hooks/useAsyncAction';
+import { ActivityLog } from '@shared/db-models';
 
-interface ActivityLogEntry {
-  id: string;
-  event_key: string;
-  action: string;
-  category: string;
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  outcome: string | null;
-  description: string;
-  occurred_at: string;
-  source: 'cloud' | 'local';
-  actor_name: string;
-}
-
-// Mock data for UI development
-const MOCK_LOGS: ActivityLogEntry[] = [
-  {
-    id: '1',
-    event_key: 'session.exit.recorded',
-    action: 'exit',
-    category: 'session',
-    severity: 'critical',
-    outcome: 'ok',
-    description: 'Exit · ABC1234 · RM 5.00 · paid',
-    occurred_at: new Date(Date.now() - 5 * 60_000).toISOString(),
-    source: 'local',
-    actor_name: 'Site: Parkvox KLCC',
-  },
-  {
-    id: '2',
-    event_key: 'session.entry',
-    action: 'entry',
-    category: 'session',
-    severity: 'high',
-    outcome: 'ok',
-    description: 'Entry · ABC1234',
-    occurred_at: new Date(Date.now() - 35 * 60_000).toISOString(),
-    source: 'local',
-    actor_name: 'Site: Parkvox KLCC',
-  },
-  {
-    id: '3',
-    event_key: 'config.policy.rate_edited',
-    action: 'edit',
-    category: 'config',
-    severity: 'critical',
-    outcome: 'ok',
-    description: 'Rate policy saved · first_block 300c/60min · per_block 200c',
-    occurred_at: new Date(Date.now() - 2 * 60_000).toISOString(),
-    source: 'local',
-    actor_name: 'System: qparking-local',
-  },
-  {
-    id: '4',
-    event_key: 'equipment.camera.saved',
-    action: 'create',
-    category: 'config',
-    severity: 'medium',
-    outcome: 'ok',
-    description: 'Camera added · Entry Gate 1 · entry',
-    occurred_at: new Date(Date.now() - 15 * 60_000).toISOString(),
-    source: 'local',
-    actor_name: 'Site: Parkvox KLCC',
-  },
-  {
-    id: '5',
-    event_key: 'equipment.terminal.saved',
-    action: 'edit',
-    category: 'config',
-    severity: 'high',
-    outcome: 'ok',
-    description: 'Terminal updated · ECPI-001 · 192.168.1.10 · live',
-    occurred_at: new Date(Date.now() - 45 * 60_000).toISOString(),
-    source: 'local',
-    actor_name: 'System: qparking-local',
-  },
-  {
-    id: '6',
-    event_key: 'session.exit.recorded',
-    action: 'exit',
-    category: 'session',
-    severity: 'high',
-    outcome: 'declined',
-    description: 'Exit · XYZ5678 · RM 3.50 · declined',
-    occurred_at: new Date(Date.now() - 60 * 60_000).toISOString(),
-    source: 'local',
-    actor_name: 'Site: Parkvox KLCC',
-  },
-  {
-    id: '7',
-    event_key: 'gate.remote.acked',
-    action: 'access',
-    category: 'gate',
-    severity: 'low',
-    outcome: 'ok',
-    description: 'Remote gate-open acknowledged',
-    occurred_at: new Date(Date.now() - 90 * 60_000).toISOString(),
-    source: 'cloud',
-    actor_name: 'Operator: John Doe',
-  },
-];
-
-const SEVERITY_COLORS: Record<ActivityLogEntry['severity'], string> = {
+const SEVERITY_COLORS: Record<ActivityLog['severity'], string> = {
   low: 'bg-blue-50 border-blue-200',
   medium: 'bg-amber-50 border-amber-200',
   high: 'bg-orange-50 border-orange-200',
   critical: 'bg-red-50 border-red-200',
 };
 
-const SEVERITY_ICONS: Record<ActivityLogEntry['severity'], React.ReactNode> = {
+const SEVERITY_ICONS: Record<ActivityLog['severity'], React.ReactNode> = {
   low: <Info className="w-4 h-4 text-blue-600" />,
   medium: <AlertTriangle className="w-4 h-4 text-amber-600" />,
   high: <AlertTriangle className="w-4 h-4 text-orange-600" />,
@@ -128,7 +29,7 @@ function timeAgo(isoDate: string): string {
 }
 
 export function ActivityLogs() {
-  const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filters, setFilters] = useState({
     category: '' as string,
@@ -136,17 +37,25 @@ export function ActivityLogs() {
     source: '' as string,
   });
 
-  const filtered = useMemo(() => {
-    return MOCK_LOGS.filter((log) => {
-      if (filters.category && log.category !== filters.category) return false;
-      if (filters.severity && log.severity !== filters.severity) return false;
-      if (filters.source && log.source !== filters.source) return false;
+  const [loadActivityLogs, loading] = useAsyncAction(async () => {
+    setActivityLogs(await window.bridge.listActivityLogs());
+  }); 
+
+  useEffect(() =>{
+    loadActivityLogs();
+  }, [])
+
+  const filteredActivityLogs = useMemo(() => {
+    return activityLogs.filter((activityLog) => {
+      if (filters.category && activityLog.category !== filters.category) return false;
+      if (filters.severity && activityLog.severity !== filters.severity) return false;
+      if (filters.source && activityLog.source !== filters.source) return false;
       return true;
     });
-  }, [filters]);
+  }, [activityLogs, filters]);
 
-  const categories = Array.from(new Set(MOCK_LOGS.map((l) => l.category)));
-  const severities = Array.from(new Set(MOCK_LOGS.map((l) => l.severity)));
+  const categories = Array.from(new Set(activityLogs.map((l) => l.category)));
+  const severities = Array.from(new Set(activityLogs.map((l) => l.severity)));
 
   return (
     <div className="p-5 sm:p-8 max-w-6xl mx-auto">
@@ -230,13 +139,13 @@ export function ActivityLogs() {
 
       {/* Activity List */}
       <div className="space-y-3">
-        {filtered.length === 0 ? (
+        {filteredActivityLogs.length === 0 ? (
           <div className="text-center py-12">
             <Info className="w-8 h-8 text-slate-400 mx-auto mb-3" />
             <p className="text-slate-600">No activities match your filters</p>
           </div>
         ) : (
-          filtered.map((log) => (
+          filteredActivityLogs.map((log) => (
             <div
               key={log.id}
               className={`border rounded-lg transition-all cursor-pointer ${SEVERITY_COLORS[log.severity]}`}
@@ -256,7 +165,7 @@ export function ActivityLogs() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="font-semibold text-slate-900">
-                        {log.event_key}
+                        {log.eventKey}
                       </span>
                       <span className="inline-block px-2 py-1 text-xs font-medium rounded bg-white bg-opacity-60">
                         {log.action}
@@ -277,14 +186,14 @@ export function ActivityLogs() {
                     <div className="flex items-center gap-4 text-xs text-slate-600">
                       <div className="flex items-center gap-1">
                         <Clock className="w-3 h-3" />
-                        {timeAgo(log.occurred_at)}
+                        {timeAgo(log.occurredAt)}
                       </div>
                       <div>
                         <span className="inline-block px-2 py-0.5 bg-white bg-opacity-60 rounded">
                           {log.source}
                         </span>
                       </div>
-                      <div>{log.actor_name}</div>
+                      <div>{log.actorName}</div>
                     </div>
                   </div>
 
@@ -314,7 +223,7 @@ export function ActivityLogs() {
                         Timestamp:
                       </span>
                       <p className="text-slate-700">
-                        {new Date(log.occurred_at).toLocaleString()}
+                        {new Date(log.occurredAt).toLocaleString()}
                       </p>
                     </div>
                     <div>
@@ -345,7 +254,7 @@ export function ActivityLogs() {
       {/* Stats Footer */}
       <div className="mt-8 pt-6 border-t border-slate-200">
         <p className="text-sm text-slate-600">
-          Showing {filtered.length} of {MOCK_LOGS.length} activities
+          Showing {filteredActivityLogs.length} of {activityLogs.length} activities
         </p>
       </div>
     </div>

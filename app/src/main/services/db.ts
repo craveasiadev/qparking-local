@@ -1280,9 +1280,33 @@ export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
   tx();
 }
 
+function rowToActivityLog(activityLogRow: any): ActivityLog {
+  return {
+    id: activityLogRow.id,
+    eventKey: activityLogRow.event_key,
+    action: activityLogRow.action,
+    category: activityLogRow.category,
+    severity: activityLogRow.severity, 
+    outcome: activityLogRow.outcome,
+    resourceType: activityLogRow.resource_type, 
+    resourceId: activityLogRow.resource_id,
+    correlationId: activityLogRow.correlation_id, 
+    description: activityLogRow.description,
+    changes: activityLogRow.changes, 
+    source: activityLogRow.source, 
+    actorName: activityLogRow.actor_name,
+    siteId: activityLogRow.site_id, 
+    occurredAt: activityLogRow.occurred_at, 
+    createdAt: activityLogRow.created_at,
+    pushedToCloud: activityLogRow.pushed_to_cloud,
+    pushedAt: activityLogRow.pushed_at,
+    syncError: activityLogRow.sync_error,
+  };
+}
+
 export function listActivityLogs(): ActivityLog[]{
   const rows = getDb().prepare("SELECT * FROM activity_logs").all() as any[];
-  return rows;
+  return rows.map(rowToActivityLog);
 }
 
 /**

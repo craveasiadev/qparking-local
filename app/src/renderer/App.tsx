@@ -69,7 +69,7 @@ const SECTIONS: NavSection[] = [
   {
     key: 'system', label: 'Administration',
     items: [
-      { id: 'activity_logs', label: 'Activity Log', icon: Activity },
+      { id: 'activity_logs', label: 'Activity Logs', icon: Activity },
       { id: 'sites', label: 'Sites', icon: MapPin },
       { id: 'settings', label: 'Settings', icon: SettingsIcon },
     ],

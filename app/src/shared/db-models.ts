@@ -323,7 +323,7 @@ export interface ActivityLog {
   /** Grouping: 'gate' | 'payment' | 'equipment' | 'config' | 'sync' | 'session' | … */
   category: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
-  /** Result: 'ok' | 'failed' | 'declined' | 'timeout' | 'skipped' | … null = n/a. */
+  /**     Result: 'ok' | 'failed' | 'declined' | 'timeout' | 'skipped' | … null = n/a. */
   outcome: string | null;
   /** Affected entity type, e.g. 'gate' | 'local_terminal' | 'rate_policy'. */
   resourceType: string | null;
