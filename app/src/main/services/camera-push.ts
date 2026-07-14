@@ -22,7 +22,7 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
   const lane = camera.laneId ? getLane(camera.laneId) : null;
 
   try {
-    await cloud.post('/cameras', {
+    await cloud.post('/camera-devices/upsert', {
       external_id: `local-${camera.id}`, // stable across pushes
       name: camera.name,
       direction: camera.direction,

@@ -6,7 +6,7 @@ It sits between the physical parking hardware and the qparking cloud:
 - **LPR cameras** over HTTP — cameras POST plate detections to our webhook.
 - **ECPI payment terminals** over TCP (JSON + SHA-256 + heartbeat) — drives the
   gate's payment flow.
-- **qparking SaaS** over HTTPS — a **Laravel REST API** we pull scope/rate config
+- **qparking SaaS** over HTTPS — a **Laravel REST API** we pull rate-policy config
   from every 60 seconds (so fees can be calculated even when the WAN is down) and
   push session records up to. All of these calls go through **one shared axios
   client** (`services/cloud-api.ts`).
@@ -43,7 +43,7 @@ When a car **enters**:
 
 When a car **exits**:
 1. Exit-lane LPR camera reads the plate, POSTs to `/lpr/event`.
-2. We look up the open session, compute duration + fee using the lane's scope rate.
+2. We look up the open session, compute duration + fee using the lane's rate policy.
 3. We drive the payment terminal:
    - **Kiosk-mode lane**: `initExit` → wait for card tap → `proceedExit` → wait for txnStatus.
    - **LPR-mode lane**: `initCard` (reader settles the tap) → wait for cardRead.
@@ -52,7 +52,7 @@ When a car **exits**:
    manually release from the UI.
 
 If the fee is 0 (within the free window, or the plate holds an active pass, or
-the scope has no rate), we mark the session `free` and skip the terminal entirely.
+the rate policy has no rate), we mark the session `free` and skip the terminal entirely.
 
 ---
 
@@ -124,14 +124,14 @@ but only for calling the Laravel cloud API; see `services/cloud-api.ts` below.)
 ```
 React component                preload.ts                    index.ts (Node)
 ───────────────                ──────────                    ───────────────
-window.bridge.listScopes()  →  ipcRenderer.invoke(         →  ipcMain.handle(
-                                 'scopes:list')                 'scopes:list',
-                                                                () => listScopes())
+window.bridge.listRatePolicies()  →  ipcRenderer.invoke(         →  ipcMain.handle(
+                                 'policies:list')                 'policies:list',
+                                                                () => listRatePolicies())
         (Promise)           ◄──   returns the rows        ◄──   reads SQLite
 ```
 
 To trace any bridge call: find its name in `src/main/preload.ts` to get the
-channel string (e.g. `'scopes:list'`), then search that string in
+channel string (e.g. `'policies:list'`), then search that string in
 `src/main/index.ts` to find the handler that runs it. (Same as "find the axios
 URL → find the matching route".)
 
@@ -168,14 +168,14 @@ They form two pairs plus the setup call:
 ```
 SETUP:        contextBridge.exposeInMainWorld('bridge', api)   → gives React `window.bridge`
 
-REQUEST/REPLY: ipcRenderer.invoke('scopes:list')   ⇄   ipcMain.handle('scopes:list', fn)
+REQUEST/REPLY: ipcRenderer.invoke('policies:list')   ⇄   ipcMain.handle('policies:list', fn)
                (React asks)                              (Node answers)
 
 PUSH/SUBSCRIBE: webContents.send('plate-detected', e)  →  ipcRenderer.on('plate-detected', cb)
                (Node pushes)                               (React listens)
 ```
 
-The **`'channel'` string** (like `'scopes:list'` or `'plate-detected'`) is just a
+The **`'channel'` string** (like `'policies:list'` or `'plate-detected'`) is just a
 label both sides agree on — the invoke and its handle must use the *exact same
 string*, or the message goes nowhere. That string is the thing you search for
 when tracing a call (see below).
@@ -193,35 +193,35 @@ When you see `window.bridge.something()` in a React page and want to find *what 
 actually does* (all the way down to the database), follow this 4-hop trail. Each
 hop is a plain text search — no guessing.
 
-Worked trace for `window.bridge.listScopes()`:
+Worked trace for `window.bridge.listRatePolicies()`:
 
 **Hop 1 — Frontend (React).** You start here, in a page:
 ```tsx
-// src/renderer/pages/Scopes.tsx
-setList(await window.bridge.listScopes());
+// src/renderer/pages/ParkingPolicies.tsx
+setList(await window.bridge.listRatePolicies());
 ```
-→ Note the method name: **`listScopes`**.
+→ Note the method name: **`listRatePolicies`**.
 
-**Hop 2 — The bridge (preload).** Search `listScopes` in `src/main/preload.ts`:
+**Hop 2 — The bridge (preload).** Search `listRatePolicies` in `src/main/preload.ts`:
 ```ts
-listScopes: () => ipcRenderer.invoke('scopes:list'),
+listRatePolicies: () => ipcRenderer.invoke('policies:list'),
 ```
-→ This gives you the **channel string**: `'scopes:list'`. (The method name and the
+→ This gives you the **channel string**: `'policies:list'`. (The method name and the
 channel string are often different — the channel is what actually crosses into Node.)
 
-**Hop 3 — The handler (Electron main).** Search `'scopes:list'` in `src/main/index.ts`:
+**Hop 3 — The handler (Electron main).** Search `'policies:list'` in `src/main/index.ts`:
 ```ts
-ipcMain.handle('scopes:list', () => listScopes());
+ipcMain.handle('policies:list', () => listRatePolicies());
 ```
-→ This is the "endpoint". It calls a backend function, also named **`listScopes`**
+→ This is the "endpoint". It calls a backend function, also named **`listRatePolicies`**
 (imported from `./services/db`).
 
-**Hop 4 — The backend + SQL.** Search `function listScopes` in `src/main/services/`:
+**Hop 4 — The backend + SQL.** Search `function listRatePolicies` in `src/main/services/`:
 ```ts
 // src/main/services/db.ts
-export function listScopes(): ScopeRate[] {
-  const rows = getDb().prepare('SELECT * FROM scopes ORDER BY scope_name').all();
-  // …maps rows to ScopeRate objects…
+export function listRatePolicies(): RatePolicy[] {
+  const rows = getDb().prepare('SELECT * FROM rate_policies ORDER BY policy_name').all();
+  // …maps rows to RatePolicy objects…
 }
 ```
 → **Here's the actual SQL.** You've reached the bottom.
@@ -229,7 +229,7 @@ export function listScopes(): ScopeRate[] {
 #### The trail in one line
 
 ```
-window.bridge.listScopes()   →   'scopes:list'   →   ipcMain.handle(...)   →   db.ts listScopes()   →   SELECT * FROM scopes
+window.bridge.listRatePolicies()   →   'policies:list'   →   ipcMain.handle(...)   →   db.ts listRatePolicies()   →   SELECT * FROM rate_policies
    (React page)                    (preload.ts)         (index.ts)              (services/*.ts)            (SQLite)
    search: method name             search: channel      search: fn name         the query
 ```
@@ -237,8 +237,8 @@ window.bridge.listScopes()   →   'scopes:list'   →   ipcMain.handle(...)   �
 #### Fast way (search terms to use)
 
 1. In your editor, **search the whole `src/main/` folder** for the method name
-   (`listScopes`) → lands you in `preload.ts`, revealing the channel string.
-2. **Search for the channel string** (`'scopes:list'`) → lands you on the
+   (`listRatePolicies`) → lands you in `preload.ts`, revealing the channel string.
+2. **Search for the channel string** (`'policies:list'`) → lands you on the
    `ipcMain.handle` in `index.ts`, revealing the backend function name.
 3. **Search for `function <name>`** → lands you in `services/…` at the real logic
    + SQL.
@@ -288,14 +288,14 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 
 | File | Purpose |
 |------|---------|
-| `db.ts` | SQLite schema + every query (sessions, terminals, cameras, lanes, scopes, settings, sync queue). |
+| `db.ts` | SQLite schema + every query (sessions, terminals, cameras, lanes, rate policies, settings, sync queue). |
 | `cloud-api.ts` | **The one axios client for the Laravel API.** Builds base URL + `Bearer` auth + 10s timeout from Settings. Every cloud call in the rows below goes through it. |
 | `lpr-webhook.ts` | HTTP **server** the LPR cameras POST plate events to. Also powers the "Simulate" button. |
 | `parking-flow.ts` | The brain: entry vs exit, fee calculation, drives the terminal, records the result, opens the gate. |
 | `ecpi-terminal.ts` | Payment-terminal driver over a raw TCP socket (heartbeat + state machine). |
 | `w4g-tng.ts` | Touch'n'Go integration — a parallel payment path via the W4G IO-controller. Deliberately hand-rolled HTTP (no axios): the device firmware is byte-picky about header order + JSON spacing. |
 | `face-gate.ts` | Calls the face-auth turnstile's HTTP API to raise the barrier (its own axios client — different server, different token). |
-| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /scopes`, `/passes`, `/spaces`, `/gate-commands/pending`; `PUT /rate-policies/upsert` pushes rate edits back up. |
+| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /rate-policies`, `/season-passes`, `/parking-spaces`, `/gate-commands/pending`; `PUT /rate-policies/upsert` pushes rate edits back up. |
 | `sync-queue.ts` | **Push** to the Laravel API: `POST /parking-records`, with exponential-backoff retries so a WAN outage never drops a record. |
 | `camera-snapshots.ts` | Fetches live JPEG snapshots from cameras (UI preview) and uploads them to the cloud on a 10s timer. |
 | `camera-push.ts` | Mirrors the local camera registry up to the cloud. |
@@ -324,13 +324,13 @@ Every cloud call in the app then follows the same three-line pattern:
 ```ts
 const cloud = getCloudApi();
 if (!cloud) return NOT_CONFIGURED;            // operator hasn't filled in Settings yet
-const { data } = await cloud.get('/scopes');  // relative path — base URL + auth come from the client
+const { data } = await cloud.get('/rate-policies');  // relative path — base URL + auth come from the client
 ```
 
 What this buys:
 
 - **One source of truth** — endpoints in services are short relative paths
-  (`'/passes'`, `'/parking-records'`), not hand-assembled URLs.
+  (`'/season-passes'`, `'/parking-records'`), not hand-assembled URLs.
 - **Settings apply instantly** — `getCloudApi()` re-reads Settings on every call,
   so changing the base URL / API key needs no restart.
 - **Uniform errors** — axios throws on any non-2xx, so failure handling is one
@@ -348,7 +348,7 @@ not a client).
 
 100% ordinary React + TypeScript + Vite + Tailwind. `main.tsx` is the entry,
 `App.tsx` the sidebar/shell, `pages/*.tsx` one file per screen (Dashboard,
-Terminals, Cameras, Lanes, Sessions, Scopes, Settings, …). When it needs data or
+Terminals, Cameras, Lanes, Sessions, Parking Rates, Settings, …). When it needs data or
 an action, it calls `window.bridge.*`.
 
 ---
@@ -389,46 +389,46 @@ only observes the result.
 
 All snippets below are the *actual* code in this repo, trimmed for clarity.
 
-### Example 1 — Reading data (the "Rate plans" page)
+### Example 1 — Reading data (the "Parking Rates" page)
 
 The whole round-trip for "show the list of rate plans", across three files:
 
 ```tsx
-// src/renderer/pages/Scopes.tsx   ⚛️ REACT — runs in the window
+// src/renderer/pages/ParkingPolicies.tsx   ⚛️ REACT — runs in the window
 async function refresh() {
-  setList(await window.bridge.listScopes());   // ← the only Electron-aware line
+  setList(await window.bridge.listRatePolicies());   // ← the only Electron-aware line
 }
 useEffect(() => { void refresh(); }, []);       // load once on mount
 ```
 
 ```ts
 // src/main/preload.ts             ⚡ the bridge — turns the call into a message
-listScopes: () => ipcRenderer.invoke('scopes:list'),
+listRatePolicies: () => ipcRenderer.invoke('policies:list'),
 ```
 
 ```ts
 // src/main/index.ts               🟢 the handler — runs in Node, reads SQLite
-ipcMain.handle('scopes:list', () => listScopes());   // listScopes() lives in services/db.ts
+ipcMain.handle('policies:list', () => listRatePolicies());   // listRatePolicies() lives in services/db.ts
 ```
 
-Read `window.bridge.listScopes()` as `await axios.get('/api/scopes')` and the
+Read `window.bridge.listRatePolicies()` as `await axios.get('/api/rate-policies')` and the
 whole thing is just React fetching from a backend.
 
 ### Example 2 — An action + refresh ("Sync now" button)
 
 ```tsx
-// src/renderer/pages/Scopes.tsx
+// src/renderer/pages/ParkingPolicies.tsx
 const [sync, syncing] = useAsyncAction(async () => {
-  const r = await window.bridge.syncScopesNow();  // → pulls fresh rates from the Laravel API
+  const r = await window.bridge.syncRatePoliciesNow();  // → pulls fresh rates from the Laravel API
   setResult(r);                                    // { ok: true, fetched: 7 }
   await refresh();                                 // re-read the now-updated local list
 });
 // <button onClick={() => sync()} disabled={syncing}>Sync now</button>
 ```
 
-`syncScopesNow` → `ipcRenderer.invoke('scopes:sync')` → `ipcMain.handle('scopes:sync',
-() => syncScopes())`, and `syncScopes()` (in `services/qparking-sync.ts`) calls
-`GET /scopes` through the shared cloud client (`cloud-api.ts` adds the base URL +
+`syncRatePoliciesNow` → `ipcRenderer.invoke('policies:sync')` → `ipcMain.handle('policies:sync',
+() => syncRatePolicies())`, and `syncRatePolicies()` (in `services/qparking-sync.ts`) calls
+`GET /rate-policies` through the shared cloud client (`cloud-api.ts` adds the base URL +
 `Bearer` token), maps the snake_case rows to local types, writes them to SQLite,
 and returns the count.
 
@@ -500,53 +500,53 @@ found).
 
 ### Example 6 — How a DB upsert works (`?` placeholders, `ON CONFLICT`, `excluded`)
 
-Every cloud-synced table (`scopes`, `sites`, …) is written with the same
+Every cloud-synced table (`rate_policies`, `sites`, …) is written with the same
 **upsert** pattern (**up**date-or-in**sert**). Trimmed from the real
-`upsertScope` in `services/db.ts`:
+`upsertRatePolicy` in `services/db.ts`:
 
 ```ts
-db.prepare(`INSERT INTO scopes (
-    scope_id, scope_name, free_minutes
+db.prepare(`INSERT INTO rate_policies (
+    policy_id, policy_name, free_minutes
   ) VALUES (?,?,?)
-  ON CONFLICT(scope_id) DO UPDATE SET
-    scope_name   = excluded.scope_name,
+  ON CONFLICT(policy_id) DO UPDATE SET
+    policy_name   = excluded.policy_name,
     free_minutes = excluded.free_minutes`)
-  .run(scope.scopeId, scope.scopeName, scope.freeMinutes);
+  .run(policy.policyId, policy.policyName, policy.freeMinutes);
 ```
 
 Three pieces to understand:
 
 **1. `?` placeholders + `.run(...)`** — the SQL is compiled once with holes in
 it; `.run()` pours your values into those holes **in order** (1st `?` ←
-`scope.scopeId`, 2nd `?` ← `scope.scopeName`, …). The argument order must match
+`policy.policyId`, 2nd `?` ← `policy.policyName`, …). The argument order must match
 the column list exactly. Why not build the SQL string by hand? Safety (a plate
-named `'); DROP TABLE scopes;--` stays plain data — no SQL injection) and speed
+named `'); DROP TABLE rate_policies;--` stays plain data — no SQL injection) and speed
 (compile once, run many). Two idioms you'll see in every `.run()`:
 - `x ?? null` — SQLite can't store `undefined`, so maybe-missing values become `NULL`.
 - `flag ? 1 : 0` — SQLite has no boolean type; `true`/`false` are stored as `1`/`0`.
 
-**2. `ON CONFLICT(scope_id) DO UPDATE`** — try the insert; if a row with that
-`scope_id` already exists, don't fail — run the `UPDATE` on the existing row
+**2. `ON CONFLICT(policy_id) DO UPDATE`** — try the insert; if a row with that
+`policy_id` already exists, don't fail — run the `UPDATE` on the existing row
 instead. One statement handles both "first time seen" and "already cached".
 
 **3. `excluded.<column>`** — inside the `DO UPDATE` there are two rows in play:
 the **old row already in the table**, and the **new row that just got rejected**
-(*excluded*) from inserting. `excluded.scope_name` means "the value I just tried
+(*excluded*) from inserting. `excluded.policy_name` means "the value I just tried
 to insert" — i.e. the fresh data from the cloud:
 
 ```sql
-SET scope_name = excluded.scope_name
+SET policy_name = excluded.policy_name
 --     ↑                ↑
 --  old row's       the fresh value from
 --  column          this sync's payload
 ```
 
-Worked example — the cloud has scope `abc-123` named **"Weekend Rate"**:
+Worked example — the cloud has policy `abc-123` named **"Weekend Rate"**:
 
 | Sync tick | What happens |
 |---|---|
-| First ever | No row with `scope_id = 'abc-123'` → plain **insert** |
-| Operator renames it in the cloud to "Weekend & Holiday Rate" | Next 60s sync sends the same id → insert **conflicts** on the primary key → `DO UPDATE` overwrites the cached name with `excluded.scope_name` |
+| First ever | No row with `policy_id = 'abc-123'` → plain **insert** |
+| Operator renames it in the cloud to "Weekend & Holiday Rate" | Next 60s sync sends the same id → insert **conflicts** on the primary key → `DO UPDATE` overwrites the cached name with `excluded.policy_name` |
 | Every tick after | Same id, same values → conflict + update to identical values (harmless) |
 
 Same id in, one row out, always fresh — that's why the 60-second sync can run
@@ -583,7 +583,7 @@ That's the whole pattern every feature in this app follows.
 ### Recipe — a complete feature, end to end ("Sync all tables" button)
 
 The recipe above is the minimal skeleton. Here's a **full-size worked example** —
-adding a Settings button that pulls *all* cloud tables (scopes + passes + spaces)
+adding a Settings button that pulls *all* cloud tables (rate policies + season passes + parking spaces)
 from the Laravel API in one click, with a spinner and a result message. It shows
 where real logic, error handling, and UI states go in each layer. Same 4 hops,
 bottom-up:
@@ -597,16 +597,16 @@ block the others:
 ```ts
 /** Run all three pulls in parallel; one failing doesn't block the others. */
 export async function syncAll(): Promise<{
-  scopes: SyncResult;
+  policies: SyncResult;
   passes: SyncResult;
   spaces: SyncResult;
 }> {
-  const [scopes, passes, spaces] = await Promise.all([
-    syncScopes().catch(toFailedSyncResult),
+  const [policies, passes, spaces] = await Promise.all([
+    syncRatePolicies().catch(toFailedSyncResult),
     syncSeasonPasses().catch(toFailedSyncResult),
-    syncSpaces().catch(toFailedSyncResult),
+    syncParkingSpaces().catch(toFailedSyncResult),
   ]);
-  return { scopes, passes, spaces };
+  return { policies, passes, spaces };
 }
 ```
 
@@ -631,7 +631,7 @@ syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
 
 // types.ts (BridgeApi) — gives every page autocomplete on the result shape
 syncAllNow(): Promise<{
-  scopes: { ok: boolean; fetched: number; error?: string };
+  policies: { ok: boolean; fetched: number; error?: string };
   passes: { ok: boolean; fetched: number; error?: string };
   spaces: { ok: boolean; fetched: number; error?: string };
 }>;
@@ -647,8 +647,8 @@ const [syncResult, setSyncResult] = useState<string | null>(null);
 const [runSyncAll, syncingAll] = useAsyncAction(async () => {
   setSyncResult(null);
   const r = await window.bridge.syncAllNow();
-  const bits = [`${r.scopes.fetched} scopes`, `${r.passes.fetched} passes`, `${r.spaces.fetched} spaces`];
-  const errs = [r.scopes, r.passes, r.spaces].filter((x) => !x.ok);
+  const bits = [`${r.policies.fetched} policies`, `${r.passes.fetched} passes`, `${r.spaces.fetched} spaces`];
+  const errs = [r.policies, r.passes, r.spaces].filter((x) => !x.ok);
   setSyncResult(errs.length === 0
     ? `✓ Fetched ${bits.join(', ')}`
     : `✗ ${errs[0].error ?? 'sync failed'} (fetched ${bits.join(', ')})`);
@@ -672,7 +672,7 @@ click → runSyncAll() → window.bridge.syncAllNow()          ⚛️ React
       → ipcMain.handle('sync:all-tables')                  ⚡ index.ts
       → syncAll() → 3× GET /api/v1/local-server/…          🟢 qparking-sync.ts → Laravel
       → rows written to SQLite, counts returned back up    🟢 db.ts
-      → "✓ Fetched 7 scopes, 12 passes, 40 spaces"         ⚛️ React
+      → "✓ Fetched 7 policies, 12 passes, 40 spaces"         ⚛️ React
 ```
 
 Rules of thumb baked into this example:
@@ -740,8 +740,8 @@ The portable build is handy for testing on a new PC: copy the file, double-click
 ## First-time configuration on a new site
 
 1. Launch the app.
-2. **Settings** → enter qparking base URL + API key → Save. Click **Rate plans →
-   Sync now**. The lane/scope dropdowns now populate.
+2. **Settings** → enter qparking base URL + API key → Save. Click **Parking Rates →
+   Sync now**. The lane/rate-policy dropdowns now populate.
 3. **Payment terminals** → Add each ECPI reader on the LAN:
    - Host = reader's static IP (default `192.168.1.199`)
    - Port = `5000` (ECPI default)
@@ -751,7 +751,7 @@ The portable build is handy for testing on a new PC: copy the file, double-click
 4. **LPR cameras** → Add each camera. Copy the webhook URL shown at the top of the
    page into the camera's "alarm-action / event-push" config. Use the per-camera
    webhook secret.
-5. **Lanes** → Define one lane per entry/exit gate. Pick the scope (rate set) and
+5. **Lanes** → Define one lane per entry/exit gate. Pick the rate policy and
    the payment terminal (exit lanes only).
 6. **Cameras** → edit each camera and assign it to the right lane.
 7. Back to **Terminals**, click **Connect** on each row to establish the TCP session.
@@ -818,7 +818,7 @@ so you can watch the whole cycle from one click.
 | **LPR** | License-Plate Recognition (the cameras that read number plates) |
 | **ECPI** | The payment-terminal protocol/brand this app drives over TCP |
 | **W4G / TNG** | Touch'n'Go IO-controller integration (Malaysian e-wallet / card) |
-| **scope / tariff** | A rate plan (how much to charge per hour/block), synced from the cloud |
+| **rate policy / tariff** | A rate plan (how much to charge per hour/block), synced from the cloud |
 | **session** | One car's visit: entry event → exit event |
 | **qparking SaaS** | The cloud **Laravel API** this on-prem app syncs rates up/down with |
 | **kiosk vs LPR mode** | Self-pay station vs gate-controlled reader — different terminal command sets |

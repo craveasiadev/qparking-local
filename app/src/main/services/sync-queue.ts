@@ -240,7 +240,7 @@ async function drainOnce(): Promise<void> {
     }
 
     for (const row of dueRows) {
-      const result = await sendOp(row.op, row.payload);
+      const result = await sendParkingRecord(row.op, row.payload);
       if (result.ok) {
         markSyncOk(row.id);
         lastSuccessAt = new Date().toISOString();
@@ -266,7 +266,7 @@ async function drainOnce(): Promise<void> {
   }
 }
 
-async function sendOp(op: SyncOp, payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
+async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
   const cloud = getCloudApi();
   if (!cloud) return { ok: false, error: 'qparking_not_configured' };
   // All session ops currently hit the same parking-records upsert endpoint
@@ -276,7 +276,7 @@ async function sendOp(op: SyncOp, payload: Record<string, unknown>): Promise<{ o
   // "mark this record cancelled".
   const body = op === 'session.delete' ? { ...payload, _delete: true } : payload;
   try {
-    const response = await cloud.post('/parking-records', body);
+    const response = await cloud.post('/parking-records/upsert', body);
     return { ok: true, status: response.status };
   } catch (error: any) {
     if (axios.isAxiosError(error) && error.response) {

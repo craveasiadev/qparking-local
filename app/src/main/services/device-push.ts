@@ -46,9 +46,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
   const terminal = getTerminal(terminalId);
   if (!terminal) return { ok: false, error: 'unknown_terminal' };
 
-  // site_id is intentionally omitted — the cloud always attributes to the
-  // site behind the bearer token and ignores any site_id in the body.
-  return postToCloud('/terminals', {
+  return postToCloud('/local-terminals/upsert', {
     external_id: `local-${terminal.id}`,
     name: terminal.name,
     host: terminal.host,
@@ -69,8 +67,7 @@ export async function pushLane(laneId: number): Promise<PushResult> {
   if (!lane) return { ok: false, error: 'unknown_lane' };
   const terminal = lane.terminalId ? getTerminal(lane.terminalId) : null;
 
-  // site_id omitted — the bearer token identifies the site (see pushTerminal).
-  return postToCloud('/lanes', {
+  return postToCloud('/local-lanes/upsert', {
     external_id: `local-${lane.id}`,
     name: lane.name,
     // Derived from the lane's cameras (may be 'dual', or null if none wired).
