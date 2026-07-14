@@ -26,26 +26,6 @@ import type {
 
 // ─── runtime status objects (never persisted) ────────────────────────────────
 
-export type TerminalConnState =
-  | 'disconnected'
-  | 'connecting'
-  | 'connected'
-  | 'initialising'
-  | 'ready'
-  | 'transacting'
-  | 'error';
-
-export interface TerminalStatus {
-  terminalId: number;
-  conn: TerminalConnState;
-  /** Latest state reported by the reader (from getStatus: 01 idle, 02 scanning, ...). */
-  readerState: string | null;
-  lastError: string | null;
-  /** Last successful heartbeat ack (ISO timestamp). Stale → reader probably wedged. */
-  lastHeartbeatAt: string | null;
-  lastSeenAt: string | null;
-}
-
 /** Status snapshot for the outbound sync queue (Dashboard panel). */
 export interface SyncStatus {
   pending: number;
@@ -86,30 +66,13 @@ export interface EquipmentPushItem {
 
 /** What the bridge exposes to the renderer. Every method returns a Promise. */
 export interface BridgeApi {
-  // Terminals — CRUD + lifecycle
+  // Payment terminals (Alarmtech W4G devices) — CRUD
   listTerminals(): Promise<PaymentTerminal[]>;
   saveTerminal(input: Omit<PaymentTerminal, 'id' | 'createdAt' | 'updatedAt'> & { id?: number }): Promise<PaymentTerminal>;
   deleteTerminal(id: number): Promise<void>;
-  getTerminalStatus(id: number): Promise<TerminalStatus>;
-  terminalConnect(id: number): Promise<void>;
-  terminalDisconnect(id: number): Promise<void>;
-  /** TCP reachability probe by host:port — lets "Test connection" run against
-   *  the form values before the terminal is saved. */
+  /** TCP reachability probe by host:port — backs the per-device "Test
+   *  connection" button (works against the form values before saving). */
   pingTerminalHost(input: { host: string; port: number }): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
-
-  // Terminals — full ECPI API surface
-  terminalInitTerminal(id: number, op?: '0'|'1'|'2'): Promise<void>;
-  terminalDeinitTerminal(id: number): Promise<void>;
-  terminalGetStatus(id: number): Promise<void>;
-  terminalInitCard(id: number, opts?: { fareClass?: string; retrigger?: '0'|'1'; titleTXT?: string; messageTXT?: string }): Promise<void>;
-  terminalInitEntry(id: number, opts?: { mode?: '0'|'1'|'2'; fareAmount?: number; fareClass?: string }): Promise<void>;
-  terminalInitExit(id: number, opts?: { mode?: '0'|'1'|'2' }): Promise<void>;
-  terminalInitTxn(id: number, opts: { fareAmount: number; fareClass?: string; entryDt?: string; vehicleNo?: string; entryLane?: string; gstAmount?: number; pAmount?: number }): Promise<void>;
-  terminalProceedEntry(id: number, opts?: { payFlag?: -1|0|1 }): Promise<void>;
-  terminalProceedExit(id: number, opts: { fareAmount: number; fareClass?: string; fallTimeout?: number; payFlag?: -1|0|1 }): Promise<void>;
-  terminalFinTxn(id: number): Promise<void>;
-  terminalAbort(id: number, reason?: 'success'|'failed'|'silent'): Promise<void>;
-  terminalShowStatus(id: number, opts: { titleTXT: string; messageTXT: string; sound?: '01'|'02'|'FF'; image?: '04'|'08' }): Promise<void>;
 
   // LPR cameras
   listCameras(): Promise<LprCamera[]>;
@@ -338,10 +301,13 @@ export interface BridgeApi {
     enterTime?: number;
     payTime?: number;
     orderId?: string;
+    /** Target a specific device (multi-device); omitted → the settings device. */
+    host?: string;
+    port?: number;
   }): Promise<{ ok: boolean; orderId: string; deviceState?: number; resultState?: string; payType?: number; cardNo?: string; balance?: number; stan?: string; apprCode?: string; error?: string }>;
   /** Fire PayCancel against an order. The device only honours cancel after
    *  the current deduction times out (~6s per vendor doc). */
-  tngTestPayCancel(orderId: string): Promise<{ ok: boolean; deviceState?: number; error?: string }>;
+  tngTestPayCancel(orderId: string, target?: { host?: string; port?: number }): Promise<{ ok: boolean; deviceState?: number; error?: string }>;
   /** Current state of the W4G integration — running, pending orders, last
    *  callback at, last error. Used by the Settings page status panel. */
   tngStatus(): Promise<{
@@ -358,7 +324,7 @@ export interface BridgeApi {
   }>;
 
   // Stream events to renderer (returns an unsubscribe fn)
-  onEvent(channel: 'terminal-status' | 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void): () => void;
+  onEvent(channel: 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void): () => void;
 }
 
 /**

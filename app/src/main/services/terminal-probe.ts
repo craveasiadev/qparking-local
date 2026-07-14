@@ -1,20 +1,29 @@
 /**
- * TCP reachability probe for ECPI payment terminals. Backs the "Test
- * connection" button on the terminals page — confirms the reader's host:port
- * accepts a TCP connection before the terminal is saved / connected.
+ * TCP reachability probe for Alarmtech Touch'n'Go W4G payment devices. Backs
+ * the "Test connection" button on the Payment terminals page — confirms the
+ * device's host:port accepts a TCP connection before it's saved.
  *
- * Deliberately does NOT speak the ECPI protocol: it opens a socket, and closes
- * it the instant the connection succeeds. That's enough to tell "port open and
- * reachable" from "wrong IP / port / reader off". Note the reader allows only
- * ONE session, so if a terminal is already connected this probe may report the
- * port as busy (ECONNREFUSED) rather than open — that's expected.
+ * Deliberately does NOT speak the W4G protocol: it opens a socket and closes it
+ * the instant the connection succeeds. That's enough to tell "port open and
+ * reachable" from "wrong IP / port / device off".
  */
 import { Socket } from 'node:net';
-import { explainNetError } from './ecpi-terminal';
 
 const PROBE_TIMEOUT_MS = 3_000;
 
 export interface TerminalPingResult { ok: boolean; latencyMs?: number; error?: string }
+
+/** Translate a raw socket error code into an operator-readable reason. */
+function explainNetError(raw: string): string {
+  const s = String(raw);
+  if (s.includes('ETIMEDOUT')) return 'timed out — no response (wrong IP, or device unreachable / firewalled)';
+  if (s.includes('ECONNREFUSED')) return 'connection refused — nothing listening on that port (wrong port, or device off)';
+  if (s.includes('EHOSTUNREACH')) return 'host unreachable — not on this LAN (check IP / routing)';
+  if (s.includes('ENETUNREACH')) return 'network unreachable — check the LAN connection';
+  if (s.includes('ENOTFOUND') || s.includes('EAI_AGAIN')) return 'host not found — check the IP / hostname';
+  if (s.includes('ECONNRESET')) return 'connection reset by the device';
+  return s;
+}
 
 export function pingTerminalHost(host: string, port: number): Promise<TerminalPingResult> {
   return new Promise((resolve) => {

@@ -28,8 +28,7 @@ import {
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
 } from './db';
 import { lprEvents, normalisePlate, captureFrameToFile, type PlateEvent } from './lpr-webhook';
-import { getTerminalInstance } from './ecpi-terminal';
-import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId } from './w4g-tng';
+import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId } from './w4g-tng';
 
 // Stamped into every parking-flow log line so the operator can verify they're
 // running the build that has the latest fix — vs an older cached installer.
@@ -262,9 +261,8 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
-  // Paid exit — route to the selected payment controller. Strict either/or
-  // (Settings → "Payment controller"): the ECPI terminal OR the TNG W4G
-  // controller, never both. The busy-guard is shared by both paths.
+  // Paid exit — charge the Alarmtech W4G device wired to this lane. The
+  // busy-guard prevents a double-charge if a second scan lands mid-transaction.
   if (exitsInFlight.has(lane.id)) {
     parkingEvents.emit('warning', { kind: 'exit-busy', laneId: lane.id });
     return;
@@ -284,488 +282,37 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     exitsInFlight.delete(lane.id);
   };
 
-  if ((settings.paymentController ?? 'terminal') === 'tng') {
-    // ── TNG W4G controller path ──
-    if (!settings.tngEnabled || !settings.tngHost) {
-      parkingEvents.emit('warning', { kind: 'exit-tng-not-configured', laneId: lane.id });
-      return;
-    }
-    markInFlight();
-    startTngExitCharge(lane, session.plate, feeCents, session.entryAt, event).catch(onChargeCrash);
-    return;
-  }
-
-  // ── ECPI terminal path (the existing flow) ──
-  if (!lane.terminalId) {
+  // Resolve the Alarmtech W4G payment device wired to this lane.
+  const device = lane.terminalId ? getTerminal(lane.terminalId) : null;
+  if (!device) {
     parkingEvents.emit('warning', { kind: 'exit-no-terminal', laneId: lane.id });
     return;
   }
-  const terminalRow = getTerminal(lane.terminalId);
-  if (!terminalRow || !terminalRow.enabled) {
-    parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: lane.terminalId });
+  if (!device.enabled) {
+    parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: device.id });
     return;
   }
   markInFlight();
-  startExitCharge(terminalRow, lane, session.plate, feeCents, session.entryAt, event).catch(onChargeCrash);
+  startTngExitCharge(lane, device, session.plate, feeCents, session.entryAt, event).catch(onChargeCrash);
 }
 
-/**
- * Drive the reader through the exit transaction. Mirrors the Terminal
- * Tester's "Parking Flow Test" beat-for-beat:
- *
- *   1. Snapshot terminal state — bail if socket isn't open.
- *   2. Reset reader: abortTxn(silent) → 400ms → finTxn → 400ms.
- *   3. Subscribe to result listeners BEFORE sending initTxn (matches the
- *      Tester — comment in the Tester explicitly notes some firmware can
- *      push the response within ~50ms of the init ack, so subscribing
- *      after would race and miss it).
- *   4. Send initTxn — reader displays fare + "Tap card" prompt.
- *   5. Wait up to 60s for result.
- *   6. Record outcome, emit exit-completed, finTxn cleanup.
- */
-async function startExitCharge(
-  terminalRow: PaymentTerminal,
-  lane: ParkingLane,
-  plate: string,
-  feeCents: number,
-  entryAt: string,
-  event: PlateEvent,
-) {
-  console.log(`\n[parking-flow v${BUILD_VERSION}] === ENTER startExitCharge plate=${plate} fare=${feeCents}c lane=${lane.id} term=${terminalRow.id} ===`);
-  const term = getTerminalInstance(terminalRow);
-
-  const snap = term.snapshot();
-  flog(`terminal snapshot: conn=${snap.conn} readerState=${snap.readerState} lastError=${snap.lastError}`);
-  const LIVE: Array<typeof snap.conn> = ['connected', 'initialising', 'ready', 'transacting'];
-  if (!LIVE.includes(snap.conn)) {
-    flog(`BAIL: terminal not live (conn=${snap.conn})`);
-    parkingEvents.emit('warning', {
-      kind: 'exit-terminal-offline',
-      terminalId: terminalRow.id,
-      connState: snap.conn,
-      lastError: snap.lastError,
-    });
-    exitsInFlight.delete(lane.id);
-    try { term.connect(); } catch { /* ignore */ }
-    return;
-  }
-
-  // ─── Step 1: silent close of any pending transaction ─────────────────
-  // finTxn is the only state-change command that's silent on the display
-  // (no "CANCELLED" flash, no auto-clearing showStatus timer). It closes
-  // any pending transaction so the next initCard is accepted cleanly.
-  //
-  // The long 1500ms wait is critical: empirically on V1.17C, sending
-  // initCard too quickly after finTxn results in the display flashing
-  // "Pay RM X.XX" for a split second then reverting to idle "Welcome".
-  // The reader needs time to fully process finTxn's state change and
-  // settle into idle BEFORE we send the new initCard. 400ms wasn't
-  // enough; 1500ms reliably gives the firmware time to settle.
-  flog(`STEP 1: finTxn (silent close any pending)`);
-  try {
-    term.finTxn();
-    await sleep(1500);
-  } catch (e: any) {
-    flog(`RESET FAILED: ${e?.message ?? e}`);
-    parkingEvents.emit('warning', {
-      kind: 'exit-terminal-send-failed',
-      terminalId: terminalRow.id, message: e?.message ?? String(e),
-    });
-    exitsInFlight.delete(lane.id);
-    return;
-  }
-
-  // ─── Step 3: initCard — prompt the driver to tap ─────────────────────
-  // V1.17C LPR firmware is hardcoded to reject `initTxn` with errorCode
-  // 2001/2003 regardless of preceding state (cold, after reset, after
-  // cardRead, after deinit+init+warm-up — all fail). Empirically this
-  // firmware never supports `initTxn` as a real-world command on this
-  // hardware variant.
-  //
-  // What it DOES support is the standard Malaysian parking flow used
-  // with Touch'n'Go and other auto-debit cards: when a card is tapped
-  // during `initCard`, the reader internally settles the charge against
-  // the card before returning the `cardRead` push. A cardRead with
-  // errorCode=0000 therefore means BOTH "card read successfully" AND
-  // "card debited by the reader". For declined cards the reader returns
-  // a non-zero errorCode (3001 for blacklisted/insufficient, 3000 for
-  // tap timeout) instead.
-  //
-  // So the exit flow is: prompt tap → wait for cardRead → if 0000 the
-  // session is paid; otherwise declined. Then showStatus prints the
-  // outcome on the reader's display so the driver sees confirmation
-  // (matches what the Tester ENTRY direction does for entry registration).
-  let resolved = false;
-  let resolvePush!: (v: any) => void;
-  const pushed = new Promise<any>((r) => { resolvePush = r; });
-
-  // Bonus listener: surface every reader response so the operator can see
-  // exactly what the firmware is doing during the wait window. Critical
-  // for diagnosing "prompt disappears" — if the reader silently aborted,
-  // the ack will tell us why (errorCode 2001/2002/2003/etc).
-  const onAckLog = (parsed: any) => {
-    const msg = parsed?.message;
-    const type = parsed?.type;
-    if (type !== 'ack') return;
-    if (msg === 'initCard' || msg === 'finTxn' || msg === 'abortTxn' || msg === 'initTxn') {
-      const ec = String(parsed?.body?.errorCode ?? '0000');
-      const tag = ec === '0000' ? 'OK' : `REJECTED ec=${ec}`;
-      flog(`reader ack: ${msg} → ${tag}`);
-    }
-  };
-  term.on('frame', onAckLog);
-  // Anti-replay guard: V1.17C firmware can re-emit a cached cardRead from
-  // a PREVIOUS tap on the next initCard if the prior transaction wasn't
-  // fully closed at the firmware level. That would settle a fresh session
-  // as "paid" with no real tap — operator nightmare. So:
-  //   1. Track when initCard was sent (initCardSentAt = 0 means not yet).
-  //   2. Drop any cardRead that arrives BEFORE initCard was sent (=0).
-  //   3. Drop any cardRead that arrives within `MIN_TAP_MS` of initCard
-  //      being sent — a real human tap takes >800ms (button-press latency
-  //      + EMV/TNG read + reader-to-host serialisation). Anything faster
-  //      is the reader replaying state.
-  // Suspicious frames are logged but not settled; the timeout still fires
-  // if no genuine tap follows.
-  const MIN_TAP_MS = 800;
-  let initCardSentAt = 0;
-  let lastMaskPan = '';
-  const onFrame = (parsed: any) => {
-    if (resolved) return;
-    const msg = parsed?.message;
-    if (msg !== 'cardRead') return;
-
-    const maskPan = String(parsed?.body?.maskPan ?? '');
-    const errorCode = String(parsed?.body?.errorCode ?? '');
-
-    // Guard 1: cardRead before initCard was even sent → stale, ignore.
-    if (initCardSentAt === 0) {
-      flog(`IGNORED stale cardRead (pre-init) maskPan=${maskPan} ec=${errorCode}`);
-      return;
-    }
-
-    // Guard 2: too-fast cardRead → reader replay, not a real tap.
-    const elapsed = Date.now() - initCardSentAt;
-    if (elapsed < MIN_TAP_MS) {
-      flog(`IGNORED suspicious cardRead (only ${elapsed}ms after initCard, min=${MIN_TAP_MS}ms) maskPan=${maskPan} ec=${errorCode} — reader is replaying cached state, NOT a real tap`);
-      return;
-    }
-
-    const hashPan = String(parsed?.body?.hashPan ?? '');
-
-    // Guard 2b — TXN-DATE FRESHNESS CHECK (the strongest replay defence).
-    // Each cardRead frame carries a `txnDt` field set by the reader at
-    // the moment the card was actually presented. If the firmware caches
-    // and replays an old cardRead on a later initCard, the txnDt stays
-    // pinned to the original tap time. So if txnDt is BEFORE initCard
-    // was sent (or even a few seconds before — clocks drift), the frame
-    // is provably a replay and we reject it. This works even when the
-    // cache is hours/days old, unlike a fixed-window check.
-    const txnDtStr = String(parsed?.body?.txnDt ?? '');
-    if (txnDtStr) {
-      const txnDtMs = Date.parse(txnDtStr.replace(' ', 'T'));
-      // The reader's clock may drift up to ~5 seconds from ours — allow that
-      // much slack so a tap that happens to land slightly BEFORE initCard's
-      // wall-clock isn't false-flagged. Anything more than 5s before is a
-      // genuine replay (txnDt locked to an earlier tap).
-      const REPLAY_TXNDT_SLACK_MS = 5_000;
-      if (!Number.isNaN(txnDtMs) && txnDtMs < initCardSentAt - REPLAY_TXNDT_SLACK_MS) {
-        const stalenessMs = initCardSentAt - txnDtMs;
-        flog(`IGNORED REPLAY cardRead — txnDt=${txnDtStr} is ${stalenessMs}ms BEFORE initCard was sent. Reader is replaying a cached frame, NOT a fresh tap. maskPan=${maskPan} hashPan=${hashPan}`);
-        return;
-      }
-    }
-
-    // Guard 2c — IDENTICAL txnDt as the last settled tap. If the reader
-    // pushes the EXACT same txnDt string we already accepted, this is a
-    // literal frame replay (the firmware re-emitted the cached cardRead
-    // without updating its tap-time stamp). There's no legitimate reason
-    // for two real taps to share a txnDt down to the second, so reject.
-    if (lastSettledTxnDt && txnDtStr && txnDtStr === lastSettledTxnDt) {
-      flog(`IGNORED REPLAY cardRead — txnDt ${txnDtStr} EXACTLY MATCHES the last settled tap. Firmware replayed the cached frame verbatim.`);
-      return;
-    }
-
-    // Guard 2d — same hashPan within REPLAY_WINDOW_MS (5 minutes). Catches
-    // the "card left on/near the reader" case: the firmware auto-detects
-    // the held card on each fresh initCard and generates a NEW cardRead
-    // frame with a fresh txnDt — looks legitimate but the driver never
-    // physically lifted and re-tapped. A genuine same-driver re-tap later
-    // (after the window) still goes through.
-    const sinceLastSettle = Date.now() - lastSettledAt;
-    if (
-      lastSettledHashPan &&
-      hashPan &&
-      hashPan === lastSettledHashPan &&
-      sinceLastSettle < REPLAY_WINDOW_MS
-    ) {
-      const remainingS = Math.round((REPLAY_WINDOW_MS - sinceLastSettle) / 1000);
-      flog(`IGNORED suspected replay — same hashPan as last tap ${Math.round(sinceLastSettle / 1000)}s ago. Likely the reader is still holding the previous card frame. If this is a legitimate next-driver tap, wait ${remainingS}s and tap again — window auto-clears.`);
-      return;
-    }
-
-    // Guard 3: same maskPan as the last successful tap WITHIN THE SAME
-    // initCard prompt is unusual — log it but accept (the driver might
-    // legitimately re-tap to retry after a comms blip). Cleared on each
-    // new startExitCharge so it doesn't leak across sessions.
-    if (lastMaskPan && lastMaskPan === maskPan) {
-      flog(`note: same maskPan as previous read in this session (${maskPan}) — accepting`);
-    }
-    lastMaskPan = maskPan;
-
-    flog(`cardRead received maskPan=${maskPan} errorCode=${errorCode} elapsed=${elapsed}ms — settling`);
-    resolved = true;
-    resolvePush(parsed);
-  };
-  term.on('frame', onFrame);
-  const timeoutHandle = setTimeout(() => {
-    if (resolved) return;
-    flog(`TIMEOUT after 60s — no card tap`);
-    resolved = true;
-    resolvePush(null);
-  }, 60_000);
-
-  // Now prompt the tap. Use the fare in the title so the driver sees
-  // "Pay RM XX.XX" on the reader display while tapping.
-  const fareDisplay = `Pay RM ${(feeCents / 100).toFixed(2)}`;
-  flog(`STEP 3: initCard (prompting tap) — display="${fareDisplay}"`);
-  try {
-    term.initCard({
-      fareClass: '1',
-      retrigger: '1',
-      titleTXT: fareDisplay,
-      messageTXT: 'Please tap your card',
-    });
-    initCardSentAt = Date.now();
-  } catch (e: any) {
-    flog(`initCard THREW: ${e?.message ?? e}`);
-    clearTimeout(timeoutHandle);
-    term.off('frame', onFrame);
-    term.off('frame', onAckLog);
-    parkingEvents.emit('warning', {
-      kind: 'exit-terminal-send-failed',
-      terminalId: terminalRow.id, message: e?.message ?? String(e),
-    });
-    exitsInFlight.delete(lane.id);
-    return;
-  }
-
-  // ─── Step 3b: TNG W4G race ───────────────────────────────────────────
-  // If TNG is enabled, fire a PayRequest at the W4G IO controller in parallel
-  // with the ECPI initCard. The driver can tap on either device — whichever
-  // settles first wins, the other gets cancelled. This is how multi-acquirer
-  // exits work in real Malaysian parks: ECPI for Visa/Master/credit and W4G
-  // for TNG card / e-wallet sharing the same fare prompt.
-  const settings = getSettings();
-  // The old ECPI+TNG parallel race is superseded by the explicit "Payment
-  // controller" switch (Settings): strict either/or. startExitCharge now runs
-  // ONLY when the controller is 'terminal' (ECPI), so the in-flight TNG race
-  // is disabled here — TNG has its own dedicated path (startTngExitCharge).
-  // The race wiring below is left intact behind this flag for reference.
-  const tngEnabled = false as boolean;
-  const tngOrderId = tngEnabled ? newTngOrderId() : '';
-  let tngWinner: { resolved: boolean; body?: any } = { resolved: false };
-  let tngPromise: Promise<any> | null = null;
-  if (tngEnabled) {
-    flog(`STEP 3b: PayRequest → TNG W4G @ ${settings.tngHost}:${settings.tngPort} orderId=${tngOrderId} fare=${feeCents}c`);
-    tngPromise = tngPayRequest({
-      orderId: tngOrderId,
-      payAmount: feeCents,
-      discountAmount: 0,
-      enterTime: Math.floor(Date.parse(entryAt) / 1000) || Math.floor(Date.now() / 1000),
-      payTime: Math.floor(Date.now() / 1000),
-      timeoutMs: Math.max(15_000, (settings.tngTimeoutSeconds ?? 30) * 1000),
-    }).then((body) => {
-      tngWinner = { resolved: true, body };
-      // If the ECPI side hasn't resolved yet, this wins the race — release
-      // the awaiter so we can record the TNG outcome.
-      if (!resolved) {
-        resolved = true;
-        resolvePush({ __tng: body });
-      }
-      return body;
-    }).catch((e) => {
-      flog(`TNG PayRequest rejected: ${e?.message ?? e}`);
-      return null;
-    });
-  }
-
-  // ─── Step 4: wait for the chain to complete (or timeout) ─────────────
-  const push = await pushed;
-  clearTimeout(timeoutHandle);
-  term.off('frame', onFrame);
-  term.off('frame', onAckLog);
-
-  // If TNG won the race, cancel any pending ECPI tap and translate the W4G
-  // PayResult into our { approved } shape. State="0" = success per spec.
-  let result: { approved: boolean; status: string; maskPan?: string; cardScheme?: string; via?: 'ecpi'|'tng'; tngPayTime?: number } | null = null;
-  if (push && (push as any).__tng) {
-    const tngBody = (push as any).__tng as { state: string; payType: number; cardNo: string; apprCode: string; payTime: number };
-    try { term.abortTxn('silent'); } catch { /* ignore */ }
-    const approved = tngBody.state === '0';
-    result = {
-      approved,
-      status: approved ? 'APPROVED' : `DECLINED_W4G_${tngBody.state}`,
-      maskPan: tngBody.cardNo || undefined,
-      cardScheme: payTypeToCardScheme(tngBody.payType),
-      via: 'tng',
-      tngPayTime: tngBody.payTime,
-    };
-    flog(`TNG won race — payType=${tngBody.payType} card=${tngBody.cardNo} appr=${tngBody.apprCode}`);
-  } else if (push) {
-    // ECPI cardRead settled — cancel any in-flight TNG order so the W4G
-    // device doesn't double-charge if the driver also taps it.
-    if (tngEnabled && !tngWinner.resolved) {
-      tngPayCancel(tngOrderId).catch(() => null);
-    }
-    const body = push.body ?? {};
-    const errorCode = String(body.errorCode ?? '');
-    const approved = errorCode === '0000' && !!body.maskPan;
-    result = {
-      approved,
-      status: approved ? 'APPROVED'
-        : errorCode === '3001' ? 'DECLINED'
-        : errorCode === '3000' ? 'TIMEOUT'
-        : 'DECLINED',
-      maskPan: body.maskPan as string | undefined,
-      cardScheme: body.cardScheme as string | undefined,
-      via: 'ecpi',
-    };
-  } else if (tngEnabled && !tngWinner.resolved) {
-    // ECPI timed out (60s). Give the TNG promise its remaining budget — it
-    // may still be waiting on a tap. Cancel only if it hasn't resolved by
-    // then. This block runs only when both branches are still in flight.
-    try {
-      const tngBody = await Promise.race([
-        tngPromise ?? Promise.resolve(null),
-        new Promise<null>((r) => setTimeout(() => r(null), 5_000)),
-      ]);
-      if (tngBody) {
-        const approved = tngBody.state === '0';
-        result = {
-          approved,
-          status: approved ? 'APPROVED' : `DECLINED_W4G_${tngBody.state}`,
-          maskPan: tngBody.cardNo || undefined,
-          cardScheme: payTypeToCardScheme(tngBody.payType),
-          via: 'tng',
-          tngPayTime: tngBody.payTime,
-        };
-      } else {
-        tngPayCancel(tngOrderId).catch(() => null);
-      }
-    } catch { /* ignore */ }
-  }
-
-  // ─── Step 4: record outcome ──────────────────────────────────────────
-  const inflight = exitsInFlight.get(lane.id);
-  if (!inflight) {
-    try { term.finTxn(); } catch { /* ignore */ }
-    return;
-  }
-  exitsInFlight.delete(lane.id);
-
-  if (!result) {
-    // 60s elapsed with no tap. Silent abort — using 'failed' would make
-    // the reader flash "PAYMENT CANCELED" on its LCD which confuses the
-    // next driver in the queue (they think their own transaction failed
-    // when really the previous attempt just timed out cleanly).
-    try { term.abortTxn('silent'); } catch { /* ignore */ }
-    parkingEvents.emit('warning', { kind: 'exit-timeout', sessionId: inflight.sessionId });
-    return;
-  }
-
-  const outcome = result.approved ? 'paid' : 'declined';
-  flog(`exit outcome=${outcome} maskPan=${result.maskPan ?? '-'} status=${result.status}`);
-
-  // Record the just-settled card so the next initCard's cardRead can be
-  // checked against it for replay (see Guard 2b above). We use hashPan
-  // because it's stable per-card; maskPan formatting may vary across
-  // firmware variants. Only set on APPROVED — declined attempts shouldn't
-  // count as "previously settled" for replay-detection purposes.
-  if (result.approved && push?.body?.hashPan) {
-    lastSettledHashPan = String(push.body.hashPan);
-    lastSettledTxnDt = String(push.body.txnDt ?? '');
-    lastSettledAt = Date.now();
-  }
-
-  // txnDt comes back like "yyyy-MM-dd HH:mm:ss"; convert to ISO so the SaaS
-  // can parse it the same way as exit_time. Falls back to null on garbage.
-  // TNG path: use the W4G PayTime (epoch seconds) instead of txnDt.
-  const paymentTimestamp = (() => {
-    if (result?.via === 'tng' && result.tngPayTime) {
-      return new Date(result.tngPayTime * 1000).toISOString();
-    }
-    const txnDtRaw = push?.body?.txnDt ? String(push.body.txnDt) : '';
-    if (!txnDtRaw) return null;
-    const t = Date.parse(txnDtRaw.replace(' ', 'T'));
-    return Number.isNaN(t) ? null : new Date(t).toISOString();
-  })();
-
-  recordExit(inflight.sessionId, {
-    exitAt: event.exitAtOverride ?? new Date().toISOString(),
-    exitLaneId: lane.id,
-    exitCameraId: event.cameraId,
-    exitImagePath: event.imagePath,
-    durationMinutes: inflight.durationMinutes,
-    feeCents: inflight.feeCents,
-    paymentStatus: outcome,
-    terminalTxnId: result.maskPan ?? null, // use maskPan as the txn reference
-    cardScheme: result.cardScheme ?? null,
-    paymentTimestamp,
-  });
-
-  // Lightweight post-tap cleanup. Just finTxn — close the transaction so
-  // the reader is ready for the next initCard. No abortTxn here (the txn
-  // is succeeding, not being cancelled — abortTxn would flash "Canceled"
-  // on the reader display for the next driver). No deinit/init either,
-  // it's overkill and causes the reader to hiccup on the next initCard.
-  // The cardRead-handler guards (txnDt freshness + hashPan window)
-  // catch any cache replays the firmware tries on the next transaction.
-  flog('post-tap cleanup: finTxn');
-  try { term.finTxn(); } catch { /* ignore */ }
-  await sleep(400);
-  const hhmm = (() => {
-    const d = new Date(); const p = (n: number) => String(n).padStart(2, '0');
-    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-  })();
-  try {
-    if (result.approved) {
-      const title = result.via === 'tng' ? 'Paid · TNG' : 'Paid · TQ';
-      term.showStatus({
-        titleTXT: title,
-        messageTXT: `${inflight.plate} RM${(inflight.feeCents / 100).toFixed(2)} ${hhmm}`,
-        sound: '01', image: '04',
-      });
-    } else {
-      term.showStatus({
-        titleTXT: 'Failed',
-        messageTXT: `${inflight.plate} ${result.status} ${hhmm}`,
-        sound: '02', image: '08',
-      });
-    }
-  } catch { /* showStatus is best-effort */ }
-
-  parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome });
-}
 
 /**
- * TNG-only exit payment (Settings → Payment controller = "TNG"). Fires a single
- * W4G PayRequest and settles the session from the PayResult — no ECPI terminal
- * involved. Deliberately reuses the SAME tngPayRequest() call and recordExit()
- * write the rest of the flow uses (identical to how the old race translated a
- * W4G PayResult); only the standalone orchestration is new. The gate opens via
- * the existing 'exit-completed' listener on a 'paid' outcome, exactly like the
- * ECPI path — a declined/timed-out charge leaves the barrier closed.
+ * Exit payment via the lane's Alarmtech W4G device. Fires a single PayRequest
+ * at that device (host:port) and settles the session from its PayResult. The
+ * gate opens via the existing 'exit-completed' listener on a 'paid' outcome —
+ * a declined/timed-out charge leaves the barrier closed for operator retrigger.
  */
 async function startTngExitCharge(
   lane: ParkingLane,
+  device: PaymentTerminal,
   plate: string,
   feeCents: number,
   entryAt: string,
   event: PlateEvent,
 ) {
-  const settings = getSettings();
   const orderId = newTngOrderId();
-  flog(`TNG-only exit: PayRequest → ${settings.tngHost}:${settings.tngPort} orderId=${orderId} plate=${plate} fare=${feeCents}c`);
+  flog(`W4G exit: PayRequest → ${device.name} @ ${device.host}:${device.port} orderId=${orderId} plate=${plate} fare=${feeCents}c`);
 
   let body: { state: string; payType: number; cardNo: string; apprCode: string; payTime: number } | null = null;
   try {
@@ -775,10 +322,12 @@ async function startTngExitCharge(
       discountAmount: 0,
       enterTime: Math.floor(Date.parse(entryAt) / 1000) || Math.floor(Date.now() / 1000),
       payTime: Math.floor(Date.now() / 1000),
-      timeoutMs: Math.max(15_000, (settings.tngTimeoutSeconds ?? 30) * 1000),
+      timeoutMs: Math.max(15_000, (device.timeoutSeconds ?? 30) * 1000),
+      host: device.host,
+      port: device.port,
     }) as any;
   } catch (e: any) {
-    flog(`TNG PayRequest failed/timeout: ${e?.message ?? e}`);
+    flog(`W4G PayRequest failed/timeout: ${e?.message ?? e}`);
   }
 
   const inflight = exitsInFlight.get(lane.id);
@@ -1192,11 +741,10 @@ export function retriggerSessionExit(sessionId: number, laneOverride?: number | 
 
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'lane_not_found' };
-  // A terminal is only required when the ECPI terminal is the payment
-  // controller. In TNG mode the fee is collected by the W4G controller, so an
-  // exit lane legitimately has no terminal wired.
-  if (getSettings().paymentController !== 'tng' && !lane.terminalId) {
-    return { ok: false, error: `lane "${lane.name}" has no payment terminal wired — attach one in Lanes` };
+  // The fee is collected by the lane's Alarmtech W4G device, so a retrigger
+  // needs one wired — otherwise there's nothing to charge on.
+  if (!lane.terminalId) {
+    return { ok: false, error: `lane "${lane.name}" has no payment device wired — attach one in Lanes` };
   }
 
   // Pick any enabled camera on that lane so laneForCamera() can resolve it

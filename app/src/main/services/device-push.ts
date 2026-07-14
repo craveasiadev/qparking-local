@@ -51,11 +51,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
     name: terminal.name,
     host: terminal.host,
     port: terminal.port,
-    plaza_id: terminal.plazaId,
-    lane_id_str: terminal.laneId,
-    lane_type: terminal.laneType,
-    mode: terminal.mode,
-    operation_mode: terminal.operationMode,
+    timeout_seconds: terminal.timeoutSeconds,
     enabled: terminal.enabled,
   });
 }

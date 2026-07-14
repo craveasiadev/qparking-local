@@ -175,7 +175,7 @@ export function Lanes() {
                     {laneCams.length === 0 ? 'no camera' : laneCams.length === 1 ? laneCams[0].name : `${laneCams.length} cameras`}
                   </Chip>
                   {showPlan && <Chip icon={Gauge}>plan: {s?.policyName ?? 'site default'}</Chip>}
-                  {showTerm && <Chip icon={CreditCard} muted={!t}>terminal: {t?.name ?? 'none'}</Chip>}
+                  {showTerm && <Chip icon={CreditCard} muted={!t}>device: {t?.name ?? 'none'}</Chip>}
                   {l.gateRelayAddress && <Chip icon={Cpu} mono>{l.gateRelayAddress}</Chip>}
                 </div>
               </div>
@@ -248,7 +248,7 @@ export function Lanes() {
                 {cameras.length === 0 ? (
                   <p className="text-[11px] text-amber-600">No cameras yet — add one on the <strong>Cameras</strong> page first. A lane needs an LPR camera to do anything.</p>
                 ) : (
-                  <p className="text-[11px] text-gray-500">The camera's direction decides the rest: <strong>entry</strong> → set the rate plan; <strong>exit</strong> → set the payment terminal; <strong>dual</strong> → both.</p>
+                  <p className="text-[11px] text-gray-500">The camera's direction decides the rest: <strong>entry</strong> → set the rate plan; <strong>exit</strong> → set the payment device; <strong>dual</strong> → both.</p>
                 )}
               </div>
               {showRatePlan && (
@@ -270,7 +270,7 @@ export function Lanes() {
                 </Field>
               )}
               {showTerminal && (
-                <Field label="Payment terminal">
+                <Field label="Payment device (Alarmtech W4G)">
                   <select className="input" value={editing.terminalId ?? ''} onChange={(e) => setEditing({ ...editing, terminalId: e.target.value ? Number(e.target.value) : null })}>
                     <option value="">— none —</option>
                     {terminals.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}

@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import {
   Activity, Car, CreditCard, Camera, MonitorPlay, Bolt, Cloud, CloudOff, RefreshCw,
-  Loader2, CheckCircle2, AlertTriangle, DollarSign, Layers, LogOut, Wifi, WifiOff,
+  Loader2, CheckCircle2, AlertTriangle, DollarSign, Layers, LogOut,
 } from 'lucide-react';
-import type { ParkingSession, PaymentTerminal, LprCamera, TerminalStatus, TerminalConnState, SyncStatus } from '@shared/types';
+import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../hooks/useCurrentSite';
 
@@ -12,7 +12,6 @@ export function Dashboard() {
   const [recent, setRecent] = useState<ParkingSession[]>([]);
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
-  const [statuses, setStatuses] = useState<Record<number, TerminalStatus>>({});
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   // Shared with the global not-connected banner — gates the sync panel below so
@@ -28,12 +27,6 @@ export function Dashboard() {
       window.bridge.getSyncStatus(),
     ]);
     setOpen(o); setRecent(r); setTerminals(t); setCameras(c); setSync(syncStatus);
-    for (const term of t) {
-      try {
-        const status = await window.bridge.getTerminalStatus(term.id);
-        setStatuses((s) => ({ ...s, [term.id]: status }));
-      } catch { /* ignore */ }
-    }
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -54,19 +47,16 @@ export function Dashboard() {
   });
 
   useEffect(() => {
-    const off1 = window.bridge.onEvent('terminal-status', (p: any) => {
-      setStatuses((s) => ({ ...s, [p.terminalId]: p }));
-    });
     const off2 = window.bridge.onEvent('session', (p: any) => {
       if (p.kind === 'entry' || p.kind === 'exit-completed') void refresh();
     });
     const off3 = window.bridge.onEvent('sync-status', (p: any) => {
       setSync(p as SyncStatus);
     });
-    return () => { off1(); off2(); off3(); };
+    return () => { off2(); off3(); };
   }, []);
 
-  const onlineTerminals = Object.values(statuses).filter((s) => s.conn === 'ready' || s.conn === 'connected' || s.conn === 'transacting').length;
+  const enabledDevices = terminals.filter((t) => t.enabled).length;
   const today = new Date().toISOString().slice(0, 10);
   const entriesToday = recent.filter((s) => s.entryAt.slice(0, 10) === today).length;
 
@@ -128,8 +118,8 @@ export function Dashboard() {
         <Tile icon={DollarSign} label="Revenue today" value={formatCents(revenueCents)}
           sub={site ? 'from qparking SaaS' : 'collected locally'} />
         <Tile icon={Activity} label="Entries today" value={String(entriesToday)} sub="new sessions today" />
-        <Tile icon={CreditCard} label="Terminals online" value={`${onlineTerminals}/${terminals.length}`} sub="connected + ready"
-          tone={terminals.length === 0 ? 'neutral' : onlineTerminals === terminals.length ? 'ok' : 'warn'} />
+        <Tile icon={CreditCard} label="Payment devices" value={`${enabledDevices}/${terminals.length}`} sub="enabled"
+          tone={terminals.length === 0 ? 'neutral' : enabledDevices === terminals.length ? 'ok' : 'warn'} />
       </div>
 
       {/* Occupancy bar — only meaningful when the site profile (and its space
@@ -216,25 +206,24 @@ export function Dashboard() {
       <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
         <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold flex items-center gap-2"><CreditCard size={15} className="text-gray-400" /> Payment terminals</h2>
-            <span className="text-[10px] uppercase tracking-widest text-gray-400">{onlineTerminals}/{terminals.length} online</span>
+            <h2 className="text-sm font-semibold flex items-center gap-2"><CreditCard size={15} className="text-gray-400" /> Payment devices</h2>
+            <span className="text-[10px] uppercase tracking-widest text-gray-400">{enabledDevices}/{terminals.length} enabled</span>
           </header>
           {terminals.length === 0 ? (
-            <div className="p-6 text-sm text-gray-500 text-center">No terminals configured.</div>
+            <div className="p-6 text-sm text-gray-500 text-center">No payment devices configured.</div>
           ) : (
             <ul className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
-              {terminals.map((t) => {
-                const st = statuses[t.id];
-                return (
-                  <li key={t.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
-                    <div className="min-w-0">
-                      <div className="font-semibold truncate">{t.name}</div>
-                      <div className="text-xs text-gray-500 truncate font-mono">{t.host}:{t.port}</div>
-                    </div>
-                    <ConnPill conn={st?.conn} enabled={t.enabled} />
-                  </li>
-                );
-              })}
+              {terminals.map((t) => (
+                <li key={t.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{t.name}</div>
+                    <div className="text-xs text-gray-500 truncate font-mono">{t.host}:{t.port}</div>
+                  </div>
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${t.enabled ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>
+                    {t.enabled ? 'enabled' : 'disabled'}
+                  </span>
+                </li>
+              ))}
             </ul>
           )}
         </section>
@@ -363,26 +352,6 @@ function PaymentBadge({ status }: { status: ParkingSession['paymentStatus'] }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${styles[status]}`}>
       {label}
-    </span>
-  );
-}
-
-/** Terminal connection pill, keyed to the live TerminalConnState. */
-function ConnPill({ conn, enabled }: { conn: TerminalConnState | undefined; enabled: boolean }) {
-  if (!enabled) {
-    return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide bg-gray-100 text-gray-500 border border-gray-200">disabled</span>;
-  }
-  const online = conn === 'ready' || conn === 'connected' || conn === 'transacting';
-  const pending = conn === 'connecting' || conn === 'initialising';
-  const bad = conn === 'error';
-  const cls = online ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-    : pending ? 'bg-amber-50 text-amber-700 border-amber-200'
-    : bad ? 'bg-red-50 text-red-700 border-red-200'
-    : 'bg-gray-100 text-gray-500 border-gray-200';
-  const Icon = online ? Wifi : bad ? WifiOff : pending ? Loader2 : WifiOff;
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${cls}`}>
-      <Icon size={11} className={pending ? 'animate-spin' : ''} /> {conn ?? 'disconnected'}
     </span>
   );
 }

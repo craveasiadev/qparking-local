@@ -24,8 +24,55 @@ export function getDb(): Database.Database {
   db.pragma('foreign_keys = OFF');
   migrateScopesToRatePolicies(db);
   migrateActivePassesToSeasonPasses(db);
+  migrateTerminalsToW4g(db);
   applySchema(db);
   return db;
+}
+
+/**
+ * 2026-07-14 payment cutover: the Coherent/ECPI reader model was replaced by
+ * Alarmtech Touch'n'Go W4G payment devices. Detect the old ECPI `terminals`
+ * schema (by its `secret_key` column), drop it, and recreate the table in the
+ * W4G device shape. The single device the operator had configured in Settings
+ * (tngHost/tngPort/tngTimeoutSeconds) is preserved as the first row, and the
+ * stale lane→terminal links (which pointed at ECPI ids) are nulled so the
+ * operator re-assigns each lane to a device. Guarded + one-shot: once the table
+ * has the new shape (no `secret_key`), this no-ops.
+ */
+function migrateTerminalsToW4g(db: Database.Database): void {
+  let isEcpi = false;
+  try {
+    const cols = db.prepare(`PRAGMA table_info(terminals)`).all() as Array<{ name: string }>;
+    if (cols.length === 0) return; // table absent → applySchema creates the W4G one
+    isEcpi = cols.some((c) => c.name === 'secret_key');
+  } catch { return; }
+  if (!isEcpi) return;
+
+  // Preserve the currently-configured W4G device from settings before the drop.
+  const readSetting = (k: string): string | undefined =>
+    (db.prepare(`SELECT value FROM settings WHERE key = ?`).get(k) as { value?: string } | undefined)?.value;
+  const seedHost = readSetting('tngHost') ?? '';
+  const seedPort = Number(readSetting('tngPort') ?? 80) || 80;
+  const seedTimeout = Number(readSetting('tngTimeoutSeconds') ?? 30) || 30;
+
+  db.exec('DROP TABLE IF EXISTS terminals');
+  try { db.exec('UPDATE lanes SET terminal_id = NULL'); } catch { /* lanes may not exist yet */ }
+  db.exec(`
+    CREATE TABLE terminals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      host TEXT NOT NULL,
+      port INTEGER NOT NULL DEFAULT 80,
+      timeout_seconds INTEGER NOT NULL DEFAULT 30,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  if (seedHost) {
+    db.prepare(`INSERT INTO terminals (name, host, port, timeout_seconds, enabled) VALUES (?,?,?,?,1)`)
+      .run('Alarmtech (migrated)', seedHost, seedPort, seedTimeout);
+  }
 }
 
 /**
@@ -89,13 +136,8 @@ function applySchema(db: Database.Database) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       host TEXT NOT NULL,
-      port INTEGER NOT NULL DEFAULT 5000,
-      secret_key TEXT NOT NULL,
-      plaza_id TEXT NOT NULL,
-      lane_id TEXT NOT NULL,
-      lane_type TEXT NOT NULL CHECK (lane_type IN ('entry','exit','open','dual')),
-      mode TEXT NOT NULL CHECK (mode IN ('lpr','kiosk')) DEFAULT 'kiosk',
-      operation_mode TEXT NOT NULL CHECK (operation_mode IN ('maintenance','live','not_in_use')) DEFAULT 'live',
+      port INTEGER NOT NULL DEFAULT 80,
+      timeout_seconds INTEGER NOT NULL DEFAULT 30,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -417,11 +459,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   faceGateEnabled: true,
   minimumChargeCents: 0,
   devMode: false,
-  paymentController: 'terminal',
+  paymentController: 'tng',
   tngEnabled: false,
   tngHost: '192.168.1.105',
   tngPort: 80,
   tngCallbackPort: 80,
+  tngCallbackPorts: '80',
   tngTimeoutSeconds: 30,
 };
 
@@ -460,9 +503,8 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
 
 function rowToTerminal(row: any): PaymentTerminal {
   return {
-    id: row.id, name: row.name, host: row.host, port: row.port, secretKey: row.secret_key,
-    plazaId: row.plaza_id, laneId: row.lane_id, laneType: row.lane_type, mode: row.mode,
-    operationMode: row.operation_mode, enabled: !!row.enabled,
+    id: row.id, name: row.name, host: row.host, port: row.port,
+    timeoutSeconds: row.timeout_seconds, enabled: !!row.enabled,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
@@ -479,29 +521,17 @@ export function getTerminal(id: number): PaymentTerminal | null {
 export function upsertTerminal(terminal: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> & { id?: number }): PaymentTerminal {
   const db = getDb();
   if (terminal.id) {
-    db.prepare(`UPDATE terminals SET name=?, host=?, port=?, secret_key=?, plaza_id=?, lane_id=?, lane_type=?, mode=?, operation_mode=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(terminal.name, terminal.host, terminal.port, terminal.secretKey, terminal.plazaId, terminal.laneId, terminal.laneType, terminal.mode, terminal.operationMode, terminal.enabled ? 1 : 0, terminal.id);
+    db.prepare(`UPDATE terminals SET name=?, host=?, port=?, timeout_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(terminal.name, terminal.host, terminal.port, terminal.timeoutSeconds, terminal.enabled ? 1 : 0, terminal.id);
     return getTerminal(terminal.id)!;
   }
-  const info = db.prepare(`INSERT INTO terminals (name, host, port, secret_key, plaza_id, lane_id, lane_type, mode, operation_mode, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(terminal.name, terminal.host, terminal.port, terminal.secretKey, terminal.plazaId, terminal.laneId, terminal.laneType, terminal.mode, terminal.operationMode, terminal.enabled ? 1 : 0);
+  const info = db.prepare(`INSERT INTO terminals (name, host, port, timeout_seconds, enabled) VALUES (?,?,?,?,?)`)
+    .run(terminal.name, terminal.host, terminal.port, terminal.timeoutSeconds, terminal.enabled ? 1 : 0);
   return getTerminal(Number(info.lastInsertRowid))!;
 }
 
 export function deleteTerminal(id: number) {
   getDb().prepare('DELETE FROM terminals WHERE id = ?').run(id);
-}
-
-/**
- * Sync a terminal's ECPI `laneType` from the lane it's wired to. The lane's
- * direction is now the single source of truth — the terminal form no longer
- * asks the operator to re-enter it. entry→'entry', exit→'exit'; both are
- * valid values for the wire-level `laneType` the reader expects at
- * initTerminal (see ecpi-terminal.ts:laneTypeCode).
- */
-export function setTerminalLaneType(terminalId: number, laneType: PaymentTerminal['laneType']): void {
-  getDb().prepare(`UPDATE terminals SET lane_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-    .run(laneType, terminalId);
 }
 
 export function logTerminal(terminalId: number, direction: 'send'|'recv'|'error'|'info', message: string, payload?: unknown) {
@@ -622,8 +652,7 @@ export function setLaneCameras(laneId: number, cameraIds: number[]): void {
  *   - all exit-facing                   → 'exit'
  *   - any dual cam, OR both entry+exit  → 'dual'
  *   - no cameras yet                    → null (caller decides the fallback)
- * The three non-null results map 1:1 onto the ECPI terminal laneType, so this
- * also feeds setTerminalLaneType for the terminal wired to the lane.
+ * Used for the lane's displayed direction and the cloud equipment push.
  */
 export function deriveLaneDirection(laneId: number): 'entry' | 'exit' | 'dual' | null {
   const rows = getDb().prepare('SELECT DISTINCT direction FROM cameras WHERE lane_id = ?').all(laneId) as { direction: string }[];

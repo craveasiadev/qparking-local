@@ -11,33 +11,11 @@ import type { BridgeApi } from '../shared/types';
 // in BridgeApi (or vice versa) and this file stops compiling. That same
 // interface is what gives every React page autocomplete on window.bridge.
 const api: BridgeApi = {
-  // terminals — config CRUD + connection lifecycle
+  // terminals — Alarmtech W4G payment devices (config CRUD + reachability test)
   listTerminals: () => ipcRenderer.invoke('terminals:list'),
   saveTerminal: (input: unknown) => ipcRenderer.invoke('terminals:save', input),
   deleteTerminal: (id: number) => ipcRenderer.invoke('terminals:delete', id),
-  getTerminalStatus: (id: number) => ipcRenderer.invoke('terminals:status', id),
-  terminalConnect: (id: number) => ipcRenderer.invoke('terminals:connect', id),
   pingTerminalHost: (input: { host: string; port: number }) => ipcRenderer.invoke('terminals:ping-host', input),
-  terminalDisconnect: (id: number) => ipcRenderer.invoke('terminals:disconnect', id),
-
-  // terminals — full ECPI API surface (used by the TerminalTester modal)
-  terminalInitTerminal: (id: number, op?: '0'|'1'|'2') => ipcRenderer.invoke('terminals:initTerminal', id, op),
-  terminalDeinitTerminal: (id: number) => ipcRenderer.invoke('terminals:deinitTerminal', id),
-  terminalGetStatus: (id: number) => ipcRenderer.invoke('terminals:getStatus', id),
-  terminalInitCard: (id: number, opts?: { fareClass?: string; retrigger?: '0'|'1'; titleTXT?: string; messageTXT?: string }) =>
-    ipcRenderer.invoke('terminals:initCard', id, opts),
-  terminalInitEntry: (id: number, opts?: { mode?: '0'|'1'|'2'; fareAmount?: number; fareClass?: string }) =>
-    ipcRenderer.invoke('terminals:initEntry', id, opts),
-  terminalInitExit: (id: number, opts?: { mode?: '0'|'1'|'2' }) => ipcRenderer.invoke('terminals:initExit', id, opts),
-  terminalInitTxn: (id: number, opts: { fareAmount: number; fareClass?: string; entryDt?: string; vehicleNo?: string; entryLane?: string; gstAmount?: number; pAmount?: number }) =>
-    ipcRenderer.invoke('terminals:initTxn', id, opts),
-  terminalProceedEntry: (id: number, opts?: { payFlag?: -1|0|1 }) => ipcRenderer.invoke('terminals:proceedEntry', id, opts),
-  terminalProceedExit: (id: number, opts: { fareAmount: number; fareClass?: string; fallTimeout?: number; payFlag?: -1|0|1 }) =>
-    ipcRenderer.invoke('terminals:proceedExit', id, opts),
-  terminalFinTxn: (id: number) => ipcRenderer.invoke('terminals:finTxn', id),
-  terminalAbort: (id: number, reason?: 'success'|'failed'|'silent') => ipcRenderer.invoke('terminals:abort', id, reason),
-  terminalShowStatus: (id: number, opts: { titleTXT: string; messageTXT: string; sound?: '01'|'02'|'FF'; image?: '04'|'08' }) =>
-    ipcRenderer.invoke('terminals:showStatus', id, opts),
 
   // cameras
   listCameras: () => ipcRenderer.invoke('cameras:list'),
@@ -148,11 +126,12 @@ const api: BridgeApi = {
   tngStatus: () => ipcRenderer.invoke('tng:status'),
   tngTestPayRequest: (opts?: {
     payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;
+    host?: string; port?: number;
   }) => ipcRenderer.invoke('tng:test-pay-request', opts),
-  tngTestPayCancel: (orderId: string) => ipcRenderer.invoke('tng:test-pay-cancel', orderId),
+  tngTestPayCancel: (orderId: string, target?: { host?: string; port?: number }) => ipcRenderer.invoke('tng:test-pay-cancel', orderId, target),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'terminal-status'|'session'|'log'|'plate-detected'|'gate-state'|'sync-status'|'parking-flow-log'|'app-update-progress', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'session'|'log'|'plate-detected'|'gate-state'|'sync-status'|'parking-flow-log'|'app-update-progress', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };

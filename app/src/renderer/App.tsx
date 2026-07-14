@@ -218,7 +218,7 @@ export function App() {
           {page === 'dashboard' && <Dashboard />}
           {page === 'live' && <LiveDisplay />}
           {page === 'cameras' && <Cameras />}
-          {page === 'terminals' && <Terminals />}
+          {page === 'terminals' && <Terminals devMode={devMode} />}
           {page === 'lanes' && <Lanes />}
           {page === 'sessions' && <Sessions devMode={devMode} />}
           {page === 'parking-spaces' && <ParkingSpaces />}

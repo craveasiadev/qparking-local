@@ -178,19 +178,30 @@ function buildListenerHandler(): http.RequestListener {
 
 // ─── inbound callback server ────────────────────────────────────────────
 
+/** Parse "80, 120, 240" → [80, 120, 240] — valid 1–65535, deduped, order kept. */
+function parseCallbackPorts(raw: string): number[] {
+  const out: number[] = [];
+  for (const part of String(raw ?? '').split(',')) {
+    const n = Number(part.trim());
+    if (Number.isInteger(n) && n >= 1 && n <= 65535 && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
 /**
- * Bind the PayResult listener on every port we want to be reachable on.
- * Always tries:
- *   - The operator-configured `tngCallbackPort` (default 80)
- *   - Port 80 (because the device firmware hardcodes that for callbacks)
- * If either is already in use, we log a clear error and continue with the
- * one that bound — so a port-80 conflict (IIS, Apache) doesn't break the
- * whole feature.
+ * Bind the PayResult listener on EXACTLY the operator-configured ports
+ * (settings.tngCallbackPorts, e.g. "80, 120, 240"). No implicit port 80 — if
+ * the device needs 80, include it in the list. Falls back to the legacy single
+ * `tngCallbackPort` (or 80) only when the list is blank. A port already in use
+ * is logged and skipped so one conflict doesn't break the others.
  */
-export function startW4gServer(primaryPort: number): void {
+export function startW4gServer(): void {
   stopW4gServer();
 
-  const ports = new Set<number>([primaryPort, DEVICE_HARDCODED_CALLBACK_PORT]);
+  const s = getSettings();
+  const list = parseCallbackPorts(s.tngCallbackPorts);
+  const ports = list.length > 0 ? list : [s.tngCallbackPort || DEVICE_HARDCODED_CALLBACK_PORT];
+  const alternate = ports.find((p) => p !== DEVICE_HARDCODED_CALLBACK_PORT);
   for (const port of ports) {
     const srv = http.createServer(buildListenerHandler());
     srv.listen(port, '0.0.0.0', () => {
@@ -207,8 +218,8 @@ export function startW4gServer(primaryPort: number): void {
       const isPort80 = port === DEVICE_HARDCODED_CALLBACK_PORT;
       const hint = e.code === 'EADDRINUSE'
         ? (isPort80
-            ? ` Another service (IIS, Apache, Skype, etc.) is bound to port 80 — stop it, or set the device's SERVER PORT to ${primaryPort} via the DebugTool.`
-            : ` Pick a different port in Settings → Touch'n'Go.`)
+            ? ` Another service (IIS, Apache, Skype, etc.) is bound to port 80 — stop it, or drop 80 from the callback ports and point the device at ${alternate ?? 'another configured port'}.`
+            : ` Pick a different port in the callback-ports list.`)
         : '';
       w4gLog('error', `Listener failed to bind 0.0.0.0:${port}: ${e.message}.${hint}`, { code: e.code, port });
     });
@@ -315,8 +326,15 @@ export function payRequest(opts: {
   enterTime?: number;
   payTime?: number;
   timeoutMs?: number;
+  /** Target W4G device. Defaults to the legacy single device in settings
+   *  (used by the Settings test panel); the parking-flow passes the lane's
+   *  own device so each exit lane charges its own box. */
+  host?: string;
+  port?: number;
 }): Promise<PayResultBody> {
   const s = getSettings();
+  const host = opts.host ?? s.tngHost;
+  const port = opts.port ?? s.tngPort;
   const orderId = (opts.orderId ?? newOrderId()).slice(0, 32);
   const payAmount = Math.max(0, Math.round(opts.payAmount));
   const discountAmount = Math.max(0, Math.round(opts.discountAmount ?? 0));
@@ -353,24 +371,24 @@ export function payRequest(opts: {
     pending.timer = setTimeout(() => {
       if (!pendingByOrderId.has(orderId)) return;
       pendingByOrderId.delete(orderId);
-      w4gLog('error', `PayRequest TIMEOUT after ${timeoutMs}ms — no PayResult callback received from device. Check that the device's PayResult URL points at http://<this-host>:${getSettings().tngCallbackPort}/w4g/PayResult`, { orderId, timeoutMs });
-      // Fire-and-forget cancel so the device doesn't keep holding the
-      // card for the full reader-side timeout.
-      payCancel(orderId).catch(() => null);
+      w4gLog('error', `PayRequest TIMEOUT after ${timeoutMs}ms — no PayResult callback received from device. Check that the device's PayResult URL points at http://<this-host>:${activePorts[0] ?? getSettings().tngCallbackPort}/w4g/PayResult`, { orderId, timeoutMs });
+      // Fire-and-forget cancel (against the SAME device) so it doesn't keep
+      // holding the card for the full reader-side timeout.
+      payCancel(orderId, { host, port }).catch(() => null);
       reject(new Error('w4g_timeout'));
     }, timeoutMs);
 
     // Log the OUTBOUND request BEFORE firing it — that way if the HTTP
     // call hangs or throws, the operator can still see what was about to
     // be sent (amount, timestamps, target URL).
-    const targetUrl = `http://${s.tngHost}:${s.tngPort}/w4g/PayRequest`;
+    const targetUrl = `http://${host}:${port}/w4g/PayRequest`;
     w4gLog(
       'send',
       `PayRequest → ${targetUrl} orderId=${orderId} amount=${fmtCents(payAmount)} discount=${fmtCents(discountAmount)} enterTime=${fmtEpoch(enterTime)} payTime=${fmtEpoch(payTime)} timeout=${timeoutMs}ms · body=${spacedJson(body)}`,
       body,
     );
 
-    httpPost('/w4g/PayRequest', body)
+    httpPost('/w4g/PayRequest', body, { host, port })
       .then((deviceAck) => {
         const ok = deviceAck.state === 0;
         w4gLog(
@@ -404,15 +422,17 @@ export function payRequest(opts: {
  * pending promise is rejected immediately so the parking-flow can stop
  * waiting on it.
  */
-export async function payCancel(orderId: string): Promise<{ state: number; orderId: string }> {
+export async function payCancel(orderId: string, device?: { host?: string; port?: number }): Promise<{ state: number; orderId: string }> {
   const s = getSettings();
+  const host = device?.host ?? s.tngHost;
+  const port = device?.port ?? s.tngPort;
   const pending = pendingByOrderId.get(orderId);
   if (pending) {
     pendingByOrderId.delete(orderId);
     if (pending.timer) clearTimeout(pending.timer);
     pending.reject(new Error('w4g_cancelled'));
   }
-  const targetUrl = `http://${s.tngHost}:${s.tngPort}/w4g/PayCancel`;
+  const targetUrl = `http://${host}:${port}/w4g/PayCancel`;
   const body = { OrderId: orderId };
   w4gLog(
     'send',
@@ -420,7 +440,7 @@ export async function payCancel(orderId: string): Promise<{ state: number; order
     body,
   );
   try {
-    const ack = await httpPost('/w4g/PayCancel', body);
+    const ack = await httpPost('/w4g/PayCancel', body, { host, port });
     w4gLog(
       'recv',
       `PayCancel ack ← state=${decodeState(ack.state)} orderId=${ack.orderId}`,
@@ -475,15 +495,17 @@ function spacedJson(obj: Record<string, unknown>): string {
   return `{${parts.join(', ')}}`;
 }
 
-function httpPost(pathname: string, body: Record<string, unknown>): Promise<DeviceAck> {
+function httpPost(pathname: string, body: Record<string, unknown>, device?: { host: string; port: number }): Promise<DeviceAck> {
   const s = getSettings();
+  const host = device?.host ?? s.tngHost;
+  const port = device?.port ?? s.tngPort;
   const json = spacedJson(body);
   // 15s gives slow embedded HTTP stacks more room to respond. The earlier
   // 8s was tight enough that legitimate slow firmwares looked like outright
   // failures. Per-transaction overall budget is still capped by
   // tngTimeoutSeconds (default 30s) — this only bounds the SEND leg.
   const TIMEOUT_MS = 15_000;
-  const target = `http://${s.tngHost}:${s.tngPort}${pathname}`;
+  const target = `http://${host}:${port}${pathname}`;
   return new Promise<DeviceAck>((resolve, reject) => {
     const start = Date.now();
     const stage = (label: string, extra?: unknown) => {
@@ -492,8 +514,8 @@ function httpPost(pathname: string, body: Record<string, unknown>): Promise<Devi
     };
 
     const req = http.request({
-      host: s.tngHost,
-      port: s.tngPort,
+      host,
+      port,
       method: 'POST',
       path: pathname,
       timeout: TIMEOUT_MS,
@@ -586,9 +608,8 @@ export function loopbackPayResult(opts: {
   if (!s.tngEnabled || activePorts.length === 0) {
     return Promise.resolve({ ok: false, error: 'listener_not_running — enable TNG and save settings first' });
   }
-  // Loopback prefers the configured port; falls back to whichever port is
-  // actually listening if the configured one didn't bind.
-  const loopbackPort = activePorts.includes(s.tngCallbackPort) ? s.tngCallbackPort : activePorts[0];
+  // Loopback to the first port the listener actually bound.
+  const loopbackPort = activePorts[0];
   const payload = {
     State: opts.state ?? '0',
     OrderId: opts.orderId ?? `LOOPBACK${Math.floor(Date.now() / 1000)}`,

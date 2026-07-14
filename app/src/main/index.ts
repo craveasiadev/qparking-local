@@ -82,9 +82,9 @@ function migrateUserData() {
 }
 import {
   getDb, getSettings, saveSettings,
-  listTerminals, getTerminal, upsertTerminal, deleteTerminal,
+  listTerminals, upsertTerminal, deleteTerminal,
   listCameras, upsertCamera, deleteCamera,
-  listLanes, upsertLane, deleteLane, getLane, setLaneCameras, setTerminalLaneType, deriveLaneDirection,
+  listLanes, upsertLane, deleteLane, getLane, setLaneCameras,
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
@@ -93,9 +93,6 @@ import {
   getCurrentSite,
 } from './services/db';
 import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
-import {
-  getTerminalInstance, disposeTerminalInstance, listTerminalInstances,
-} from './services/ecpi-terminal';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
@@ -212,7 +209,7 @@ app.whenReady().then(async () => {
   // W4G PayResult callback listener — only start when the operator has
   // enabled the TNG integration. Toggling it on/off in Settings restarts
   // it via the settings:save handler below.
-  if (settings.tngEnabled) startW4gServer(settings.tngCallbackPort);
+  if (settings.tngEnabled) startW4gServer();
   // First-time equipment registry mirror — fire and forget so a slow WAN
   // doesn't block boot. Order matters: lanes + terminals first so each
   // camera's lane_external_id link resolves on its very first push.
@@ -228,11 +225,6 @@ app.whenReady().then(async () => {
 
   // Stream parking + lpr events to renderer.
   wireRendererEvents();
-
-  // Auto-reconnect enabled terminals on boot.
-  for (const t of listTerminals().filter((t) => t.enabled)) {
-    bootTerminal(t.id).catch(() => null);
-  }
 
   createWindow();
   createTray();
@@ -287,27 +279,6 @@ function createTray() {
     ]));
     tray.on('double-click', showWindow);
   } catch { /* tray fails on some Linux DEs — non-fatal */ }
-}
-
-// ─── per-terminal wiring ───────────────────────────────────────────────────
-
-const terminalWired = new Set<number>();
-
-async function bootTerminal(id: number) {
-  const row = getTerminal(id);
-  if (!row) return;
-  const inst = getTerminalInstance(row);
-  if (!terminalWired.has(id)) {
-    inst.on('status', (s) => sendToRenderer('terminal-status', s));
-    inst.on('log', (entry) => sendToRenderer('log', { terminalId: id, ...entry }));
-    terminalWired.add(id);
-  }
-  inst.connect();
-}
-
-function shutdownTerminal(id: number) {
-  disposeTerminalInstance(id);
-  terminalWired.delete(id);
 }
 
 // ─── renderer event fan-out ────────────────────────────────────────────────
@@ -435,6 +406,9 @@ function sendToRenderer(channel: string, payload: unknown) {
 
 // ─── IPC handlers (the bridge surface) ─────────────────────────────────────
 
+// Payment terminals = Alarmtech W4G devices. CRUD only — the device is driven
+// by the parking-flow (PayRequest) and the W4G callback server; there's no
+// per-command console like the old ECPI reader had.
 ipcMain.handle('terminals:list', () => listTerminals());
 ipcMain.handle('terminals:save', (_e, input) => {
   const saved = upsertTerminal(input);
@@ -442,39 +416,9 @@ ipcMain.handle('terminals:save', (_e, input) => {
   pushTerminal(saved.id).catch(() => null);
   return saved;
 });
-ipcMain.handle('terminals:delete', (_e, id: number) => { shutdownTerminal(id); deleteTerminal(id); });
-ipcMain.handle('terminals:status', (_e, id: number) => {
-  const row = getTerminal(id);
-  if (!row) throw new Error('not_found');
-  return getTerminalInstance(row).snapshot();
-});
-ipcMain.handle('terminals:connect', (_e, id: number) => bootTerminal(id));
-ipcMain.handle('terminals:disconnect', (_e, id: number) => shutdownTerminal(id));
+ipcMain.handle('terminals:delete', (_e, id: number) => { deleteTerminal(id); });
+// TCP reachability probe by host:port — backs the per-device "Test connection".
 ipcMain.handle('terminals:ping-host', (_e, input: { host: string; port: number }) => pingTerminalHost(input.host, input.port));
-ipcMain.handle('terminals:getStatus', (_e, id: number) => {
-  const row = getTerminal(id); if (!row) throw new Error('not_found');
-  getTerminalInstance(row).getStatus();
-});
-// Per-API handlers — used by the TerminalTester modal so the operator can
-// exercise every command in the protocol without writing any code. Body
-// shapes match the ECPI PDF examples (titleTXT, messageTXT, fareAmount, …).
-function withInst<T>(id: number, fn: (inst: ReturnType<typeof getTerminalInstance>) => T): T {
-  const row = getTerminal(id);
-  if (!row) throw new Error('not_found');
-  return fn(getTerminalInstance(row));
-}
-
-ipcMain.handle('terminals:initTerminal', (_e, id: number, op?: '0'|'1'|'2') => withInst(id, (i) => i.initTerminal(op)));
-ipcMain.handle('terminals:deinitTerminal', (_e, id: number) => withInst(id, (i) => i.deinitTerminal()));
-ipcMain.handle('terminals:initCard', (_e, id: number, opts?: any) => withInst(id, (i) => i.initCard(opts)));
-ipcMain.handle('terminals:initEntry', (_e, id: number, opts?: any) => withInst(id, (i) => i.initEntry(opts)));
-ipcMain.handle('terminals:initExit', (_e, id: number, opts?: any) => withInst(id, (i) => i.initExit(opts)));
-ipcMain.handle('terminals:initTxn', (_e, id: number, opts: any) => withInst(id, (i) => i.initTxn(opts)));
-ipcMain.handle('terminals:proceedEntry', (_e, id: number, opts?: any) => withInst(id, (i) => i.proceedEntry(opts)));
-ipcMain.handle('terminals:proceedExit', (_e, id: number, opts: any) => withInst(id, (i) => i.proceedExit(opts)));
-ipcMain.handle('terminals:finTxn', (_e, id: number) => withInst(id, (i) => i.finTxn()));
-ipcMain.handle('terminals:abort', (_e, id: number, reason?: 'success'|'failed'|'silent') => withInst(id, (i) => i.abortTxn(reason ?? 'silent')));
-ipcMain.handle('terminals:showStatus', (_e, id: number, opts: any) => withInst(id, (i) => i.showStatus(opts)));
 
 ipcMain.handle('cameras:list', () => listCameras());
 ipcMain.handle('cameras:save', async (_e, input) => {
@@ -506,18 +450,7 @@ ipcMain.handle('lanes:save', (_e, input: any) => {
   const changedCameras: number[] = Array.isArray(cameraIds) ? cameraIds.map(Number) : [];
   if (Array.isArray(cameraIds)) setLaneCameras(saved.id, changedCameras);
 
-  // The wired terminal's ECPI laneType follows the lane's cameras (the single
-  // source of direction) — entry/exit/dual — instead of a hand-entered value.
-  // No cameras yet → leave the terminal's existing laneType untouched.
-  if (saved.terminalId) {
-    const dir = deriveLaneDirection(saved.id);
-    if (dir) setTerminalLaneType(saved.terminalId, dir);
-  }
-
   pushLane(saved.id).catch(() => null);
-  // Lanes are how terminals get attributed to a cloud site (the lane's
-  // policyId), so re-push the terminal too whenever the lane changes.
-  if (saved.terminalId) pushTerminal(saved.terminalId).catch(() => null);
   // Re-mirror any cameras whose lane assignment we just changed so the cloud
   // registry reflects the new coverage.
   for (const cid of changedCameras) pushCamera(cid).catch(() => null);
@@ -776,9 +709,9 @@ ipcMain.handle('settings:save', (_e, patch) => {
   // W4G TNG: stop / start / restart the callback listener as needed when
   // the operator flips the master switch or changes the callback port.
   const tngTouched =
-    patch.tngEnabled !== undefined || patch.tngCallbackPort !== undefined;
+    patch.tngEnabled !== undefined || patch.tngCallbackPort !== undefined || patch.tngCallbackPorts !== undefined;
   if (tngTouched) {
-    if (next.tngEnabled) startW4gServer(next.tngCallbackPort);
+    if (next.tngEnabled) startW4gServer();
     else stopW4gServer();
   }
   return next;
@@ -794,16 +727,18 @@ ipcMain.handle('tng:loopback', (_e, opts?: any) => tngLoopback(opts ?? {}));
 ipcMain.handle('tng:status', () => w4gStatus());
 ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
   payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;
+  host?: string; port?: number;
 }) => {
   // Make sure the listener is up — without it, no PayResult callback can
   // ever land and the request will time out at the device side.
   const s = getSettings();
   if (!s.tngEnabled) return { ok: false, orderId: '', error: 'tng_disabled — flip the master switch on first' };
-  startW4gServer(s.tngCallbackPort);
-  // For Settings → Test PayRequest, use a TEST<epoch> orderId. Matches the
-  // merchant's reference tester's format and is easy to grep in the W4G
-  // device's own debug log — production exits use the random hex orderId
-  // from newTngOrderId() to avoid plate-keyed collisions.
+  startW4gServer();
+  // For the dev test panel, use a TEST<epoch> orderId. Matches the merchant's
+  // reference tester's format and is easy to grep in the W4G device's own
+  // debug log — production exits use the random hex orderId from
+  // newTngOrderId() to avoid plate-keyed collisions. host/port target the
+  // specific device picked in the panel (multi-device); omitted → settings.
   const orderId = opts?.orderId ?? `TEST${Math.floor(Date.now() / 1000)}`;
   try {
     const body = await tngPayRequest({
@@ -812,6 +747,8 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
       discountAmount: opts?.discountAmount ?? 0,
       enterTime: opts?.enterTime,
       payTime: opts?.payTime,
+      host: opts?.host,
+      port: opts?.port,
     });
     return {
       ok: body.state === '0',
@@ -839,10 +776,10 @@ ipcMain.handle('app-update:download', async (_e, opts: { variant: 'portable' | '
 });
 ipcMain.handle('app-update:apply', (_e, opts: { path: string }) => applyUpdate(opts));
 
-ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string) => {
+ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string, target?: { host?: string; port?: number }) => {
   if (!orderId) return { ok: false, error: 'orderId_required' };
   try {
-    const ack = await tngPayCancel(orderId);
+    const ack = await tngPayCancel(orderId, target);
     return { ok: ack.state === 0, deviceState: ack.state };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? String(e) };

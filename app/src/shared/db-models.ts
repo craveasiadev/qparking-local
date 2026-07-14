@@ -26,24 +26,19 @@ export type LaneType = 'entry' | 'exit' | 'open' | 'dual';
 export type LaneMode = 'lpr' | 'kiosk';
 export type OperationMode = 'maintenance' | 'live' | 'not_in_use';
 
+/** An Alarmtech Touch'n'Go W4G payment device on the LAN. One per exit lane;
+ *  a lane points at its device via `lanes.terminal_id`. On a paid exit the gate
+ *  fires a PayRequest at `host:port` and settles the session from the device's
+ *  PayResult callback. (Replaced the former Coherent/ECPI reader model.) */
 export interface PaymentTerminal {
   id: number;
   name: string;
-  /** Reader IP on the LAN (ECPI box). */
+  /** W4G device IP on the LAN. e.g. 192.168.1.105 */
   host: string;
-  /** Reader TCP port — default 5000. */
+  /** Device HTTP port — vendor default 80. */
   port: number;
-  /** Shared secret used in the SHA-256 signature. */
-  secretKey: string;
-  /** ECPI plazaID — assigned by CoherentPlus during commissioning. */
-  plazaId: string;
-  /** ECPI laneID — one per gate / kiosk. */
-  laneId: string;
-  laneType: LaneType;
-  /** Which command-set to use: lpr (gate-controlled) or kiosk (self-service). */
-  mode: LaneMode;
-  /** Initial operation mode the terminal is brought up in. */
-  operationMode: OperationMode;
+  /** Per-transaction wait budget (seconds) before we PayCancel and give up. */
+  timeoutSeconds: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -376,10 +371,15 @@ export interface AppSettings {
    *  don't specify, but the 192.168.1.105 test rig responds on the standard
    *  HTTP port. Change here if your device serves on 8080 / a custom port. */
   tngPort: number;
-  /** Local HTTP port WE listen on for the W4G PayResult callback. The W4G
-   *  device POSTs back to http://<our-lan-ip>:<tngCallbackPort>/w4g/PayResult
-   *  once it has settled (or failed) the card deduction. */
+  /** Legacy single PayResult callback port. Kept as the fallback used when
+   *  `tngCallbackPorts` is empty. Prefer `tngCallbackPorts` (the multi-port
+   *  list the listener actually binds). */
   tngCallbackPort: number;
+  /** Comma-separated list of ports WE bind the PayResult listener on
+   *  (e.g. "80, 120, 240"). When non-empty this is AUTHORITATIVE — the listener
+   *  binds exactly these ports and nothing else (no implicit port 80). Falls
+   *  back to `tngCallbackPort` when blank. */
+  tngCallbackPorts: string;
   /** Per-transaction wait budget. The W4G PayResult callback should arrive
    *  within a few seconds, but cards left on the reader can stretch it out.
    *  After this timeout we PayCancel the order and continue with the ECPI
