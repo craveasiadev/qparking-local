@@ -332,7 +332,7 @@ export function payRequest(opts: {
   host?: string;
   port?: number;
 }): Promise<PayResultBody> {
-  const s = getSettings();
+  const setting = getSettings();
   const host = opts.host ?? s.tngHost;
   const port = opts.port ?? s.tngPort;
   const orderId = (opts.orderId ?? newOrderId()).slice(0, 32);
@@ -344,7 +344,7 @@ export function payRequest(opts: {
   // out-of-order timestamps may make the firmware silently skip the
   // terminal trigger even though it still returns State:0 to the request.
   const enterTime = opts.enterTime ?? (payTime - 600);
-  const timeoutMs = Math.max(2_000, (opts.timeoutMs ?? s.tngTimeoutSeconds * 1000));
+  const timeoutMs = Math.max(2_000, (opts.timeoutMs ?? setting.tngTimeoutSeconds * 1000));
 
   const body = {
     PayAmount: payAmount,
@@ -423,7 +423,7 @@ export function payRequest(opts: {
  * waiting on it.
  */
 export async function payCancel(orderId: string, device?: { host?: string; port?: number }): Promise<{ state: number; orderId: string }> {
-  const s = getSettings();
+  const setting = getSettings();
   const host = device?.host ?? s.tngHost;
   const port = device?.port ?? s.tngPort;
   const pending = pendingByOrderId.get(orderId);
@@ -456,7 +456,7 @@ export async function payCancel(orderId: string, device?: { host?: string; port?
 /** TCP-connect to the device's HTTP port. Doesn't send anything — just
  *  verifies the box is reachable on the LAN. */
 export function pingDevice(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
-  const s = getSettings();
+  const setting = getSettings();
   return new Promise((resolve) => {
     const start = Date.now();
     const sock = new Socket();
@@ -472,7 +472,7 @@ export function pingDevice(): Promise<{ ok: boolean; latencyMs?: number; error?:
     sock.once('timeout', () => done({ ok: false, error: 'connect_timeout (>5s)' }));
     sock.once('error', (e) => done({ ok: false, error: e.message }));
     try {
-      sock.connect(s.tngPort, s.tngHost);
+      sock.connect(setting.tngPort, setting.tngHost);
     } catch (e: any) {
       done({ ok: false, error: e?.message ?? String(e) });
     }
@@ -496,7 +496,7 @@ function spacedJson(obj: Record<string, unknown>): string {
 }
 
 function httpPost(pathname: string, body: Record<string, unknown>, device?: { host: string; port: number }): Promise<DeviceAck> {
-  const s = getSettings();
+  const setting = getSettings();
   const host = device?.host ?? s.tngHost;
   const port = device?.port ?? s.tngPort;
   const json = spacedJson(body);
@@ -604,8 +604,8 @@ export function loopbackPayResult(opts: {
   sentBody?: string;
   error?: string;
 }> {
-  const s = getSettings();
-  if (!s.tngEnabled || activePorts.length === 0) {
+  const setting = getSettings();
+  if (!setting.tngEnabled || activePorts.length === 0) {
     return Promise.resolve({ ok: false, error: 'listener_not_running — enable TNG and save settings first' });
   }
   // Loopback to the first port the listener actually bound.
@@ -676,7 +676,7 @@ export function probeHttp(): Promise<{
   elapsedMs?: number;
   error?: string;
 }> {
-  const s = getSettings();
+  const setting = getSettings();
   return new Promise((resolve) => {
     const start = Date.now();
     let settled = false;
@@ -687,15 +687,15 @@ export function probeHttp(): Promise<{
       const final = { ...r, elapsedMs: elapsed };
       w4gLog(
         r.ok ? 'recv' : 'error',
-        `Probe HTTP → http://${s.tngHost}:${s.tngPort}/ · ${r.ok ? `${r.status} ${r.statusText ?? ''}` : `FAILED: ${r.error}`} · ${elapsed}ms`,
+        `Probe HTTP → http://${setting.tngHost}:${setting.tngPort}/ · ${r.ok ? `${r.status} ${r.statusText ?? ''}` : `FAILED: ${r.error}`} · ${elapsed}ms`,
         final,
       );
       resolve(final);
     };
     try {
       const req = http.request({
-        host: s.tngHost,
-        port: s.tngPort,
+        host: setting.tngHost,
+        port: setting.tngPort,
         method: 'GET',
         path: '/',
         timeout: 8_000,
@@ -737,7 +737,7 @@ export function w4gStatus(): {
   lastResult?: { orderId: string; status: string; payType?: number; at: string };
   lastError?: string;
 } {
-  const s = getSettings();
+  const setting = getSettings();
   const addresses: string[] = [];
   for (const interfaces of Object.values(os.networkInterfaces())) {
     for (const nic of interfaces ?? []) {
@@ -745,13 +745,13 @@ export function w4gStatus(): {
     }
   }
   return {
-    enabled: s.tngEnabled,
+    enabled: setting.tngEnabled,
     listening: activePorts.length > 0,
     listenPort: activePorts[0] ?? 0,
     listenPorts: [...activePorts],
     listenAddresses: addresses,
-    host: s.tngHost,
-    port: s.tngPort,
+    host: setting.tngHost,
+    port: setting.tngPort,
     pending: [...pendingByOrderId.values()].map((p) => ({
       orderId: p.orderId,
       payAmount: p.payAmount,

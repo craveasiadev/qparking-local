@@ -731,8 +731,8 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
 }) => {
   // Make sure the listener is up — without it, no PayResult callback can
   // ever land and the request will time out at the device side.
-  const s = getSettings();
-  if (!s.tngEnabled) return { ok: false, orderId: '', error: 'tng_disabled — flip the master switch on first' };
+  const setting = getSettings();
+  if (!setting.tngEnabled) return { ok: false, orderId: '', error: 'tng_disabled — flip the master switch on first' };
   startW4gServer();
   // For the dev test panel, use a TEST<epoch> orderId. Matches the merchant's
   // reference tester's format and is easy to grep in the W4G device's own
