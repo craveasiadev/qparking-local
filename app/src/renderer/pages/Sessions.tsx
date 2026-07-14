@@ -3,6 +3,7 @@ import {
   Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
   Trash2, Loader2, ChevronLeft, ChevronRight, CheckSquare, Square,
   Image as ImageIcon, Zap, ArrowDown, ArrowUp, Eye, Filter,
+  LogIn, LogOut, Clock, Banknote,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
@@ -22,6 +23,30 @@ interface DateRangeFilters {
 }
 
 const EMPTY_RANGE: DateRangeFilters = { entryFrom: '', entryTo: '', exitFrom: '', exitTo: '' };
+
+// ─── Esc-to-close, stacked ───────────────────────────────────────────────────
+// A module-level stack so that when modals nest (e.g. the delete-confirm over
+// the detail modal, or an enlarged capture over the detail modal), Escape only
+// dismisses the TOP-most one. Each modal registers on mount and pops on unmount;
+// the last registered wins.
+const escapeStack: Array<() => void> = [];
+function handleGlobalEsc(e: KeyboardEvent) {
+  if (e.key === 'Escape' && escapeStack.length > 0) escapeStack[escapeStack.length - 1]();
+}
+function useEscapeToClose(onClose: () => void) {
+  const ref = useRef(onClose);
+  ref.current = onClose;
+  useEffect(() => {
+    const cb = () => ref.current();
+    if (escapeStack.length === 0) window.addEventListener('keydown', handleGlobalEsc);
+    escapeStack.push(cb);
+    return () => {
+      const i = escapeStack.lastIndexOf(cb);
+      if (i >= 0) escapeStack.splice(i, 1);
+      if (escapeStack.length === 0) window.removeEventListener('keydown', handleGlobalEsc);
+    };
+  }, []);
+}
 
 /**
  * Hidden dev/QA tool (rendered only when devMode is on). Drives the REAL
@@ -196,7 +221,10 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
 }
 
 export function Sessions({ devMode = false }: { devMode?: boolean }) {
-  const [tab, setTab] = useState<'open' | 'recent'>('open');
+  // Single list of every session (no open/recent tabs). The status filter below
+  // scopes it — defaulting to "pending" so unpaid / still-inside cars surface
+  // first, which is what an operator most often needs to act on.
+  const tab = 'recent' as const;
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [counts, setCounts] = useState({ open: 0, total: 0 });
   const [page, setPage] = useState(0);
@@ -204,6 +232,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [debouncedPlateSearch, setDebouncedPlateSearch] = useState('');
   const [range, setRange] = useState<DateRangeFilters>(EMPTY_RANGE);
   const [debouncedRange, setDebouncedRange] = useState<DateRangeFilters>(EMPTY_RANGE);
+  const [statusFilter, setStatusFilter] = useState('pending');
   const [filtersOpen, setFiltersOpen] = useState(false);
   useEffect(() => {
     const h = setTimeout(() => setDebouncedPlateSearch(plateSearch.trim()), 300);
@@ -222,10 +251,11 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
+  const [pageLoading, setPageLoading] = useState(false);
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
 
-  const totalForTab = tab === 'open' ? counts.open : counts.total;
+  const totalForTab = counts.total;
   const pageCount = Math.max(1, Math.ceil(totalForTab / PAGE_SIZE));
   const offset = page * PAGE_SIZE;
 
@@ -235,24 +265,32 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   }, [debouncedRange]);
 
   async function fetchPage() {
-    const result = await window.bridge.listSessionsPage({
-      tab,
-      limit: PAGE_SIZE,
-      offset,
-      plateSearch: debouncedPlateSearch || null,
-      entryFrom: debouncedRange.entryFrom ? toIso(debouncedRange.entryFrom) : null,
-      entryTo: debouncedRange.entryTo ? toIso(debouncedRange.entryTo) : null,
-      exitFrom: debouncedRange.exitFrom ? toIso(debouncedRange.exitFrom) : null,
-      exitTo: debouncedRange.exitTo ? toIso(debouncedRange.exitTo) : null,
-    });
-    setRows(result.rows);
-    setCounts(result.counts);
-    const newTotal = tab === 'open' ? result.counts.open : result.counts.total;
-    const lastValidPage = Math.max(0, Math.ceil(newTotal / PAGE_SIZE) - 1);
-    if (page > lastValidPage) setPage(lastValidPage);
-    if (viewing) {
-      const fresh = result.rows.find((r) => r.id === viewing.id);
-      if (fresh) setViewing(fresh);
+    setPageLoading(true);
+    try {
+      const result = await window.bridge.listSessionsPage({
+        tab,
+        limit: PAGE_SIZE,
+        offset,
+        plateSearch: debouncedPlateSearch || null,
+        entryFrom: debouncedRange.entryFrom ? toIso(debouncedRange.entryFrom) : null,
+        entryTo: debouncedRange.entryTo ? toIso(debouncedRange.entryTo) : null,
+        exitFrom: debouncedRange.exitFrom ? toIso(debouncedRange.exitFrom) : null,
+        exitTo: debouncedRange.exitTo ? toIso(debouncedRange.exitTo) : null,
+        // A plate search always spans EVERY status — you're hunting a specific
+        // car, so scoping to "pending" would hide it if it already paid/left.
+        paymentStatus: debouncedPlateSearch ? null : (statusFilter || null),
+      });
+      setRows(result.rows);
+      setCounts(result.counts);
+      const newTotal = result.counts.total;
+      const lastValidPage = Math.max(0, Math.ceil(newTotal / PAGE_SIZE) - 1);
+      if (page > lastValidPage) setPage(lastValidPage);
+      if (viewing) {
+        const fresh = result.rows.find((r) => r.id === viewing.id);
+        if (fresh) setViewing(fresh);
+      }
+    } finally {
+      setPageLoading(false);
     }
   }
 
@@ -265,12 +303,12 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     await Promise.all([fetchPage(), fetchAux()]);
   });
 
-  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, debouncedRange]);
+  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter]);
   useEffect(() => {
     const off = window.bridge.onEvent('session', () => { void fetchPage(); });
     return off;
-  }, [tab, page, debouncedPlateSearch, debouncedRange]);
-  useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange]);
+  }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter]);
+  useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange, statusFilter]);
   useEffect(() => { setSelected(new Set()); }, [tab, page]);
 
   function policyForSession(s: ParkingSession): RatePolicy | null {
@@ -334,9 +372,21 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   function clearAllFilters() {
     setPlateSearch('');
     setRange(EMPTY_RANGE);
+    setStatusFilter('');
   }
 
-  const hasAnyFilter = debouncedPlateSearch || activeFilterCount > 0;
+  // Set the entry-date range to a common preset (local wall-clock → the
+  // datetime-local strings RangeInput expects).
+  function applyEntryPreset(kind: 'today' | '7d' | '30d') {
+    const now = new Date();
+    const from = new Date(now);
+    if (kind === 'today') from.setHours(0, 0, 0, 0);
+    else if (kind === '7d') from.setDate(now.getDate() - 7);
+    else from.setDate(now.getDate() - 30);
+    setRange((r) => ({ ...r, entryFrom: toLocalInput(from.toISOString()), entryTo: toLocalInput(now.toISOString()) }));
+  }
+
+  const hasAnyFilter = !!debouncedPlateSearch || activeFilterCount > 0 || !!statusFilter;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
@@ -355,28 +405,16 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         </button>
       </header>
 
-      {/* Tabs + plate search + filter toggle + bulk-action bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-        <div className="inline-flex bg-gray-100 rounded-lg p-1 gap-1 self-start">
-          {(['open', 'recent'] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => { setTab(t); setPage(0); }}
-              className={`h-9 px-4 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${tab === t ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
-            >
-              {t === 'open' ? `Open (${counts.open})` : `Recent (${counts.total})`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex flex-1 items-center gap-2">
-          <div className="relative flex-1 max-w-xs">
+      {/* Search + status + date filters + bulk-action bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
+        <div className="flex flex-1 items-center gap-2 min-w-0">
+          <div className="relative flex-1 sm:max-w-sm">
             <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input
               type="text"
               value={plateSearch}
               onChange={(e) => setPlateSearch(e.target.value)}
-              placeholder="Search plate… (e.g. AB matches ABC + ABX)"
+              placeholder="Search plate… (all statuses)"
               className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
             />
             {plateSearch && (
@@ -388,6 +426,21 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
               </button>
             )}
           </div>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            disabled={!!plateSearch.trim()}
+            title={plateSearch.trim() ? 'Plate search covers every status' : 'Filter by payment status'}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">All status</option>
+            <option value="paid">Paid</option>
+            <option value="pending">Pending</option>
+            <option value="declined">Declined</option>
+            <option value="free">Free</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="manual_release">Manual release</option>
+          </select>
           <button
             onClick={() => setFiltersOpen((o) => !o)}
             className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border text-xs font-bold uppercase tracking-wide ${
@@ -430,6 +483,15 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           in or out, even when the plate text is corrupted. */}
       {filtersOpen && (
         <div className="mb-3 rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Quick entry range</span>
+            {([['today', 'Today'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']] as const).map(([k, label]) => (
+              <button key={k} onClick={() => applyEntryPreset(k)}
+                className="h-7 px-2.5 rounded-md border border-gray-200 bg-white hover:border-gray-900 text-[11px] font-bold uppercase tracking-wide text-gray-600">
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <RangeInput
               label="Entry time"
@@ -471,8 +533,19 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         </div>
       )}
 
+      {/* Results — desktop table + mobile cards share one relative wrapper so a
+          single loading overlay can dim them during a fetch. */}
+      <div className="relative">
+        {pageLoading && (
+          <div className="absolute inset-0 z-10 flex items-start justify-center pt-16 bg-white/50 backdrop-blur-[1px] pointer-events-none">
+            <span className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-500 bg-white border border-gray-200 rounded-full px-3 py-1.5 shadow-sm">
+              <Loader2 size={13} className="animate-spin" /> Loading…
+            </span>
+          </div>
+        )}
+
       {/* DESKTOP/TABLET TABLE */}
-      <div className="hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden">
+      <div className={`hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[820px]">
             <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
@@ -502,9 +575,10 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 }
                 const isSelected = selected.has(s.id);
                 return (
-                  <tr key={s.id} className={`border-t border-gray-100 ${isSelected ? 'bg-blue-50/40' : ''}`}>
+                  <tr key={s.id} onClick={() => setViewing(s)}
+                    className={`border-t border-gray-100 cursor-pointer hover:bg-gray-50 ${isSelected ? 'bg-blue-50/40 hover:bg-blue-50/60' : ''}`}>
                     <td className="px-3 py-2">
-                      <button onClick={() => toggleRow(s.id)} className="inline-flex items-center text-gray-500 hover:text-gray-900">
+                      <button onClick={(e) => { e.stopPropagation(); toggleRow(s.id); }} className="inline-flex items-center text-gray-500 hover:text-gray-900">
                         {isSelected ? <CheckSquare size={15} /> : <Square size={15} />}
                       </button>
                     </td>
@@ -546,7 +620,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       </div>
 
       {/* MOBILE CARDS */}
-      <div className="md:hidden space-y-2">
+      <div className={`md:hidden space-y-2 transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
         {rows.length === 0 && (
           <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500">
             <Car size={18} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}
@@ -561,9 +635,10 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           }
           const isSelected = selected.has(s.id);
           return (
-            <div key={s.id} className={`rounded-xl border bg-white p-3 ${isSelected ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200'}`}>
+            <div key={s.id} onClick={() => setViewing(s)}
+              className={`rounded-xl border bg-white p-3 cursor-pointer active:bg-gray-50 ${isSelected ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200'}`}>
               <div className="flex items-start gap-3">
-                <button onClick={() => toggleRow(s.id)} className="mt-0.5 text-gray-500">
+                <button onClick={(e) => { e.stopPropagation(); toggleRow(s.id); }} className="mt-0.5 text-gray-500">
                   {isSelected ? <CheckSquare size={17} /> : <Square size={17} />}
                 </button>
                 <div className="flex-1 min-w-0">
@@ -601,6 +676,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
             </div>
           );
         })}
+      </div>
       </div>
 
       {/* Pagination + footnote */}
@@ -676,23 +752,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       )}
 
       {previewImage && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 cursor-zoom-out"
-          onClick={() => setPreviewImage(null)}
-        >
-          <img
-            src={previewImage}
-            alt="LPR capture preview"
-            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          />
-          <button
-            onClick={() => setPreviewImage(null)}
-            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white inline-flex items-center justify-center"
-          >
-            <X size={20} />
-          </button>
-        </div>
+        <ImagePreviewModal src={previewImage} onClose={() => setPreviewImage(null)} />
       )}
 
       {confirmDelete && (
@@ -796,7 +856,7 @@ function ThumbCell({
   }
   return (
     <button
-      onClick={() => src && onOpen(src)}
+      onClick={(e) => { e.stopPropagation(); if (src) onOpen(src); }}
       className="relative w-10 h-10 rounded overflow-hidden border border-gray-200 bg-gray-100 hover:ring-2 hover:ring-gray-400 focus:outline-none"
       title={`${kind === 'entry' ? 'Entry' : 'Exit'} capture — click to enlarge · ${plate}`}
     >
@@ -835,6 +895,7 @@ function ViewSessionModal({
   onRetrigger: (laneId: number | null) => void;
   onDelete: () => void;
 }) {
+  useEscapeToClose(onClose);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const s = session;
   // Which gate the operator wants to act on (retrigger charge / release open).
@@ -862,7 +923,8 @@ function ViewSessionModal({
               <span className="font-mono font-bold text-lg">{s.plate}</span>
               <StatusBadge status={s.paymentStatus} />
             </div>
-            <p className="text-xs text-gray-500 mt-0.5">
+            <p className="text-xs text-gray-500 mt-1 inline-flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} />
               {isOpen ? 'Vehicle currently on site.' : 'Closed / archived.'}
             </p>
           </div>
@@ -872,29 +934,30 @@ function ViewSessionModal({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {/* Timeline */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <DetailRow label="Entered">
-              <div className="font-mono text-sm">{new Date(s.entryAt).toLocaleString()}</div>
+            <DetailRow label="Entered" icon={LogIn} iconClass="text-emerald-600">
+              <div className="font-mono text-sm font-semibold">{new Date(s.entryAt).toLocaleString()}</div>
               <div className="text-[11px] text-gray-500 mt-0.5">Lane: {entryLaneName}</div>
             </DetailRow>
-            <DetailRow label="Exited">
+            <DetailRow label="Exited" icon={LogOut} iconClass={s.exitAt ? 'text-blue-600' : 'text-amber-500'}>
               {s.exitAt ? (
                 <>
-                  <div className="font-mono text-sm">{new Date(s.exitAt).toLocaleString()}</div>
+                  <div className="font-mono text-sm font-semibold">{new Date(s.exitAt).toLocaleString()}</div>
                   <div className="text-[11px] text-gray-500 mt-0.5">Lane: {exitLaneName}</div>
                 </>
               ) : (
                 <div className="text-sm text-amber-700 font-bold">Still inside</div>
               )}
             </DetailRow>
-            <DetailRow label="Duration">
-              <div className="font-mono text-sm">
-                {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m (${mins} min)` : '—'}
+            <DetailRow label="Duration" icon={Clock}>
+              <div className="font-mono text-sm font-semibold">
+                {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}
+                {mins != null && <span className="text-gray-400 font-normal"> ({mins} min)</span>}
               </div>
             </DetailRow>
-            <DetailRow label="Fee">
-              <div className="font-mono text-sm">
+            <DetailRow label="Fee" icon={Banknote} iconClass={isLivePreview ? 'text-amber-500' : displayFeeCents ? 'text-emerald-600' : 'text-gray-400'}>
+              <div className="font-mono text-base font-bold">
                 {displayFeeCents != null
-                  ? <span className={isLivePreview ? 'text-amber-700' : ''}>RM {(displayFeeCents / 100).toFixed(2)}{isLivePreview && ' (live preview)'}</span>
+                  ? <span className={isLivePreview ? 'text-amber-700' : ''}>RM {(displayFeeCents / 100).toFixed(2)}{isLivePreview && <span className="text-[11px] font-medium"> (live preview)</span>}</span>
                   : '—'}
               </div>
               {policy && (
@@ -905,7 +968,7 @@ function ViewSessionModal({
 
           {/* Captures */}
           <div>
-            <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">LPR captures</div>
+            <div className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2"><ImageIcon size={12} className="text-gray-400" /> LPR captures</div>
             <div className="grid grid-cols-2 gap-3">
               <CaptureBlock label="Entry" kind="entry" path={s.entryImagePath} plate={s.plate} onOpen={onOpenImage} />
               <CaptureBlock label="Exit" kind="exit" path={s.exitImagePath} plate={s.plate} onOpen={onOpenImage} />
@@ -920,7 +983,7 @@ function ViewSessionModal({
 
           {/* Action bar — everything an operator can do to this row. */}
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">Actions</div>
+            <div className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2"><Zap size={12} className="text-gray-400" /> Actions</div>
             {isOpen && (
               /* Which gate the retrigger charges on / the manual release opens.
                  Same idea as the Live-display tile, but here we already know the
@@ -996,10 +1059,36 @@ function ViewSessionModal({
   );
 }
 
-function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+/** Full-screen enlarged capture. Click anywhere / the X / Esc to dismiss. */
+function ImagePreviewModal({ src, onClose }: { src: string; onClose: () => void }) {
+  useEscapeToClose(onClose);
+  return (
+    <div
+      className="fixed inset-0 z-[70] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out"
+      onClick={onClose}
+    >
+      <img
+        src={src}
+        alt="LPR capture preview"
+        className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white inline-flex items-center justify-center"
+      >
+        <X size={20} />
+      </button>
+    </div>
+  );
+}
+
+function DetailRow({ label, icon: Icon, iconClass, children }: { label: string; icon?: any; iconClass?: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-3">
-      <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1">{label}</div>
+      <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">
+        {Icon && <Icon size={12} className={iconClass ?? 'text-gray-400'} />} {label}
+      </div>
       {children}
     </div>
   );
@@ -1038,6 +1127,7 @@ function CaptureBlock({
 function ReleaseSessionModal({
   session, lanes, defaultLaneId, onClose, onReleased,
 }: { session: ParkingSession; lanes: ParkingLane[]; defaultLaneId: number | null; onClose: () => void; onReleased: () => void }) {
+  useEscapeToClose(onClose);
   const [reason, setReason] = useState('');
   const [laneId, setLaneId] = useState<number | null>(
     defaultLaneId ?? session.exitLaneId ?? session.entryLaneId ?? lanes[0]?.id ?? null,
@@ -1105,6 +1195,7 @@ function ReleaseSessionModal({
 function EditSessionModal({
   session, policies, defaultPolicy, onClose, onSaved,
 }: { session: ParkingSession; policies: RatePolicy[]; defaultPolicy: RatePolicy | null; onClose: () => void; onSaved: () => void }) {
+  useEscapeToClose(onClose);
   const [plate, setPlate] = useState(session.plate);
   const [entryAt, setEntryAt] = useState(toLocalInput(session.entryAt));
   // Default exit BLANK when the session is still open — so an operator can't
@@ -1124,16 +1215,39 @@ function EditSessionModal({
     return Math.max(0, Math.ceil((x - e) / 60_000));
   })();
   const previewPolicy = policyOverride ? policies.find((s) => s.policyId === policyOverride) ?? null : defaultPolicy;
-  const previewFee = (() => {
-    if (previewDurationMinutes == null) return null;
-    if (!previewPolicy) return null;
-    const billable = Math.max(0, previewDurationMinutes - previewPolicy.freeMinutes);
-    if (billable === 0) return 0;
-    const blocks = Math.ceil(billable / Math.max(1, previewPolicy.blockMinutes));
-    let cents = previewPolicy.firstBlockCents + Math.max(0, blocks - 1) * previewPolicy.perBlockCents;
-    if (previewPolicy.dailyCapCents > 0 && cents > previewPolicy.dailyCapCents) cents = previewPolicy.dailyCapCents;
-    return cents;
-  })();
+
+  // Accurate fee preview: the real charge honours the tariff-rule SCHEDULE
+  // (time-of-day / weekday windows, caps, cutoffs), which only the main process
+  // can evaluate. Ask it via simulateRatePolicyFee rather than re-deriving with
+  // the legacy flat block math here (which ignored the schedule and could show
+  // a fee that never matches what's actually charged at exit).
+  const [feePreview, setFeePreview] = useState<{ loading: boolean; feeCents: number | null; durationMinutes: number | null; error: string | null }>(
+    { loading: false, feeCents: null, durationMinutes: null, error: null },
+  );
+  const entryIso = toIso(entryAt);
+  const exitIso = exitAt ? toIso(exitAt) : '';
+  useEffect(() => {
+    if (!exitAt || !previewPolicy) {
+      setFeePreview({ loading: false, feeCents: null, durationMinutes: null, error: null });
+      return;
+    }
+    let alive = true;
+    setFeePreview((p) => ({ ...p, loading: true, error: null }));
+    const h = setTimeout(async () => {
+      try {
+        const r = await window.bridge.simulateRatePolicyFee({ policyId: previewPolicy.policyId, entry: entryIso, exit: exitIso });
+        if (!alive) return;
+        if (r.ok) setFeePreview({ loading: false, feeCents: r.feeCents ?? null, durationMinutes: r.durationMinutes ?? null, error: null });
+        else setFeePreview({ loading: false, feeCents: null, durationMinutes: null, error: r.error ?? 'preview unavailable' });
+      } catch (e: any) {
+        if (alive) setFeePreview({ loading: false, feeCents: null, durationMinutes: null, error: e?.message ?? String(e) });
+      }
+    }, 350);
+    return () => { alive = false; clearTimeout(h); };
+  }, [entryIso, exitIso, previewPolicy?.policyId, exitAt]);
+
+  // Server duration (from the same calc) when available, else the local estimate.
+  const shownDuration = feePreview.durationMinutes ?? previewDurationMinutes;
 
   const [save, saving] = useAsyncAction(async () => {
     setError(null);
@@ -1214,18 +1328,25 @@ function EditSessionModal({
             </div>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">Duration</div>
-                <div className="font-mono font-bold mt-0.5">{previewDurationMinutes != null ? `${Math.floor(previewDurationMinutes / 60)}h ${previewDurationMinutes % 60}m (${previewDurationMinutes} min)` : '—'}</div>
+                <div className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-gray-500"><Clock size={11} className="text-gray-400" /> Duration</div>
+                <div className="font-mono font-bold mt-0.5">{shownDuration != null ? `${Math.floor(shownDuration / 60)}h ${shownDuration % 60}m (${shownDuration} min)` : '—'}</div>
               </div>
               <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">Fee</div>
+                <div className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-gray-500"><Banknote size={11} className="text-gray-400" /> Fee</div>
                 <div className="font-mono font-bold mt-0.5">
-                  {previewFee != null
-                    ? `RM ${(previewFee / 100).toFixed(2)}`
-                    : <span className="text-gray-400 italic">{previewPolicy ? 'set entry & exit to preview' : 'session has no policy — pick one above'}</span>}
+                  {feePreview.loading ? (
+                    <span className="inline-flex items-center gap-1.5 text-gray-400 font-normal"><Loader2 size={12} className="animate-spin" /> calculating…</span>
+                  ) : feePreview.error ? (
+                    <span className="text-red-600 text-xs italic font-normal">{feePreview.error}</span>
+                  ) : feePreview.feeCents != null ? (
+                    `RM ${(feePreview.feeCents / 100).toFixed(2)}`
+                  ) : (
+                    <span className="text-gray-400 italic font-normal">{previewPolicy ? 'set entry & exit to preview' : 'session has no policy — pick one above'}</span>
+                  )}
                 </div>
               </div>
             </div>
+            <p className="mt-2 text-[10px] text-gray-400">Uses the live rules-aware rate calc — matches the fee that would be charged at exit.</p>
           </div>
         </div>
 
@@ -1254,6 +1375,7 @@ function ConfirmModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  useEscapeToClose(onClose);
   const toneClass = confirmTone === 'red'
     ? 'bg-red-600 hover:bg-red-700'
     : confirmTone === 'amber'

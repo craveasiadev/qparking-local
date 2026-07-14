@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Power, PowerOff, Activity, RefreshCw, CreditCard, X, Wrench, Loader2 } from 'lucide-react';
-import type { PaymentTerminal, TerminalStatus, LaneMode, OperationMode } from '@shared/types';
+import { Plus, Trash2, Power, PowerOff, Activity, RefreshCw, CreditCard, X, Wrench, Loader2, Search, MapPin } from 'lucide-react';
+import type { PaymentTerminal, TerminalStatus, LaneMode, OperationMode, ParkingLane } from '@shared/types';
 import { TerminalTester } from './TerminalTester';
 import { useConfirm } from '../hooks/useConfirm';
 
@@ -11,8 +11,12 @@ const EMPTY: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> = {
 
 export function Terminals() {
   const [list, setList] = useState<PaymentTerminal[]>([]);
+  const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [statuses, setStatuses] = useState<Record<number, TerminalStatus>>({});
   const [editing, setEditing] = useState<Partial<PaymentTerminal> | null>(null);
+  const [search, setSearch] = useState('');
+  const [connFilter, setConnFilter] = useState<'all' | 'online' | 'offline'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [tester, setTester] = useState<PaymentTerminal | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'err' | 'ok'; text: string } | null>(null);
@@ -38,6 +42,7 @@ export function Terminals() {
     try {
       const l = await window.bridge.listTerminals();
       setList(l);
+      window.bridge.listLanes().then(setLanes).catch(() => { /* ignore */ });
       // Fetch all statuses in parallel — a single slow one doesn't hold up the others.
       const next: Record<number, TerminalStatus> = {};
       await Promise.all(l.map(async (t) => {
@@ -83,12 +88,41 @@ export function Terminals() {
     }
   }
 
+  const isOnline = (id: number) => {
+    const s = statuses[id];
+    return !!s && (s.conn === 'ready' || s.conn === 'connected' || s.conn === 'transacting');
+  };
+  const onlineCount = list.filter((t) => isOnline(t.id)).length;
+
+  const q = search.trim().toLowerCase();
+  const filterActive = q !== '' || connFilter !== 'all' || statusFilter !== 'all';
+  const filtered = list.filter((t) => {
+    if (statusFilter === 'enabled' && !t.enabled) return false;
+    if (statusFilter === 'disabled' && t.enabled) return false;
+    const online = isOnline(t.id);
+    if (connFilter === 'online' && !online) return false;
+    if (connFilter === 'offline' && online) return false;
+    if (q) {
+      const laneNames = lanes.filter((l) => l.terminalId === t.id).map((l) => l.name).join(' ');
+      const hay = `${t.name} ${t.host} ${t.plazaId} ${t.laneId} ${laneNames}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
-      <header className="flex items-center justify-between mb-5">
+      <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Payment terminals</h1>
           <p className="text-sm text-gray-500 mt-1">ECPI readers on the LAN. One row per gate / kiosk.</p>
+          {list.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {onlineCount} online</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-gray-300" /> {list.length} total</span>
+              {filterActive && <span className="text-gray-400">· showing {filtered.length}</span>}
+            </div>
+          )}
         </div>
         <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }}
           className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
@@ -102,9 +136,48 @@ export function Terminals() {
         </div>
       )}
 
+      {list.length > 0 && (
+        <div className="mb-3 flex flex-col sm:flex-row sm:items-center gap-2">
+          <div className="relative flex-1 sm:max-w-sm">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, IP, or lane…"
+              className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
+            />
+            {search && (
+              <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700">
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <select value={connFilter} onChange={(e) => setConnFilter(e.target.value as any)}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+            <option value="all">All connections</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+          </select>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+            <option value="all">All status</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          {filterActive && (
+            <button onClick={() => { setSearch(''); setConnFilter('all'); setStatusFilter('all'); }}
+              className="h-9 px-3 text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900 whitespace-nowrap">
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-3">
-        {list.map((t) => {
+        {filtered.map((t) => {
           const s = statuses[t.id];
+          const assignedLanes = lanes.filter((l) => l.terminalId === t.id);
           // Static class map — Tailwind JIT can't resolve `bg-${tone}-50` at
           // build time, so dynamic templates produce unstyled elements. Each
           // tone needs its full class string present in the source as-is.
@@ -119,20 +192,29 @@ export function Terminals() {
             : s?.conn === 'error'                     ? 'bg-red-500'
             :                                           'bg-gray-400';
           return (
-            <div key={t.id} className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+            <div key={t.id} className={`rounded-xl border bg-white overflow-hidden ${t.enabled ? 'border-gray-200' : 'border-gray-200 opacity-70'}`}>
               <div className="p-4 flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <CreditCard size={16} strokeWidth={2.25} className="text-gray-400" />
-                    <h3 className="font-semibold">{t.name}</h3>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <CreditCard size={16} strokeWidth={2.25} className="text-gray-400 flex-shrink-0" />
+                    <h3 className="font-semibold truncate">{t.name}</h3>
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${badgeCls}`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${dotCls}`} /> {s?.conn ?? 'unknown'}
                     </span>
+                    {!t.enabled && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-gray-100 text-gray-500 border-gray-200">disabled</span>
+                    )}
                   </div>
-                  <div className="mt-1 text-xs text-gray-500 font-mono">
-                    {t.host}:{t.port} · {t.plazaId}/{t.laneId} · {t.laneType} · {t.mode}
-                    {s?.lastError && <span className="text-red-600 ml-2">err: {s.lastError}</span>}
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <Chip mono>{t.host}:{t.port}</Chip>
+                    <Chip mono>{t.plazaId}/{t.laneId}</Chip>
+                    <Chip icon={MapPin} tone={assignedLanes.length === 0 ? 'muted' : 'default'}>
+                      {assignedLanes.length === 0 ? 'unassigned' : `lane: ${assignedLanes.map((l) => l.name).join(', ')}`}
+                    </Chip>
+                    <Chip>{t.mode}</Chip>
+                    {t.operationMode !== 'live' && <Chip tone="warn">{t.operationMode.replace('_', ' ')}</Chip>}
                   </div>
+                  {s?.lastError && <div className="mt-1.5 text-[11px] text-red-600 font-mono break-all">err: {s.lastError}</div>}
                 </div>
                 <div className="flex items-center gap-1.5">
                   <button title="API tester (open per-terminal test console)" onClick={() => setTester(t)}
@@ -170,8 +252,23 @@ export function Terminals() {
           );
         })}
         {list.length === 0 && (
+          <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center">
+            <CreditCard size={28} className="mx-auto text-gray-300" />
+            <p className="mt-3 text-sm font-semibold text-gray-700">No terminals yet</p>
+            <p className="mt-1 text-[13px] text-gray-500">Register your first ECPI reader — one row per gate or kiosk.</p>
+            <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }} className="mt-4 inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+              <Plus size={13} /> Add terminal
+            </button>
+          </div>
+        )}
+        {list.length > 0 && filtered.length === 0 && (
           <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
-            No terminals yet. Click <strong>Add terminal</strong> to register your first ECPI reader.
+            <Search size={22} className="mx-auto text-gray-300" />
+            <p className="mt-2">No terminals match the current filters.</p>
+            <button onClick={() => { setSearch(''); setConnFilter('all'); setStatusFilter('all'); }}
+              className="mt-3 text-[11px] font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900">
+              Clear filters
+            </button>
           </div>
         )}
       </div>
@@ -188,6 +285,12 @@ function TerminalForm({ value, onChange, onCancel, onSave, error, busy }:
   const set = (k: keyof PaymentTerminal, v: any) => onChange({ ...value, [k]: v });
   const [pingResult, setPingResult] = useState<string | null>(null);
   const [pinging, setPinging] = useState(false);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onCancel]);
   async function testConnection() {
     const host = (value.host ?? '').trim();
     if (!host) { setPingResult('Enter a host / LAN IP first.'); return; }
@@ -266,5 +369,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
       {children}
     </div>
+  );
+}
+
+function Chip({ children, icon: Icon, mono, tone = 'default' }: { children: React.ReactNode; icon?: any; mono?: boolean; tone?: 'default' | 'warn' | 'muted' }) {
+  const toneCls = tone === 'warn' ? 'border-amber-200 bg-amber-50 text-amber-700'
+    : tone === 'muted' ? 'border-gray-200 bg-gray-50 text-gray-400'
+    : 'border-gray-200 bg-gray-50 text-gray-600';
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] ${toneCls} ${mono ? 'font-mono' : ''}`}>
+      {Icon && <Icon size={11} className="text-gray-400 flex-shrink-0" />}
+      {children}
+    </span>
   );
 }

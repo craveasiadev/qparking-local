@@ -12,6 +12,7 @@
 import {
   MapPin, Phone, Printer, Mail, Globe2, User,
   Car, Layers, DollarSign, AlertTriangle, Clock, Image as ImageIcon,
+  RefreshCw, Loader2,
 } from 'lucide-react';
 import type { Site } from '@shared/types';
 import { useEffect, useState } from 'react';
@@ -25,16 +26,26 @@ const STATUS_STYLE: Record<Site['status'], { dot: string; text: string; label: s
 export function Sites() {
   const [currentSite, setCurrentSite] = useState<Site | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  async function load() {
+    try {
+      setCurrentSite(await window.bridge.getCurrentSite());
+    } catch (e) {
+      console.error('[Sites] failed to load site', e);
+    }
+  }
 
   // Load the synced site once on mount. It's already kept fresh in the DB by
   // the 60s background syncSite(), so a single read is enough — no polling.
-  useEffect(() => {
-    window.bridge.getCurrentSite().then((data) => {
-      setCurrentSite(data)
-    }).catch((e) => {
-      console.error('[Sites] failed to load site', e)
-    }).finally(() => setLoading(false));
-  }, []);
+  useEffect(() => { void load().finally(() => setLoading(false)); }, []);
+
+  // Manual re-read of the cached site row (the background sync keeps it fresh;
+  // this just pulls the latest into view without waiting for the next tick).
+  async function refresh() {
+    setRefreshing(true);
+    try { await load(); } finally { setRefreshing(false); }
+  }
 
   // First read still in flight → show the skeleton in place of the content.
   if (loading) {
@@ -106,6 +117,10 @@ export function Sites() {
           <MapPin size={28} className="mx-auto text-gray-300" />
           <p className="mt-3 text-sm font-semibold text-gray-700">No site synced yet</p>
           <p className="mt-1 text-[13px] text-gray-500">The site profile appears here once the first sync from qparking SaaS completes. Check the API key in Settings if this persists.</p>
+          <button onClick={() => refresh()} disabled={refreshing}
+            className="mt-4 inline-flex items-center gap-1.5 h-9 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+            {refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} {refreshing ? 'Checking…' : 'Check again'}
+          </button>
         </div>
       </div>
     );
@@ -116,8 +131,16 @@ export function Sites() {
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
-      <h1 className="text-2xl font-bold tracking-tight">Sites</h1>
-      <p className="text-sm text-gray-500 mt-1">Read-only site profile, mirrored from qparking SaaS. Edit these values in the cloud admin panel.</p>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Sites</h1>
+          <p className="text-sm text-gray-500 mt-1">Read-only site profile, mirrored from qparking SaaS. Edit these values in the cloud admin panel.</p>
+        </div>
+        <button onClick={() => refresh()} disabled={refreshing}
+          className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+          {refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </header>
 
       {/* ─── Identity ──────────────────────────────────────────────────── */}
       <section className="mt-5 rounded-xl border border-gray-200 bg-white p-5">
@@ -162,6 +185,20 @@ export function Sites() {
           tone={currentSite.alarmCount > 0 ? 'warn' : 'default'}
         />
       </section>
+
+      {/* ─── Occupancy bar ─────────────────────────────────────────────── */}
+      {currentSite.totalSpaces > 0 && (
+        <section className="mt-3 rounded-xl border border-gray-200 bg-white p-4">
+          <div className="flex items-center justify-between text-sm">
+            <span className="font-semibold flex items-center gap-2"><Layers size={15} className="text-gray-400" /> Occupancy</span>
+            <span className="tabular-nums text-gray-600"><strong>{currentSite.occupiedSpaces.toLocaleString()}</strong> / {currentSite.totalSpaces.toLocaleString()} spaces · {occupancyPct}%</span>
+          </div>
+          <div className="mt-2.5 h-2.5 w-full rounded-full bg-gray-100 overflow-hidden">
+            <div className={`h-full rounded-full transition-all ${occupancyPct >= 90 ? 'bg-red-500' : occupancyPct >= 70 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+              style={{ width: `${Math.min(100, occupancyPct)}%` }} />
+          </div>
+        </section>
+      )}
 
       {/* ─── Contact ───────────────────────────────────────────────────── */}
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-3">

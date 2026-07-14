@@ -17,7 +17,7 @@
  *   8. Maintenance         — clear Electron browser cache
  */
 import { useEffect, useState } from 'react';
-import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw } from 'lucide-react';
+import { Save, Check, AlertCircle, Zap, Activity, Loader2, Trash2, CreditCard, XCircle, Wifi, Download, Package, RefreshCw, Cloud, Server, ScanFace, Workflow, SlidersHorizontal, Wrench } from 'lucide-react';
 import type { AppSettings, EquipmentPushItem } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
@@ -96,18 +96,33 @@ export function Settings() {
   // `settings` is the whole AppSettings row, edited in place by the inputs
   // below and persisted as one unit by the Save button.
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  // JSON snapshot of the last-persisted settings — compared against the live
+  // form to drive the "unsaved changes" indicator on the sticky save bar.
+  const [savedSnapshot, setSavedSnapshot] = useState<string>('');
   const [justSaved, setJustSaved] = useState<boolean>(false);
   const [syncError , setSyncError] = useState<string | null>(null);
 
-  useEffect(() => { window.bridge.getSettings().then(setSettings); }, []);
+  useEffect(() => { window.bridge.getSettings().then((s) => { setSettings(s); setSavedSnapshot(JSON.stringify(s)); }); }, []);
+
+  // Persist the current form AND refresh the saved snapshot so the unsaved
+  // indicator clears. Shared by the main Save button and the inline test
+  // buttons (which save the config before probing a device).
+  async function persistSettings(): Promise<AppSettings | null> {
+    if (!settings) return null;
+    const saved = await window.bridge.saveSettings(settings);
+    setSettings(saved);
+    setSavedSnapshot(JSON.stringify(saved));
+    return saved;
+  }
 
   const [saveSettings, savingSettings] = useAsyncAction(async () => {
     if (!settings) return null;
-    const savedSetting = await window.bridge.saveSettings(settings);
-    setSettings(savedSetting);
+    await persistSettings();
     setJustSaved(true);
     setTimeout(() => setJustSaved(false), 2000);
   });
+
+  const dirty = !!settings && JSON.stringify(settings) !== savedSnapshot;
 
   // ─── qparking cloud sync ───────────────────────────────────────────────────
   // "Sync now" saves the URL/key currently on screen, pulls every cloud-owned
@@ -130,7 +145,7 @@ export function Settings() {
   const [runFaceGatePing, faceGatePingBusy] = useAsyncAction(async () => {
     if (!settings) return;
     setFaceGateTestResult('Saving config…');
-    await window.bridge.saveSettings(settings);
+    await persistSettings();
     setFaceGateTestResult('Pinging…');
     const result = await window.bridge.pingFaceGate();
     setFaceGateTestResult(result.ok ? `✓ Reachable (status ${result.status})` : `✗ ${result.error ?? `status ${result.status}`}`);
@@ -139,7 +154,7 @@ export function Settings() {
   const [runFaceGateOpen, faceGateOpenBusy] = useAsyncAction(async () => {
     if (!settings) return;
     setFaceGateTestResult('Saving config…');
-    await window.bridge.saveSettings(settings);
+    await persistSettings();
     setFaceGateTestResult('Opening…');
     const result = await window.bridge.openFaceGate({ plate: 'TEST', reason: 'settings-test' });
     if (result.ok) {
@@ -199,7 +214,7 @@ export function Settings() {
 
   const [runTngPing, tngPinging] = useAsyncAction(async () => {
     if (!settings) return;
-    await window.bridge.saveSettings(settings);
+    await persistSettings();
     appendTngLog('info', `Ping ${settings.tngHost}:${settings.tngPort}…`);
     const result = await window.bridge.tngPing();
     if (result.ok) appendTngLog('recv', `✓ Reachable (${result.latencyMs}ms)`);
@@ -208,7 +223,7 @@ export function Settings() {
 
   const [runTngProbe, tngProbing] = useAsyncAction(async () => {
     if (!settings) return;
-    await window.bridge.saveSettings(settings);
+    await persistSettings();
     appendTngLog('info', `Probe HTTP GET / at ${settings.tngHost}:${settings.tngPort}…`);
     const result = await window.bridge.tngProbeHttp();
     if (result.ok) {
@@ -227,7 +242,7 @@ export function Settings() {
       appendTngLog('error', 'Enable TNG and save settings first');
       return;
     }
-    await window.bridge.saveSettings(settings);
+    await persistSettings();
     appendTngLog('info', `Loopback test — POSTing synthetic PayResult to our own listener…`);
     const result = await window.bridge.tngLoopbackPayResult();
     if (result.ok) {
@@ -243,7 +258,7 @@ export function Settings() {
       appendTngLog('error', 'Enable TNG first and Save settings');
       return;
     }
-    await window.bridge.saveSettings(settings);
+    await persistSettings();
     appendTngLog('send', `PayRequest amount=${tngTestAmountCents}c`);
     const result = await window.bridge.tngTestPayRequest({ payAmount: tngTestAmountCents });
     setTngLastOrderId(result.orderId);
@@ -320,8 +335,7 @@ export function Settings() {
       <p className="text-sm text-gray-500 mt-1">Server-wide configuration. Restart not required — most changes take effect immediately.</p>
 
       <section className="mt-5 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">qparking SaaS sync</h2>
+        <SectionHeader icon={Cloud} title="qparking SaaS sync">
           <button
             type="button"
             onClick={() => runCloudSyncNow()}
@@ -331,7 +345,7 @@ export function Settings() {
             {cloudSyncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {cloudSyncing ? 'Syncing…' : 'Sync now'}
           </button>
-        </div>
+        </SectionHeader>
         <Field label="qparking base URL">
           <input className="input" value={settings.qparkingBaseUrl} onChange={(e) => setSettings({ ...settings, qparkingBaseUrl: e.target.value })} placeholder="https://parking.qbot.now" />
         </Field>
@@ -391,7 +405,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Local servers</h2>
+        <SectionHeader icon={Server} title="Local servers" />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="LPR webhook port">
             <input type="number" className="input" value={settings.lprWebhookPort} onChange={(e) => setSettings({ ...settings, lprWebhookPort: Number(e.target.value) })} />
@@ -406,7 +420,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Face-auth turnstile (faceapp_main)</h2>
+        <SectionHeader icon={ScanFace} title="Face-auth turnstile (faceapp_main)" />
         <p className="text-[11px] text-gray-500">
           Optional second gate trigger. When enabled, qparking-local POSTs to
           <code className="font-mono"> {`{base}/api/external/open-gate`} </code>
@@ -457,7 +471,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Flow behavior</h2>
+        <SectionHeader icon={Workflow} title="Flow behavior" />
 
         {/* Which device collects the fee on a paid exit — strict either/or.
             Only the routing changes; each controller's own command sequence is
@@ -493,7 +507,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Touch'n'Go W4G IO controller</h2>
+        <SectionHeader icon={CreditCard} title="Touch'n'Go W4G IO controller" />
         <p className="text-[11px] text-gray-500">
           A W4G IO controller box on the LAN accepts Touch'n'Go card / e-wallet
           / Visa / Master / MCCS taps and settles through its own bank rail.
@@ -644,7 +658,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Operations</h2>
+        <SectionHeader icon={SlidersHorizontal} title="Operations" />
         <Field label="Exit grace period (seconds)">
           <input type="number" className="input" value={settings.exitGracePeriodSeconds} onChange={(e) => setSettings({ ...settings, exitGracePeriodSeconds: Number(e.target.value) })} />
           <p className="text-[11px] text-gray-500 mt-1">If payment terminal doesn't complete within this window, the operator gets a manual-release prompt.</p>
@@ -652,7 +666,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">App updates</h2>
+        <SectionHeader icon={Package} title="App updates" />
         <p className="text-[11px] text-gray-500">
           Checks the qparking cloud (<code className="font-mono">{`{base}/api/v1/local-server/latest-built`}</code>) for a newer published build of this app. The download is bearer-token authed via the qparking API key in the section above — make sure that's saved before checking.
         </p>
@@ -773,7 +787,7 @@ export function Settings() {
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-3">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500">Maintenance</h2>
+        <SectionHeader icon={Wrench} title="Maintenance" />
         <p className="text-[11px] text-gray-500">
           Wipes Electron-side browser caches (HTTP responses, localStorage,
           IndexedDB, service workers, cookies) and reloads the window.
@@ -788,15 +802,39 @@ export function Settings() {
         </button>
       </section>
 
-      <div className="mt-5 flex items-center gap-2">
-        <button onClick={() => saveSettings()} disabled={savingSettings}
-          className="inline-flex items-center gap-2 h-11 px-5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-          {savingSettings ? <Loader2 size={14} className="animate-spin" /> : justSaved ? <Check size={14} /> : <Save size={14} />}
-          {savingSettings ? 'Saving…' : justSaved ? 'Saved' : 'Save settings'}
-        </button>
+      {/* Sticky save bar — stays in view no matter how far down the long form
+          the operator has scrolled, and flags whether there are edits to save. */}
+      <div className="sticky bottom-4 z-20 mt-6">
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white/95 backdrop-blur shadow-lg px-4 py-3">
+          <span className="text-xs font-medium inline-flex items-center gap-2">
+            {dirty ? (
+              <><span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" /> <span className="text-amber-700">Unsaved changes</span></>
+            ) : (
+              <><span className="w-2 h-2 rounded-full bg-emerald-500" /> <span className="text-gray-500">All changes saved</span></>
+            )}
+          </span>
+          <button onClick={() => saveSettings()} disabled={savingSettings || (!dirty && !justSaved)}
+            className="inline-flex items-center gap-2 h-11 px-5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            {savingSettings ? <Loader2 size={14} className="animate-spin" /> : justSaved ? <Check size={14} /> : <Save size={14} />}
+            {savingSettings ? 'Saving…' : justSaved ? 'Saved' : 'Save settings'}
+          </button>
+        </div>
       </div>
 
       <style>{`.input { height: 40px; padding: 0 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 14px; width: 100%; } .input:focus { border-color: #111827; }`}</style>
+    </div>
+  );
+}
+
+/** Section header — icon + uppercase title, with an optional right-side action
+ *  (e.g. the qparking "Sync now" button). */
+function SectionHeader({ icon: Icon, title, children }: { icon: any; title: string; children?: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <h2 className="text-sm font-bold uppercase tracking-widest text-gray-500 flex items-center gap-2">
+        <Icon size={14} className="text-gray-400" /> {title}
+      </h2>
+      {children}
     </div>
   );
 }

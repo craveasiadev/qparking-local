@@ -150,6 +150,8 @@ export interface BridgeApi {
     /** ISO datetime range on exit_at (inclusive). */
     exitFrom?: string | null;
     exitTo?: string | null;
+    /** Exact payment-status match (paid / pending / declined / …). */
+    paymentStatus?: string | null;
   }): Promise<{
     /** Open rows carry `livePreviewFeeCents` — the current fee computed
      *  server-side with the real rules-aware calc (the UI can't run it). */

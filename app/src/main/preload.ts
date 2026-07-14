@@ -64,6 +64,7 @@ const api: BridgeApi = {
     entryTo?: string | null;
     exitFrom?: string | null;
     exitTo?: string | null;
+    paymentStatus?: string | null;
   }) => ipcRenderer.invoke('sessions:page', opts),
   /** Manually retrigger the exit-payment flow for a session — used by the
    *  Sessions page when the exit LPR misread the plate or the operator

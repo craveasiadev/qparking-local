@@ -752,6 +752,8 @@ export interface SessionFilters {
   entryTo?: string | null;
   exitFrom?: string | null;
   exitTo?: string | null;
+  /** Exact payment-status match (paid / pending / declined / …). */
+  paymentStatus?: string | null;
 }
 
 function buildSessionFilters(filters: SessionFilters): { clauses: string[]; args: any[] } {
@@ -761,6 +763,7 @@ function buildSessionFilters(filters: SessionFilters): { clauses: string[]; args
     clauses.push('UPPER(plate) LIKE ?');
     args.push(`%${filters.plateSearch.trim().toUpperCase()}%`);
   }
+  if (filters.paymentStatus) { clauses.push('payment_status = ?'); args.push(filters.paymentStatus); }
   if (filters.entryFrom) { clauses.push('entry_at >= ?'); args.push(filters.entryFrom); }
   if (filters.entryTo)   { clauses.push('entry_at <= ?'); args.push(filters.entryTo); }
   if (filters.exitFrom)  { clauses.push('exit_at >= ?');  args.push(filters.exitFrom); }

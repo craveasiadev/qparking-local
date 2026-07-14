@@ -1,15 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Activity, Car, CreditCard, Camera, AlertCircle, MonitorPlay, Bolt, Cloud, CloudOff, RefreshCw, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
-import type { ParkingSession, PaymentTerminal, LprCamera, TerminalStatus, SyncStatus } from '@shared/types';
+import {
+  Activity, Car, CreditCard, Camera, MonitorPlay, Bolt, Cloud, CloudOff, RefreshCw,
+  Loader2, CheckCircle2, AlertTriangle, DollarSign, Layers, LogOut, Wifi, WifiOff,
+} from 'lucide-react';
+import type { ParkingSession, PaymentTerminal, LprCamera, TerminalStatus, TerminalConnState, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../hooks/useCurrentSite';
-
-interface PlateEvent {
-  cameraId: number;
-  plate: string;
-  direction: 'entry' | 'exit' | 'dual';
-  timestamp: string;
-}
 
 export function Dashboard() {
   const [open, setOpen] = useState<ParkingSession[]>([]);
@@ -17,7 +13,6 @@ export function Dashboard() {
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [statuses, setStatuses] = useState<Record<number, TerminalStatus>>({});
-  const [recentPlates, setRecentPlates] = useState<PlateEvent[]>([]);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   // Shared with the global not-connected banner — gates the sync panel below so
@@ -65,16 +60,30 @@ export function Dashboard() {
     const off2 = window.bridge.onEvent('session', (p: any) => {
       if (p.kind === 'entry' || p.kind === 'exit-completed') void refresh();
     });
-    const off3 = window.bridge.onEvent('plate-detected', (p: any) => {
-      setRecentPlates((cur) => [p as PlateEvent, ...cur].slice(0, 15));
-    });
-    const off4 = window.bridge.onEvent('sync-status', (p: any) => {
+    const off3 = window.bridge.onEvent('sync-status', (p: any) => {
       setSync(p as SyncStatus);
     });
-    return () => { off1(); off2(); off3(); off4(); };
+    return () => { off1(); off2(); off3(); };
   }, []);
 
   const onlineTerminals = Object.values(statuses).filter((s) => s.conn === 'ready' || s.conn === 'connected' || s.conn === 'transacting').length;
+  const today = new Date().toISOString().slice(0, 10);
+  const entriesToday = recent.filter((s) => s.entryAt.slice(0, 10) === today).length;
+
+  // Most recent completed exits (car has left) — the durable, meaningful feed
+  // that replaced the transient "live plate events" tail.
+  const recentExits = recent.filter((s) => s.exitAt).slice(0, 15);
+
+  // Prefer the cloud-authoritative daily revenue; fall back to summing what we
+  // collected locally today so the tile is still useful while unlinked.
+  const localCollectedToday = recent
+    .filter((s) => s.paymentStatus === 'paid' && (s.paymentTimestamp ?? s.exitAt ?? '').slice(0, 10) === today)
+    .reduce((sum, s) => sum + (s.feeCents ?? 0), 0);
+  const revenueCents = site ? site.revenueToday : localCollectedToday;
+
+  const occupancyPct = site && site.totalSpaces > 0
+    ? Math.round((site.occupiedSpaces / site.totalSpaces) * 100)
+    : null;
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
@@ -114,31 +123,55 @@ export function Dashboard() {
       )}
 
       <div className="mt-5 grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Tile icon={Car}      label="Cars inside"      value={String(open.length)} sub="open sessions" />
-        <Tile icon={CreditCard} label="Terminals online" value={`${onlineTerminals}/${terminals.length}`} sub="connected + ready" tone={onlineTerminals === terminals.length ? 'ok' : 'warn'} />
-        <Tile icon={Camera}   label="Cameras"          value={String(cameras.filter((c) => c.enabled).length)} sub="enabled" />
-        <Tile icon={Activity} label="Today"            value={String(recent.filter((s) => s.entryAt.slice(0,10) === new Date().toISOString().slice(0,10)).length)} sub="entries today" />
+        <Tile icon={Car} label="Cars inside" value={String(open.length)}
+          sub={occupancyPct !== null ? `${occupancyPct}% of ${site!.totalSpaces} spaces` : 'open sessions'} />
+        <Tile icon={DollarSign} label="Revenue today" value={formatCents(revenueCents)}
+          sub={site ? 'from qparking SaaS' : 'collected locally'} />
+        <Tile icon={Activity} label="Entries today" value={String(entriesToday)} sub="new sessions today" />
+        <Tile icon={CreditCard} label="Terminals online" value={`${onlineTerminals}/${terminals.length}`} sub="connected + ready"
+          tone={terminals.length === 0 ? 'neutral' : onlineTerminals === terminals.length ? 'ok' : 'warn'} />
       </div>
+
+      {/* Occupancy bar — only meaningful when the site profile (and its space
+          inventory) has synced from the cloud. */}
+      {occupancyPct !== null && (
+        <section className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
+          <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center gap-2 font-semibold">
+              <Layers size={15} className="text-gray-400" /> Occupancy
+            </div>
+            <div className="tabular-nums text-gray-600">
+              <strong>{site!.occupiedSpaces.toLocaleString()}</strong> / {site!.totalSpaces.toLocaleString()} spaces
+            </div>
+          </div>
+          <div className="mt-2.5 h-2.5 w-full rounded-full bg-gray-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${occupancyPct >= 90 ? 'bg-red-500' : occupancyPct >= 70 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+              style={{ width: `${Math.min(100, occupancyPct)}%` }}
+            />
+          </div>
+        </section>
+      )}
 
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
         <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Cars currently inside ({open.length})</h2>
+            <h2 className="text-sm font-semibold flex items-center gap-2"><Car size={15} className="text-gray-400" /> Cars currently inside ({open.length})</h2>
           </header>
           {open.length === 0 ? (
             <div className="p-6 text-sm text-gray-500 text-center">No open sessions.</div>
           ) : (
-            <ul className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
+            <ul className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
               {open.map((s) => {
                 const minutes = Math.max(0, Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
                 return (
-                  <li key={s.id} className="px-4 py-3 flex items-center justify-between text-sm">
-                    <div>
-                      <div className="font-mono font-bold">{s.plate}</div>
-                      <div className="text-xs text-gray-500">entered {new Date(s.entryAt).toLocaleString()}</div>
+                  <li key={s.id} className="px-4 py-3 flex items-center justify-between gap-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="font-mono font-bold truncate">{s.plate}</div>
+                      <div className="text-xs text-gray-500 truncate">entered {new Date(s.entryAt).toLocaleString()}</div>
                     </div>
-                    <div className="text-right">
-                      <div className="font-mono text-sm">{Math.floor(minutes / 60)}h {minutes % 60}m</div>
+                    <div className="text-right flex-shrink-0">
+                      <div className="font-mono text-sm">{formatDuration(minutes)}</div>
                       <div className="text-[10px] uppercase tracking-widest text-gray-400">parked</div>
                     </div>
                   </li>
@@ -150,18 +183,83 @@ export function Dashboard() {
 
         <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Live plate events</h2>
-            <span className="text-[10px] uppercase tracking-widest text-gray-400">tail</span>
+            <h2 className="text-sm font-semibold flex items-center gap-2"><LogOut size={15} className="text-gray-400" /> Recent exits</h2>
+            <span className="text-[10px] uppercase tracking-widest text-gray-400">last {recentExits.length}</span>
           </header>
-          {recentPlates.length === 0 ? (
-            <div className="p-6 text-sm text-gray-500 text-center inline-flex items-center justify-center gap-2 w-full"><AlertCircle size={14} /> Waiting for camera traffic…</div>
+          {recentExits.length === 0 ? (
+            <div className="p-6 text-sm text-gray-500 text-center">No completed exits yet.</div>
           ) : (
-            <ul className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
-              {recentPlates.map((p, i) => (
-                <li key={i} className="px-4 py-2.5 flex items-center justify-between text-sm">
-                  <span className="font-mono font-bold">{p.plate}</span>
-                  <span className="text-xs uppercase tracking-wide text-gray-500">{p.direction} · cam #{p.cameraId}</span>
-                  <span className="text-[11px] text-gray-400">{new Date(p.timestamp).toLocaleTimeString()}</span>
+            <ul className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
+              {recentExits.map((s) => (
+                <li key={s.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                  <div className="min-w-0">
+                    <div className="font-mono font-bold truncate">{s.plate}</div>
+                    <div className="text-xs text-gray-500">
+                      {s.exitAt ? new Date(s.exitAt).toLocaleTimeString() : '—'}
+                      {s.durationMinutes != null && <span className="text-gray-400"> · {formatDuration(s.durationMinutes)}</span>}
+                    </div>
+                  </div>
+                  <div className="text-right flex-shrink-0 flex flex-col items-end gap-1">
+                    <span className="font-mono text-sm tabular-nums">{s.feeCents != null ? formatCents(s.feeCents) : '—'}</span>
+                    <PaymentBadge status={s.paymentStatus} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      {/* Equipment health — a compact roll-up of the terminals + cameras this
+          site depends on, so the operator can spot a dead reader/camera at a
+          glance without leaving the dashboard. */}
+      <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="text-sm font-semibold flex items-center gap-2"><CreditCard size={15} className="text-gray-400" /> Payment terminals</h2>
+            <span className="text-[10px] uppercase tracking-widest text-gray-400">{onlineTerminals}/{terminals.length} online</span>
+          </header>
+          {terminals.length === 0 ? (
+            <div className="p-6 text-sm text-gray-500 text-center">No terminals configured.</div>
+          ) : (
+            <ul className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+              {terminals.map((t) => {
+                const st = statuses[t.id];
+                return (
+                  <li key={t.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="font-semibold truncate">{t.name}</div>
+                      <div className="text-xs text-gray-500 truncate font-mono">{t.host}:{t.port}</div>
+                    </div>
+                    <ConnPill conn={st?.conn} enabled={t.enabled} />
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="text-sm font-semibold flex items-center gap-2"><Camera size={15} className="text-gray-400" /> LPR cameras</h2>
+            <span className="text-[10px] uppercase tracking-widest text-gray-400">{cameras.filter((c) => c.enabled).length}/{cameras.length} enabled</span>
+          </header>
+          {cameras.length === 0 ? (
+            <div className="p-6 text-sm text-gray-500 text-center">No cameras configured.</div>
+          ) : (
+            <ul className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+              {cameras.map((c) => (
+                <li key={c.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{c.name}</div>
+                    <div className="text-xs text-gray-500 truncate font-mono">{c.host ?? 'no host'}</div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="text-[10px] uppercase tracking-wide text-gray-500">{c.direction}</span>
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${c.enabled ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-100 text-gray-500 border border-gray-200'}`}>
+                      {c.enabled ? 'on' : 'off'}
+                    </span>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -246,7 +344,55 @@ function Tile({ icon: Icon, label, value, sub, tone = 'neutral' }:
         <Icon size={13} strokeWidth={2.25} /> {label}
       </div>
       <div className="mt-1 text-2xl font-bold tabular-nums">{value}</div>
-      {sub && <div className="text-[11px] text-gray-500">{sub}</div>}
+      {sub && <div className="text-[11px] text-gray-500 truncate">{sub}</div>}
     </div>
   );
+}
+
+/** Payment-status chip for the recent-exits feed. */
+function PaymentBadge({ status }: { status: ParkingSession['paymentStatus'] }) {
+  const styles: Record<ParkingSession['paymentStatus'], string> = {
+    paid: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    free: 'bg-sky-50 text-sky-700 border-sky-200',
+    pending: 'bg-amber-50 text-amber-700 border-amber-200',
+    declined: 'bg-red-50 text-red-700 border-red-200',
+    cancelled: 'bg-gray-100 text-gray-500 border-gray-200',
+    manual_release: 'bg-violet-50 text-violet-700 border-violet-200',
+  };
+  const label = status === 'manual_release' ? 'manual' : status;
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${styles[status]}`}>
+      {label}
+    </span>
+  );
+}
+
+/** Terminal connection pill, keyed to the live TerminalConnState. */
+function ConnPill({ conn, enabled }: { conn: TerminalConnState | undefined; enabled: boolean }) {
+  if (!enabled) {
+    return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide bg-gray-100 text-gray-500 border border-gray-200">disabled</span>;
+  }
+  const online = conn === 'ready' || conn === 'connected' || conn === 'transacting';
+  const pending = conn === 'connecting' || conn === 'initialising';
+  const bad = conn === 'error';
+  const cls = online ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : pending ? 'bg-amber-50 text-amber-700 border-amber-200'
+    : bad ? 'bg-red-50 text-red-700 border-red-200'
+    : 'bg-gray-100 text-gray-500 border-gray-200';
+  const Icon = online ? Wifi : bad ? WifiOff : pending ? Loader2 : WifiOff;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${cls}`}>
+      <Icon size={11} className={pending ? 'animate-spin' : ''} /> {conn ?? 'disconnected'}
+    </span>
+  );
+}
+
+function formatCents(cents: number): string {
+  return `RM ${(cents / 100).toFixed(2)}`;
+}
+
+function formatDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }

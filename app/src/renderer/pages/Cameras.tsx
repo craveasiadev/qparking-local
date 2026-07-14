@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Camera as CamIcon, X, Copy, Check, Activity, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Camera as CamIcon, X, Copy, Check, Activity, Loader2, Webhook, MapPin, KeyRound, ChevronDown, Search } from 'lucide-react';
 import type { LprCamera, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
@@ -17,6 +17,24 @@ export function Cameras() {
   const [formError, setFormError] = useState<string | null>(null);
   const [confirm, confirmDialog] = useConfirm();
   const [diag, setDiag] = useState<{ port: number; addresses: string[] } | null>(null);
+  const [webhookOpen, setWebhookOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [dirFilter, setDirFilter] = useState<'all' | 'entry' | 'exit' | 'dual'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+
+  const q = search.trim().toLowerCase();
+  const filterActive = q !== '' || dirFilter !== 'all' || statusFilter !== 'all';
+  const filtered = list.filter((c) => {
+    if (dirFilter !== 'all' && c.direction !== dirFilter) return false;
+    if (statusFilter === 'enabled' && !c.enabled) return false;
+    if (statusFilter === 'disabled' && c.enabled) return false;
+    if (q) {
+      const laneName = lanes.find((l) => l.id === c.laneId)?.name ?? '';
+      const hay = `${c.name} ${c.host ?? ''} ${laneName} ${c.direction}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
 
   async function refresh() {
     setList(await window.bridge.listCameras());
@@ -33,18 +51,31 @@ export function Cameras() {
     await refresh();
   });
 
-  const [runDelete, deleting] = useAsyncAction(async (id: number) => {
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [runDelete] = useAsyncAction(async (id: number) => {
     if (!(await confirm({ title: 'Delete camera', message: 'Delete this camera?', danger: true, confirmLabel: 'Delete' }))) return;
-    await window.bridge.deleteCamera(id);
-    await refresh();
+    setDeletingId(id);
+    try {
+      await window.bridge.deleteCamera(id);
+      await refresh();
+    } finally {
+      setDeletingId(null);
+    }
   });
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
-      <header className="flex items-center justify-between mb-5">
+      <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">LPR cameras</h1>
           <p className="text-sm text-gray-500 mt-1">Cameras POST plate detections to this server's webhook URL.</p>
+          {list.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {list.filter((c) => c.enabled).length} enabled</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-gray-300" /> {list.length} total</span>
+              {filterActive && <span className="text-gray-400">· showing {filtered.length}</span>}
+            </div>
+          )}
         </div>
         <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
           <Plus size={14} /> Add camera
@@ -52,50 +83,108 @@ export function Cameras() {
       </header>
 
       {diag && (
-        <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4">
-          <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-500">Webhook endpoint</div>
-          <p className="mt-1 text-sm text-gray-700">Point your cameras at one of these URLs (use the IP that matches the camera's LAN):</p>
-          <ul className="mt-2 space-y-1 font-mono text-xs">
-            {diag.addresses.map((ip) => (
-              <li key={ip} className="flex items-center justify-between gap-2 bg-gray-50 rounded-md px-3 py-2">
-                <code>POST http://{ip}:{diag.port}/lpr/event</code>
-                <CopyButton text={`http://${ip}:${diag.port}/lpr/event`} />
-              </li>
-            ))}
-          </ul>
+        <div className="mb-4 rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <button
+            onClick={() => setWebhookOpen((o) => !o)}
+            aria-expanded={webhookOpen}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
+          >
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-gray-500">
+              <Webhook size={12} className="text-gray-400" /> Webhook endpoint
+            </span>
+            <span className="inline-flex items-center gap-2 text-[11px] text-gray-400">
+              <span className="font-mono">port {diag.port} · {diag.addresses.length} address{diag.addresses.length === 1 ? '' : 'es'}</span>
+              <ChevronDown size={15} className={`transition-transform ${webhookOpen ? 'rotate-180' : ''}`} />
+            </span>
+          </button>
+          {webhookOpen && (
+            <div className="px-4 pb-4 border-t border-gray-100">
+              <p className="mt-3 text-sm text-gray-700">Point your cameras at one of these URLs (use the IP that matches the camera's LAN):</p>
+              <ul className="mt-2 space-y-1 font-mono text-xs">
+                {diag.addresses.map((ip) => (
+                  <li key={ip} className="flex items-center justify-between gap-2 bg-gray-50 rounded-md px-3 py-2">
+                    <code>POST http://{ip}:{diag.port}/lpr/event</code>
+                    <CopyButton text={`http://${ip}:${diag.port}/lpr/event`} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      {list.length > 0 && (
+        <div className="mb-3 flex flex-col sm:flex-row sm:items-center gap-2">
+          <div className="relative flex-1 sm:max-w-sm">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, IP, or lane…"
+              className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
+            />
+            {search && (
+              <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700">
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <select value={dirFilter} onChange={(e) => setDirFilter(e.target.value as any)}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+            <option value="all">All directions</option>
+            <option value="entry">Entry</option>
+            <option value="exit">Exit</option>
+            <option value="dual">Dual</option>
+          </select>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+            <option value="all">All status</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          {filterActive && (
+            <button
+              onClick={() => { setSearch(''); setDirFilter('all'); setStatusFilter('all'); }}
+              className="h-9 px-3 text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900 whitespace-nowrap"
+            >
+              Clear
+            </button>
+          )}
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-3">
-        {list.map((c) => {
-          const lane = lanes.find((l) => l.id === c.laneId);
-          return (
-            <div key={c.id} className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-              <div className="flex flex-wrap items-start justify-between gap-3 p-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2"><CamIcon size={16} className="text-gray-400" /><h3 className="font-semibold">{c.name}</h3></div>
-                  <div className="mt-1 text-xs text-gray-500 font-mono break-all">
-                    {c.direction}
-                    {c.host && <> · {c.host}</>}
-                    {lane ? ` · lane: ${lane.name}` : ' · no lane assigned'}
-                    {!c.enabled && ' · DISABLED'}
-                  </div>
-                  {c.webhookSecret && <div className="mt-1 text-[11px] text-gray-400">webhook secret: <span className="font-mono">{c.webhookSecret.slice(0, 6)}…</span></div>}
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button onClick={() => { setFormError(null); setEditing(c); }} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
-                  <button onClick={() => runDelete(c.id)} disabled={deleting}
-                    className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center disabled:opacity-40">
-                    {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                  </button>
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        {filtered.map((c) => (
+          <CameraCard
+            key={c.id}
+            cam={c}
+            lane={lanes.find((l) => l.id === c.laneId) ?? null}
+            deleting={deletingId === c.id}
+            onEdit={() => { setFormError(null); setEditing(c); }}
+            onDelete={() => runDelete(c.id)}
+          />
+        ))}
         {list.length === 0 && (
+          <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center">
+            <CamIcon size={28} className="mx-auto text-gray-300" />
+            <p className="mt-3 text-sm font-semibold text-gray-700">No cameras yet</p>
+            <p className="mt-1 text-[13px] text-gray-500">Add a camera and point it at the webhook URL above to start receiving plate events.</p>
+            <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }} className="mt-4 inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+              <Plus size={13} /> Add camera
+            </button>
+          </div>
+        )}
+        {list.length > 0 && filtered.length === 0 && (
           <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
-            No cameras yet.
+            <Search size={22} className="mx-auto text-gray-300" />
+            <p className="mt-2">No cameras match the current filters.</p>
+            <button
+              onClick={() => { setSearch(''); setDirFilter('all'); setStatusFilter('all'); }}
+              className="mt-3 text-[11px] font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900"
+            >
+              Clear filters
+            </button>
           </div>
         )}
       </div>
@@ -106,11 +195,99 @@ export function Cameras() {
   );
 }
 
+/** One camera in the list — config at a glance (color-coded direction, host,
+ *  lane, secret) plus an on-demand reachability test that shows a result banner
+ *  without leaving the page. */
+function CameraCard({ cam, lane, deleting, onEdit, onDelete }:
+  { cam: LprCamera; lane: ParkingLane | null; deleting: boolean; onEdit: () => void; onDelete: () => void }) {
+  const [test, setTest] = useState<{ state: 'idle' | 'pinging' | 'ok' | 'err'; text: string | null }>({ state: 'idle', text: null });
+  const hasHost = !!(cam.host && cam.host.trim());
+
+  async function runTest() {
+    setTest({ state: 'pinging', text: 'Pinging…' });
+    try {
+      const r = await window.bridge.pingCamera(cam.id);
+      setTest(r.ok
+        ? { state: 'ok', text: `Reachable · ${r.latencyMs ?? '—'}ms${r.status ? ` · status ${r.status}` : ''}` }
+        : { state: 'err', text: r.error ?? `status ${r.status ?? '—'}` });
+    } catch (e: any) {
+      setTest({ state: 'err', text: e?.message ?? 'failed' });
+    }
+  }
+
+  return (
+    <div className={`rounded-xl border bg-white overflow-hidden ${cam.enabled ? 'border-gray-200' : 'border-gray-200 opacity-70'}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3 p-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <CamIcon size={16} className="text-gray-400 flex-shrink-0" />
+            <h3 className="font-semibold truncate">{cam.name}</h3>
+            <DirectionBadge direction={cam.direction} />
+            {!cam.enabled && (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-gray-100 text-gray-500 border-gray-200">disabled</span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <Chip mono muted={!hasHost}>{hasHost ? cam.host : 'no IP set'}</Chip>
+            <Chip icon={MapPin} muted={!lane}>{lane ? lane.name : 'no lane'}</Chip>
+            {cam.webhookSecret && <Chip icon={KeyRound} mono>{cam.webhookSecret.slice(0, 6)}…</Chip>}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={runTest} disabled={!hasHost || test.state === 'pinging'}
+            title={hasHost ? 'Ping this camera' : 'Set a host / IP first'}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-40">
+            {test.state === 'pinging' ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />} Test
+          </button>
+          <button onClick={onEdit} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
+          <button onClick={onDelete} disabled={deleting}
+            className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center disabled:opacity-40">
+            {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+          </button>
+        </div>
+      </div>
+      {test.text && (
+        <div className={`px-4 py-2 text-[11px] font-mono border-t ${
+          test.state === 'ok' ? 'bg-emerald-50 text-emerald-800 border-emerald-100'
+          : test.state === 'err' ? 'bg-red-50 text-red-700 border-red-100'
+          : 'bg-gray-50 text-gray-600 border-gray-100'
+        }`}>
+          {test.state === 'ok' ? '✓ ' : test.state === 'err' ? '✗ ' : ''}{test.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DirectionBadge({ direction }: { direction: LprCamera['direction'] }) {
+  const map: Record<LprCamera['direction'], string> = {
+    entry: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    exit: 'bg-blue-50 text-blue-700 border-blue-200',
+    dual: 'bg-amber-50 text-amber-700 border-amber-200',
+  };
+  return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${map[direction]}`}>{direction}</span>;
+}
+
+function Chip({ children, icon: Icon, mono, muted }: { children: React.ReactNode; icon?: any; mono?: boolean; muted?: boolean }) {
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-200 bg-gray-50 text-[11px] ${muted ? 'text-gray-400' : 'text-gray-600'} ${mono ? 'font-mono' : ''}`}>
+      {Icon && <Icon size={11} className="text-gray-400 flex-shrink-0" />}
+      {children}
+    </span>
+  );
+}
+
 function CameraForm({ value, onChange, onCancel, onSave, saving, error }:
   { value: Partial<LprCamera>; onChange: (v: Partial<LprCamera>) => void; onCancel: () => void; onSave: () => void; saving: boolean; error: string | null }) {
   const set = (k: keyof LprCamera, v: any) => onChange({ ...value, [k]: v });
   const generateSecret = () => set('webhookSecret', Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
   const [pingResult, setPingResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onCancel]);
 
   const [pinging, setPinging] = useState(false);
   async function testConnection() {

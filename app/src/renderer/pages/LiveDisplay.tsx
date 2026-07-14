@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { RefreshCw, CameraOff, DoorOpen, CreditCard, Loader2 } from 'lucide-react';
+import { RefreshCw, CameraOff, DoorOpen, CreditCard, Loader2, ScanLine } from 'lucide-react';
 import type { LprCamera, ParkingLane } from '@shared/types';
+
+/** A plate read pushed by a camera over the LPR webhook — overlaid live on the
+ *  matching tile so the wall shows the recognition result, not just video. */
+interface PlateEvent {
+  cameraId: number;
+  plate: string;
+  direction: 'entry' | 'exit' | 'dual';
+  timestamp: string;
+}
 
 /**
  * Operations "video wall" — live video from every configured camera in a large
@@ -20,6 +29,9 @@ export function LiveDisplay() {
   const [loading, setLoading] = useState(false);
   const [port, setPort] = useState<number | null>(null);
   const [nonce, setNonce] = useState(0); // bumped on refresh to remount tiles → reconnect feeds
+  // Latest plate read per camera — overlaid on the matching tile. Keyed by
+  // cameraId so a fresh read for cam A never clobbers cam B's readout.
+  const [plates, setPlates] = useState<Record<number, PlateEvent>>({});
 
   async function refresh() {
     setLoading(true);
@@ -41,12 +53,32 @@ export function LiveDisplay() {
   }
   useEffect(() => { void refresh(); }, []);
 
+  // Overlay the LPR result live: every camera pushes its plate reads through the
+  // webhook, which the main process fans out as 'plate-detected'. Keep only the
+  // latest per camera.
+  useEffect(() => {
+    const off = window.bridge.onEvent('plate-detected', (p: any) => {
+      const ev = p as PlateEvent;
+      setPlates((cur) => ({ ...cur, [ev.cameraId]: ev }));
+    });
+    return () => off();
+  }, []);
+
+  const enabledCount = cameras.filter((c) => c.enabled).length;
+  const streamableCount = cameras.filter((c) => c.enabled && c.host).length;
+
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
-      <header className="flex items-center justify-between mb-5">
+      <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Live display</h1>
           <p className="text-sm text-gray-500 mt-1">Live video streamed straight from each device over RTSP. A camera needs its IP address set on the LPR cameras page to appear here.</p>
+          {cameras.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {streamableCount} live-streaming</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-gray-300" /> {enabledCount}/{cameras.length} enabled</span>
+            </div>
+          )}
         </div>
         <button onClick={() => refresh()} disabled={loading}
           className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
@@ -62,7 +94,8 @@ export function LiveDisplay() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {cameras.map((c) => (
             <LiveTile key={`${c.id}:${nonce}`} cam={c} port={port}
-              lane={lanes.find((l) => l.id === c.laneId) ?? null} />
+              lane={lanes.find((l) => l.id === c.laneId) ?? null}
+              lastPlate={plates[c.id]} />
           ))}
         </div>
       )}
@@ -73,27 +106,34 @@ export function LiveDisplay() {
 /** Pick the delivery: any enabled camera with a host (IP) streams the RTSP feed
  *  as MJPEG from the local server; everything else uses the polled-frame
  *  fallback (webhook-only cameras with no host). */
-function LiveTile({ cam, port, lane }: { cam: LprCamera; port: number | null; lane: ParkingLane | null }) {
+function LiveTile({ cam, port, lane, lastPlate }: { cam: LprCamera; port: number | null; lane: ParkingLane | null; lastPlate?: PlateEvent }) {
   const streams = !!(cam.enabled && cam.host);
-  if (streams && port) return <StreamTile cam={cam} port={port} lane={lane} />;
-  return <PollTile cam={cam} lane={lane} />;
+  if (streams && port) return <StreamTile cam={cam} port={port} lane={lane} lastPlate={lastPlate} />;
+  return <PollTile cam={cam} lane={lane} lastPlate={lastPlate} />;
 }
 
 /** Continuous MJPEG stream via <img>. The browser holds one connection open and
  *  swaps frames as they arrive — no polling, no base64, smooth. On error we
  *  reconnect with a cache-busting query so a blipped feed recovers on its own. */
-function StreamTile({ cam, port, lane }: { cam: LprCamera; port: number; lane: ParkingLane | null }) {
+function StreamTile({ cam, port, lane, lastPlate }: { cam: LprCamera; port: number; lane: ParkingLane | null; lastPlate?: PlateEvent }) {
   const [attempt, setAttempt] = useState(0);
   const [ok, setOk] = useState(false);
   const src = `http://127.0.0.1:${port}/live/${cam.id}?a=${attempt}`;
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-950 overflow-hidden shadow-sm">
+    <div className={`rounded-xl border border-gray-200 bg-gray-950 overflow-hidden shadow-sm ${cam.enabled ? '' : 'opacity-60'}`}>
       <div className="relative aspect-video bg-black flex items-center justify-center">
         <img src={src} alt={`${cam.name} live`} className="w-full h-full object-contain"
           onLoad={() => setOk(true)}
           onError={() => { setOk(false); window.setTimeout(() => setAttempt((a) => a + 1), 2000); }} />
+        {!ok && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white/40 pointer-events-none">
+            <Loader2 size={22} className="animate-spin" />
+            <span className="text-xs">{attempt === 0 ? 'Connecting…' : `Reconnecting… (attempt ${attempt})`}</span>
+          </div>
+        )}
         <LiveBadge on={ok} />
+        <PlateOverlay plate={lastPlate} />
       </div>
       <TileFooter cam={cam} lane={lane} />
     </div>
@@ -103,7 +143,7 @@ function StreamTile({ cam, port, lane }: { cam: LprCamera; port: number; lane: P
 /** Fallback: poll the main-process frame cache (HTTP snapshot URL, or the last
  *  frame the SDK/webhook pushed) every second — for cameras without device
  *  credentials. */
-function PollTile({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }) {
+function PollTile({ cam, lane, lastPlate }: { cam: LprCamera; lane: ParkingLane | null; lastPlate?: PlateEvent }) {
   const REFRESH_MS = 1_000;
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -133,14 +173,14 @@ function PollTile({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }) {
   }, [cam.id]);
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-950 overflow-hidden shadow-sm">
+    <div className={`rounded-xl border border-gray-200 bg-gray-950 overflow-hidden shadow-sm ${cam.enabled ? '' : 'opacity-60'}`}>
       <div className="relative aspect-video bg-black flex items-center justify-center">
         {src ? (
           <img src={src} alt={`${cam.name} live`} className="w-full h-full object-contain" />
         ) : (
           <div className="flex flex-col items-center gap-2 text-white/40 px-4 text-center">
             <CameraOff size={26} />
-            <span className="text-xs">{error ?? 'loading…'}</span>
+            <span className="text-xs">{cam.enabled ? (error ?? 'loading…') : 'camera disabled'}</span>
           </div>
         )}
         <LiveBadge on={!!src} />
@@ -149,8 +189,38 @@ function PollTile({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }) {
             {new Date(fetchedAt).toLocaleTimeString()}
           </div>
         )}
+        <PlateOverlay plate={lastPlate} />
       </div>
       <TileFooter cam={cam} lane={lane} />
+    </div>
+  );
+}
+
+/** Live LPR readout overlaid on a feed — the plate the camera last recognised,
+ *  its direction and time. Appears on a fresh read (emerald ring) and clears
+ *  itself after 5s so a stale plate doesn't linger over the live video. */
+function PlateOverlay({ plate }: { plate?: PlateEvent }) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!plate) return;
+    setVisible(true);
+    const t = window.setTimeout(() => setVisible(false), 5000);
+    return () => window.clearTimeout(t);
+  }, [plate?.plate, plate?.timestamp]);
+
+  if (!plate || !visible) return null;
+  const dirCls = plate.direction === 'entry' ? 'text-emerald-300'
+    : plate.direction === 'exit' ? 'text-blue-300' : 'text-amber-300';
+  return (
+    <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 bg-black/70 backdrop-blur-sm border border-emerald-400 ring-1 ring-emerald-400/60">
+      <span className="inline-flex items-center gap-1.5 min-w-0">
+        <ScanLine size={13} className="text-white/50 shrink-0" />
+        <span className="font-mono font-bold text-white text-base tracking-wider truncate">{plate.plate}</span>
+      </span>
+      <span className="flex items-center gap-2 shrink-0">
+        <span className={`text-[10px] font-bold uppercase tracking-wide ${dirCls}`}>{plate.direction}</span>
+        <span className="text-[10px] text-white/60 font-mono">{new Date(plate.timestamp).toLocaleTimeString()}</span>
+      </span>
     </div>
   );
 }

@@ -558,6 +558,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
   entryTo?: string | null;
   exitFrom?: string | null;
   exitTo?: string | null;
+  paymentStatus?: string | null;
 }) => ({
   rows: listSessionsPage(opts).map((s) => ({ ...s, livePreviewFeeCents: previewFeeForOpenSession(s) })),
   counts: countSessions({
@@ -566,6 +567,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
     entryTo: opts.entryTo ?? null,
     exitFrom: opts.exitFrom ?? null,
     exitTo: opts.exitTo ?? null,
+    paymentStatus: opts.paymentStatus ?? null,
   }),
 }));
 

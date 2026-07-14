@@ -1,13 +1,14 @@
-import { useEffect, useState } from 'react';
-import { RefreshCw, AlertCircle, Pencil, X, Save, Loader2, CloudUpload, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator, Search, X } from 'lucide-react';
 import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 export function ParkingPolicies() {
   const [list, setList] = useState<RatePolicy[]>([]);
   const [result, setResult] = useState<{ ok: boolean; fetched: number; error?: string } | null>(null);
-  const [editing, setEditing] = useState<RatePolicy | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [search, setSearch] = useState('');
+  const [kindFilter, setKindFilter] = useState<'all' | 'default' | 'zero'>('all');
 
   function toggle(id: string) { setExpanded((m) => ({ ...m, [id]: !m[id] })); }
 
@@ -18,6 +19,26 @@ export function ParkingPolicies() {
     const r = await window.bridge.syncRatePoliciesNow();
     setResult(r as any);
     await refresh();
+    setTimeout(() => setResult(null), 6000);
+  });
+
+  const lastSynced = useMemo(
+    () => list.reduce((m, s) => (s.fetchedAt && s.fetchedAt > m ? s.fetchedAt : m), ''),
+    [list],
+  );
+  const withRulesCount = list.filter((s) => (s.rules?.length ?? 0) > 0).length;
+
+  const q = search.trim().toLowerCase();
+  const filterActive = q !== '' || kindFilter !== 'all';
+  const isZero = (s: RatePolicy) => s.firstBlockCents === 0 && s.perBlockCents === 0;
+  const filtered = list.filter((s) => {
+    if (kindFilter === 'default' && !(s as any).isSiteDefault) return false;
+    if (kindFilter === 'zero' && !isZero(s)) return false;
+    if (q) {
+      const hay = `${s.policyName ?? ''} ${s.policyId ?? ''} ${s.policyDescription ?? ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
   });
 
   return (
@@ -28,6 +49,13 @@ export function ParkingPolicies() {
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every active parking rate configured on the cloud, cached here so the gate can price sessions even if WAN is offline. Expand a rate to test a price.
           </p>
+          {list.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-gray-400" /> {list.length} plan{list.length === 1 ? '' : 's'}</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-500" /> {withRulesCount} with rules</span>
+              {lastSynced && <span className="inline-flex items-center gap-1.5"><Clock size={12} /> synced {new Date(lastSynced).toLocaleString()}</span>}
+            </div>
+          )}
         </div>
         <button onClick={() => sync()} disabled={syncing}
           className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50 self-start">
@@ -64,6 +92,48 @@ export function ParkingPolicies() {
         </div>
       ) : (
         <>
+          {/* Filter bar */}
+          <div className="mb-3 flex flex-col sm:flex-row sm:items-center gap-2">
+            <div className="relative flex-1 sm:max-w-sm">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search plan name, id, or description…"
+                className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
+              />
+              {search && (
+                <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700">
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+            <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value as any)}
+              className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+              <option value="all">All plans</option>
+              <option value="default">Site default</option>
+              <option value="zero">Zero-rate (free)</option>
+            </select>
+            {filterActive && (
+              <button onClick={() => { setSearch(''); setKindFilter('all'); }}
+                className="h-9 px-3 text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900 whitespace-nowrap">
+                Clear
+              </button>
+            )}
+          </div>
+
+          {filtered.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
+              <Search size={22} className="mx-auto text-gray-300" />
+              <p className="mt-2">No plans match the current filters.</p>
+              <button onClick={() => { setSearch(''); setKindFilter('all'); }}
+                className="mt-3 text-[11px] font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900">
+                Clear filters
+              </button>
+            </div>
+          ) : (
+          <>
           {/* Desktop / tablet table */}
           <div className="hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden">
             <div className="overflow-x-auto">
@@ -81,7 +151,7 @@ export function ParkingPolicies() {
                   </tr>
                 </thead>
                 <tbody>
-                  {list.map((s) => {
+                  {filtered.map((s) => {
                     const zero = s.firstBlockCents === 0 && s.perBlockCents === 0;
                     const ruleCount = s.rules?.length ?? 0;
                     const isOpen = !!expanded[s.policyId];
@@ -144,7 +214,7 @@ export function ParkingPolicies() {
 
           {/* Mobile cards */}
           <div className="md:hidden space-y-2">
-            {list.map((s) => {
+            {filtered.map((s) => {
               const zero = s.firstBlockCents === 0 && s.perBlockCents === 0;
               const ruleCount = s.rules?.length ?? 0;
               const isOpen = !!expanded[s.policyId];
@@ -183,6 +253,8 @@ export function ParkingPolicies() {
               );
             })}
           </div>
+          </>
+          )}
 
           {list.some((s) => s.firstBlockCents === 0 && s.perBlockCents === 0) && (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-[12px] px-3 py-2">
@@ -191,95 +263,6 @@ export function ParkingPolicies() {
           )}
         </>
       )}
-
-      {editing && (
-        <EditRateModal
-          policy={editing}
-          onClose={() => setEditing(null)}
-          onSaved={async () => { setEditing(null); await refresh(); }}
-        />
-      )}
-    </div>
-  );
-}
-
-function EditRateModal({ policy, onClose, onSaved }: { policy: RatePolicy; onClose: () => void; onSaved: () => void }) {
-  const [firstBlockRm, setFirstBlockRm] = useState((policy.firstBlockCents / 100).toFixed(2));
-  const [perBlockRm, setPerBlockRm] = useState((policy.perBlockCents / 100).toFixed(2));
-  const [freeMinutes, setFreeMinutes] = useState(String(policy.freeMinutes));
-  const [blockMinutes, setBlockMinutes] = useState(String(policy.blockMinutes));
-  const [dailyCapRm, setDailyCapRm] = useState((policy.dailyCapCents / 100).toFixed(2));
-  const [error, setError] = useState<string | null>(null);
-
-  const [save, saving] = useAsyncAction(async () => {
-    setError(null);
-    const r = await window.bridge.saveRatePolicy({
-      firstBlockCents: Math.round(parseFloat(firstBlockRm || '0') * 100),
-      perBlockCents:   Math.round(parseFloat(perBlockRm   || '0') * 100),
-      blockMinutes:    parseInt(blockMinutes || '60', 10),
-      freeMinutes:     parseInt(freeMinutes  || '0', 10),
-      dailyCapCents:   Math.round(parseFloat(dailyCapRm  || '0') * 100),
-    });
-    if (!r.ok) {
-      setError(r.error || 'Save failed');
-      return;
-    }
-    onSaved();
-  });
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden">
-        <header className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
-          <div>
-            <h2 className="text-base font-bold">Edit rate — {policy.policyName}</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Saves to qparking SaaS, then re-syncs the local cache.</p>
-          </div>
-          <button onClick={onClose} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500"><X size={18} /></button>
-        </header>
-        <div className="p-5 space-y-3">
-          {error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field label="First block (RM)" hint="Flat fee for the first parking block">
-              <input type="number" step="0.50" min="0" className="input font-mono" value={firstBlockRm} onChange={(e) => setFirstBlockRm(e.target.value)} />
-            </Field>
-            <Field label="Per block (RM)" hint="Charge for each block after the first">
-              <input type="number" step="0.50" min="0" className="input font-mono" value={perBlockRm} onChange={(e) => setPerBlockRm(e.target.value)} />
-            </Field>
-            <Field label="Block size (minutes)" hint="Typical: 60">
-              <input type="number" step="1" min="1" className="input font-mono" value={blockMinutes} onChange={(e) => setBlockMinutes(e.target.value)} />
-            </Field>
-            <Field label="Free minutes" hint="Grace period — 0 = charge immediately">
-              <input type="number" step="1" min="0" className="input font-mono" value={freeMinutes} onChange={(e) => setFreeMinutes(e.target.value)} />
-            </Field>
-            <Field label="Daily cap (RM)" hint="0 = no cap">
-              <input type="number" step="0.50" min="0" className="input font-mono" value={dailyCapRm} onChange={(e) => setDailyCapRm(e.target.value)} />
-            </Field>
-          </div>
-          <p className="text-[11px] text-gray-500 mt-2">
-            Example: <strong>First RM 5.00 + Per RM 3.00 + Block 60 min + Free 0 min</strong> → 1h = RM 5, 2h = RM 8, 3h = RM 11.
-          </p>
-        </div>
-        <footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
-          <button onClick={onClose} disabled={saving} className="text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900 px-3 disabled:opacity-50">Cancel</button>
-          <button onClick={() => save()} disabled={saving}
-            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-            {saving ? <Loader2 size={13} className="animate-spin" /> : <CloudUpload size={13} />}
-            {saving ? 'Saving + syncing…' : 'Save & push to qparking'}
-          </button>
-        </footer>
-        <style>{`.input { height: 38px; padding: 0 0.625rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 13px; width: 100%; background: white; } .input:focus { border-color: #111827; }`}</style>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
-      {children}
-      {hint && <p className="text-[10px] text-gray-500 mt-1">{hint}</p>}
     </div>
   );
 }

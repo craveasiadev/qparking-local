@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Map as MapIcon, X } from 'lucide-react';
+import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Cpu, Search } from 'lucide-react';
 import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
 
@@ -28,6 +28,9 @@ export function Lanes() {
   const [editing, setEditing] = useState<(Partial<ParkingLane> & { cameraIds?: number[] }) | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [confirm, confirmDialog] = useConfirm();
+  const [search, setSearch] = useState('');
+  const [dirFilter, setDirFilter] = useState<'all' | 'entry' | 'exit' | 'dual'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
 
   async function refresh() {
     setList(await window.bridge.listLanes());
@@ -36,6 +39,14 @@ export function Lanes() {
     setCameras(await window.bridge.listCameras());
   }
   useEffect(() => { void refresh(); }, []);
+
+  // Esc closes the add/edit lane modal (backdrop click already does).
+  useEffect(() => {
+    if (!editing) return;
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditing(null); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [editing]);
 
   async function save() {
     setFormError(null);
@@ -64,33 +75,108 @@ export function Lanes() {
   const showRatePlan = selectedDir === 'entry' || selectedDir === 'dual';
   const showTerminal = selectedDir === 'exit' || selectedDir === 'dual';
 
+  const q = search.trim().toLowerCase();
+  const filterActive = q !== '' || dirFilter !== 'all' || statusFilter !== 'all';
+  const filtered = list.filter((l) => {
+    if (statusFilter === 'enabled' && !l.enabled) return false;
+    if (statusFilter === 'disabled' && l.enabled) return false;
+    const laneCams = cameras.filter((c) => c.laneId === l.id);
+    if (dirFilter !== 'all' && laneDirectionLabel(laneCams) !== dirFilter) return false;
+    if (q) {
+      const planName = policies.find((p) => p.policyId === l.policyId)?.policyName ?? '';
+      const termName = terminals.find((t) => t.id === l.terminalId)?.name ?? '';
+      const camNames = laneCams.map((c) => c.name).join(' ');
+      const hay = `${l.name} ${planName} ${termName} ${camNames}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       {confirmDialog}
-      <header className="flex items-center justify-between mb-5">
+      <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Lanes</h1>
           <p className="text-sm text-gray-500 mt-1">Entry and exit gates. Each lane links cameras + a payment terminal + a policy rate.</p>
+          {list.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {list.filter((l) => l.enabled).length} enabled</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-gray-300" /> {list.length} total</span>
+              {filterActive && <span className="text-gray-400">· showing {filtered.length}</span>}
+            </div>
+          )}
         </div>
         <button onClick={() => { setFormError(null); setEditing({ ...EMPTY, cameraIds: [] }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
           <Plus size={14} /> Add lane
         </button>
       </header>
 
+      {list.length > 0 && (
+        <div className="mb-3 flex flex-col sm:flex-row sm:items-center gap-2">
+          <div className="relative flex-1 sm:max-w-sm">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, camera, plan, or terminal…"
+              className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
+            />
+            {search && (
+              <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700">
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <select value={dirFilter} onChange={(e) => setDirFilter(e.target.value as any)}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+            <option value="all">All directions</option>
+            <option value="entry">Entry</option>
+            <option value="exit">Exit</option>
+            <option value="dual">Dual</option>
+          </select>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white">
+            <option value="all">All status</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          {filterActive && (
+            <button onClick={() => { setSearch(''); setDirFilter('all'); setStatusFilter('all'); }}
+              className="h-9 px-3 text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900 whitespace-nowrap">
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-3">
-        {list.map((l) => {
+        {filtered.map((l) => {
           const t = terminals.find((x) => x.id === l.terminalId);
           const s = policies.find((x) => x.policyId === l.policyId);
+          const laneCams = cameras.filter((c) => c.laneId === l.id);
+          const dir = laneDirectionLabel(laneCams);
+          const showPlan = dir === 'entry' || dir === 'dual';
+          const showTerm = dir === 'exit' || dir === 'dual';
           return (
-            <div key={l.id} className="rounded-xl border border-gray-200 bg-white p-4 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <MapIcon size={16} className="text-gray-400" />
-                  <h3 className="font-semibold">{l.name}</h3>
+            <div key={l.id} className={`rounded-xl border bg-white p-4 flex flex-wrap items-start justify-between gap-3 ${l.enabled ? 'border-gray-200' : 'border-gray-200 opacity-70'}`}>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <MapIcon size={16} className="text-gray-400 flex-shrink-0" />
+                  <h3 className="font-semibold truncate">{l.name}</h3>
+                  <DirectionBadge label={dir} />
+                  {!l.enabled && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-gray-100 text-gray-500 border-gray-200">disabled</span>
+                  )}
                 </div>
-                <div className="mt-1 text-xs text-gray-500 font-mono">
-                  {laneDirectionLabel(cameras.filter((c) => c.laneId === l.id))} · plan: {s?.policyName ?? 'site default'} · terminal: {t?.name ?? '—'}
-                  {!l.enabled && ' · DISABLED'}
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <Chip icon={CamIcon} muted={laneCams.length === 0}>
+                    {laneCams.length === 0 ? 'no camera' : laneCams.length === 1 ? laneCams[0].name : `${laneCams.length} cameras`}
+                  </Chip>
+                  {showPlan && <Chip icon={Gauge}>plan: {s?.policyName ?? 'site default'}</Chip>}
+                  {showTerm && <Chip icon={CreditCard} muted={!t}>terminal: {t?.name ?? 'none'}</Chip>}
+                  {l.gateRelayAddress && <Chip icon={Cpu} mono>{l.gateRelayAddress}</Chip>}
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -101,7 +187,26 @@ export function Lanes() {
             </div>
           );
         })}
-        {list.length === 0 && <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">No lanes yet.</div>}
+        {list.length === 0 && (
+          <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center">
+            <MapIcon size={28} className="mx-auto text-gray-300" />
+            <p className="mt-3 text-sm font-semibold text-gray-700">No lanes yet</p>
+            <p className="mt-1 text-[13px] text-gray-500">A lane links an LPR camera to a rate plan (entry) and/or a payment terminal (exit).</p>
+            <button onClick={() => { setFormError(null); setEditing({ ...EMPTY, cameraIds: [] }); }} className="mt-4 inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+              <Plus size={13} /> Add lane
+            </button>
+          </div>
+        )}
+        {list.length > 0 && filtered.length === 0 && (
+          <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
+            <Search size={22} className="mx-auto text-gray-300" />
+            <p className="mt-2">No lanes match the current filters.</p>
+            <button onClick={() => { setSearch(''); setDirFilter('all'); setStatusFilter('all'); }}
+              className="mt-3 text-[11px] font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900">
+              Clear filters
+            </button>
+          </div>
+        )}
       </div>
 
       {editing && (
@@ -198,5 +303,23 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
       {children}
     </div>
+  );
+}
+
+/** Color-coded lane direction (derived from its cameras). */
+function DirectionBadge({ label }: { label: string }) {
+  const cls = label === 'entry' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : label === 'exit' ? 'bg-blue-50 text-blue-700 border-blue-200'
+    : label === 'dual' ? 'bg-amber-50 text-amber-700 border-amber-200'
+    : 'bg-gray-100 text-gray-500 border-gray-200';
+  return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${cls}`}>{label}</span>;
+}
+
+function Chip({ children, icon: Icon, mono, muted }: { children: React.ReactNode; icon?: any; mono?: boolean; muted?: boolean }) {
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-200 bg-gray-50 text-[11px] ${muted ? 'text-gray-400' : 'text-gray-600'} ${mono ? 'font-mono' : ''}`}>
+      {Icon && <Icon size={11} className="text-gray-400 flex-shrink-0" />}
+      {children}
+    </span>
   );
 }

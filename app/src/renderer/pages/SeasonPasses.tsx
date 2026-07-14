@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud } from 'lucide-react';
+import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud, Clock } from 'lucide-react';
 import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
@@ -45,6 +45,8 @@ export function SeasonPasses() {
     expiring: passes.filter((p) => p.endDate && p.endDate >= today && p.endDate <= in7Days).length,
   };
 
+  const lastSynced = passes.reduce((m, p) => (p.fetchedAt && p.fetchedAt > m ? p.fetchedAt : m), '');
+
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
@@ -55,6 +57,11 @@ export function SeasonPasses() {
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every plate the gate opens for without charging. Cached from the cloud.
           </p>
+          {lastSynced && (
+            <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
+              <Clock size={12} /> Last synced {new Date(lastSynced).toLocaleString()}
+            </p>
+          )}
         </div>
         <button onClick={() => load()} disabled={loading}
           className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
@@ -118,7 +125,8 @@ export function SeasonPasses() {
         </div>
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="overflow-x-auto">
+          {/* DESKTOP TABLE */}
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
                 <tr>
@@ -138,11 +146,7 @@ export function SeasonPasses() {
                         <Car size={11} className="text-gray-400" /> {p.plateNumber}
                       </td>
                       <td className="px-3 py-2">
-                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
-                          p.isFree ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
-                        }`}>
-                          {p.isFree && <Crown size={9} />} {p.passType}
-                        </span>
+                        <PassTypeBadge isFree={p.isFree} passType={p.passType} />
                       </td>
                       <td className="px-3 py-2 text-[12px] font-mono text-gray-700">
                         {p.startDate ?? '—'} → {p.endDate ?? '—'}
@@ -150,9 +154,7 @@ export function SeasonPasses() {
                       </td>
                       <td className="px-3 py-2 font-mono text-[12px]">{p.spaceNumber ?? '—'}</td>
                       <td className="px-3 py-2 text-right">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          p.status === 'active' ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700'
-                        }`}>{p.status}</span>
+                        <PassStatusBadge status={p.status} />
                       </td>
                     </tr>
                   );
@@ -160,8 +162,51 @@ export function SeasonPasses() {
               </tbody>
             </table>
           </div>
+
+          {/* MOBILE CARDS */}
+          <ul className="md:hidden divide-y divide-gray-100">
+            {filtered.map((p) => {
+              const expiringSoon = p.endDate && p.endDate >= today && p.endDate <= in7Days;
+              return (
+                <li key={`${p.passId}-${p.plateNumber}`} className={`p-3 ${expiringSoon ? 'bg-amber-50/40' : ''}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono font-bold inline-flex items-center gap-1.5">
+                      <Car size={12} className="text-gray-400" /> {p.plateNumber}
+                    </span>
+                    <PassStatusBadge status={p.status} />
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <PassTypeBadge isFree={p.isFree} passType={p.passType} />
+                    {p.spaceNumber && <span className="text-[11px] font-mono text-gray-500">space {p.spaceNumber}</span>}
+                  </div>
+                  <div className="mt-1.5 text-[11px] font-mono text-gray-500">
+                    {p.startDate ?? '—'} → {p.endDate ?? '—'}
+                    {expiringSoon && <span className="ml-1.5 text-amber-700 font-bold">EXPIRING</span>}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
     </div>
+  );
+}
+
+function PassTypeBadge({ isFree, passType }: { isFree: boolean; passType: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+      isFree ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
+    }`}>
+      {isFree && <Crown size={9} />} {passType}
+    </span>
+  );
+}
+
+function PassStatusBadge({ status }: { status: string }) {
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+      status === 'active' ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700'
+    }`}>{status}</span>
   );
 }
