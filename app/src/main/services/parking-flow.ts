@@ -28,7 +28,7 @@ import {
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
 } from './db';
 import { lprEvents, normalisePlate, captureFrameToFile, type PlateEvent } from './lpr-webhook';
-import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId } from './w4g-tng';
+import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId } from './payment-tng';
 
 // Stamped into every parking-flow log line so the operator can verify they're
 // running the build that has the latest fix — vs an older cached installer.

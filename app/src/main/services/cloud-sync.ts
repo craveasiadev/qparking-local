@@ -21,9 +21,11 @@ import {
   replaceAllSeasonPasses,
   replaceParkingSpaces,
   pruneStaleRatePolicies,
+  replaceAllActivityLogs,
 } from './db';
 import { getCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
 import type { RatePolicy, TariffRule, SeasonPass, ParkingSpace, Site } from '../../shared/types';
+import { ReplaceAll } from 'lucide-react';
 
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
@@ -292,6 +294,7 @@ export async function syncAll(): Promise<{
     syncSeasonPasses().catch(toFailedSyncResult),
     syncParkingSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
+    syncActivityLogs().catch(toFailedSyncResult),
   ]);
   return { policies, passes, spaces, site };
 }
@@ -440,6 +443,57 @@ export async function pushRatePolicy(rateInput: {
     // Re-pull so the local cache reflects whatever the SaaS canonicalised.
     return await syncRatePolicies();
   } catch (error) {
+    return toFailedSyncResult(error);
+  }
+}
+
+// Map a cloud /activity-logs row (snake_case, per ActivityLogResource) to the
+// camelCase shape replaceAllActivityLogs() writes into SQLite. Accepts either
+// casing so a resource tweak doesn't silently null a column. `_fetchedAt` is
+// unused — activity_logs tracks occurred_at/created_at, not a fetch stamp —
+// but kept in the signature to match the syncActivityLogs() call site.
+function mapApiRowToActivityLogs(activityLogRow: any, _fetchedAt: string): any {
+  return {
+    id: String(activityLogRow.id),
+    eventKey: String(activityLogRow.event_key ?? activityLogRow.eventKey ?? ''),
+    action: String(activityLogRow.action ?? ''),
+    category: String(activityLogRow.category ?? ''),
+    severity: activityLogRow.severity ?? 'low',
+    outcome: activityLogRow.outcome ?? null,
+    resourceType: activityLogRow.resource_type ?? activityLogRow.resourceType ?? null,
+    resourceId: activityLogRow.resource_id ?? activityLogRow.resourceId ?? null,
+    correlationId: activityLogRow.correlation_id ?? activityLogRow.correlationId ?? null,
+    description: activityLogRow.description ?? null,
+    // Cloud sends `changes` as an object/array; replaceAllActivityLogs()
+    // JSON-stringifies it on the way into the TEXT column.
+    changes: activityLogRow.changes ?? null,
+    source: activityLogRow.source ?? 'cloud',
+    actorName: activityLogRow.actor_name ?? activityLogRow.actorName ?? null,
+    siteId: activityLogRow.site_id ?? activityLogRow.siteId ?? null,
+    occurredAt: activityLogRow.occurred_at ?? activityLogRow.occurredAt ?? null,
+    createdAt: activityLogRow.created_at ?? activityLogRow.createdAt ?? null,
+  };
+}
+
+
+export async function syncActivityLogs(): Promise<SyncResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return NOT_CONFIGURED;
+  try {
+    const { data: responseBody } = await cloud.get<CloudListBody>('/activity-logs');
+    const activityLogRows = responseBody.data ?? [];
+    const fetchedAt = new Date().toISOString();
+
+    if(activityLogRows.length === 0){
+      return { ok: false, fetched: 0, error: 'empty_site_payload' };
+    }
+
+    const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow, fetchedAt));
+    replaceAllActivityLogs(activityLogs);
+    return { ok: true, fetched: 1 };
+  } catch (error) {
+    // 404 means an older qparking SaaS without the endpoint — gracefully no-op.
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
     return toFailedSyncResult(error);
   }
 }

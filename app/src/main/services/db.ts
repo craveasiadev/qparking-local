@@ -12,6 +12,7 @@ import type {
   SeasonPass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule,
   ParkingSpace, Site, SyncOp, SyncQueueRow,
+  ActivityLog,
 } from '../../shared/types';
 
 let db: Database.Database | null = null;
@@ -339,6 +340,28 @@ function applySchema(db: Database.Database) {
       scope_daily_cap_cents INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS activity_logs (
+      id TEXT PRIMARY KEY,
+      event_key VARCHAR(64) NOT NULL,
+      action VARCHAR(32) NOT NULL,
+      category VARCHAR(32) NOT NULL,
+      severity VARCHAR(16) NOT NULL DEFAULT 'low',
+      outcome VARCHAR(16) DEFAULT 'ok',
+      resource_type VARCHAR(64),
+      resource_id VARCHAR(64),
+      correlation_id VARCHAR(64),
+      description TEXT,
+      changes TEXT,
+      source TEXT DEFAULT 'local',
+      actor_name TEXT,
+      site_id TEXT,
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      pushed_to_cloud BOOLEAN DEFAULT 0,
+      pushed_at TEXT,
+      sync_error TEXT
     );
   `);
 
@@ -842,7 +865,7 @@ export function deleteSession(sessionId: number): boolean {
 // ─── sync queue ────────────────────────────────────────────────────────────
 // Persistent retry queue for outbound pushes to qparking SaaS. Every state
 // change to a session (entry / update / exit / delete) drops a row here;
-// the sync-queue module drains the queue with exponential backoff. A
+// the cloud-queue module drains the queue with exponential backoff. A
 // process restart finds these rows still pending — nothing is lost.
 
 // Row shape + op union live in shared/db-models.ts (single source of truth,
@@ -1283,6 +1306,77 @@ export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
         pass.startDate, pass.endDate,
         pass.isFree ? 1 : 0,
         pass.spaceNumber,
+      );
+    }
+  });
+  tx();
+}
+
+function rowToActivityLog(activityLogRow: any): ActivityLog {
+  return {
+    id: activityLogRow.id,
+    eventKey: activityLogRow.event_key,
+    action: activityLogRow.action,
+    category: activityLogRow.category,
+    severity: activityLogRow.severity, 
+    outcome: activityLogRow.outcome,
+    resourceType: activityLogRow.resource_type, 
+    resourceId: activityLogRow.resource_id,
+    correlationId: activityLogRow.correlation_id, 
+    description: activityLogRow.description,
+    changes: activityLogRow.changes, 
+    source: activityLogRow.source, 
+    actorName: activityLogRow.actor_name,
+    siteId: activityLogRow.site_id, 
+    occurredAt: activityLogRow.occurred_at, 
+    createdAt: activityLogRow.created_at,
+    pushedToCloud: activityLogRow.pushed_to_cloud,
+    pushedAt: activityLogRow.pushed_at,
+    syncError: activityLogRow.sync_error,
+  };
+}
+
+export function listActivityLogs(): ActivityLog[]{
+  const rows = getDb().prepare("SELECT * FROM activity_logs").all() as any[];
+  return rows.map(rowToActivityLog);
+}
+
+/**
+ * Replace the entire cached activity-log set. Mirror-down from qparking SaaS
+ * for the local Activity Log page — the cloud is the source of truth for the
+ * combined audit trail (it already holds the local events that were pushed
+ * up), so we wipe and re-insert on each sync. Rows land with
+ * pushed_to_cloud = 1 because they originate FROM the cloud; the outbound push
+ * queue must never try to send them back.
+ */
+export function replaceAllActivityLogs(activityLogs: ActivityLog[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM activity_logs').run();
+    const insert = db.prepare(`INSERT INTO activity_logs (
+        id, event_key, action, category, severity, outcome,
+        resource_type, resource_id, correlation_id, description, changes,
+        source, actor_name, site_id, occurred_at, created_at,
+        pushed_to_cloud, pushed_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL)`);
+    for (const activityLog of activityLogs) {
+      insert.run(
+        activityLog.id,
+        activityLog.eventKey,
+        activityLog.action,
+        activityLog.category,
+        activityLog.severity ?? 'low',
+        activityLog.outcome ?? null,
+        activityLog.resourceType ?? null,
+        activityLog.resourceId ?? null,
+        activityLog.correlationId ?? null,
+        activityLog.description ?? null,
+        activityLog.changes == null ? null : (typeof activityLog.changes === 'string' ? activityLog.changes : JSON.stringify(activityLog.changes)),
+        activityLog.source ?? 'cloud',
+        activityLog.actorName ?? null,
+        activityLog.siteId ?? null,
+        activityLog.occurredAt ?? new Date().toISOString(),
+        activityLog.createdAt ?? new Date().toISOString(),
       );
     }
   });
