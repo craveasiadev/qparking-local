@@ -26,9 +26,11 @@ import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRu
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
+  createTransaction, updateTransaction,
 } from './db';
-import { lprEvents, normalisePlate, captureFrameToFile, type PlateEvent } from './lpr-webhook';
+import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
 import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId } from './payment-tng';
+import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
 
 // Stamped into every parking-flow log line so the operator can verify they're
 // running the build that has the latest fix — vs an older cached installer.
@@ -312,7 +314,19 @@ async function startTngExitCharge(
   event: PlateEvent,
 ) {
   const orderId = newTngOrderId();
-  flog(`W4G exit: PayRequest → ${device.name} @ ${device.host}:${device.port} orderId=${orderId} plate=${plate} fare=${feeCents}c`);
+  const inflight = exitsInFlight.get(lane.id);
+  if (!inflight) return;
+
+  // Open a payment attempt in the ledger BEFORE driving the device, so a crash
+  // mid-charge still leaves a record of the attempt. It resolves to paid/failed
+  // below; the session's journey status is only advanced to 'exited' on success.
+  const txn = createTransaction({
+    sessionId: inflight.sessionId,
+    status: 'pending',
+    amountCents: feeCents,
+    orderId,
+  });
+  flog(`W4G exit: PayRequest → ${device.name} @ ${device.host}:${device.port} orderId=${orderId} plate=${plate} fare=${feeCents}c txn=${txn.id}`);
 
   let body: { state: string; payType: number; cardNo: string; apprCode: string; payTime: number } | null = null;
   try {
@@ -330,35 +344,59 @@ async function startTngExitCharge(
     flog(`W4G PayRequest failed/timeout: ${e?.message ?? e}`);
   }
 
-  const inflight = exitsInFlight.get(lane.id);
-  if (!inflight) return;
+  // If the exit was cancelled while we were awaiting (e.g. manual release), bail
+  // without touching the session; the manual-release path voids the attempt.
+  if (!exitsInFlight.get(lane.id)) return;
   exitsInFlight.delete(lane.id);
 
   if (!body) {
-    // Timeout / network error / device rejection — leave the session open and
-    // let the operator retrigger. Same 'exit-timeout' warning the ECPI path uses.
-    parkingEvents.emit('warning', { kind: 'exit-timeout', sessionId: inflight.sessionId });
+    // Timeout / network error / device rejection — the ATTEMPT failed, but the
+    // car is still inside: leave the session 'entered' and let the operator
+    // retrigger (a fresh attempt = a new transaction). Record the failed attempt.
+    updateTransaction(txn.id, { status: 'failed' });
+    parkingEvents.emit('warning', { kind: 'exit-timeout', sessionId: inflight.sessionId, transactionId: txn.id });
     return;
   }
 
   const approved = body.state === '0';
-  const outcome = approved ? 'paid' : 'declined';
-  flog(`TNG-only exit outcome=${outcome} payType=${body.payType} card=${body.cardNo} appr=${body.apprCode}`);
+  const cardScheme = payTypeToCardScheme(body.payType);
+  const paymentTimestamp = body.payTime ? new Date(body.payTime * 1000).toISOString() : null;
+  flog(`TNG-only exit outcome=${approved ? 'paid' : 'declined'} payType=${body.payType} card=${body.cardNo} appr=${body.apprCode} txn=${txn.id}`);
 
-  recordExit(inflight.sessionId, {
-    exitAt: event.exitAtOverride ?? new Date().toISOString(),
-    exitLaneId: lane.id,
-    exitCameraId: event.cameraId,
-    exitImagePath: event.imagePath,
-    durationMinutes: inflight.durationMinutes,
-    feeCents: inflight.feeCents,
-    paymentStatus: outcome,
-    terminalTxnId: body.cardNo || null,
-    cardScheme: payTypeToCardScheme(body.payType),
-    paymentTimestamp: body.payTime ? new Date(body.payTime * 1000).toISOString() : null,
-  });
-
-  parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome });
+  if (approved) {
+    updateTransaction(txn.id, {
+      status: 'paid',
+      terminalTxnId: body.cardNo || null,
+      paymentMethod: cardScheme,
+      paymentTimestamp,
+    });
+    // Payment went through → the car may leave: advance the journey to 'exited'.
+    recordExit(inflight.sessionId, {
+      exitAt: event.exitAtOverride ?? new Date().toISOString(),
+      exitLaneId: lane.id,
+      exitCameraId: event.cameraId,
+      exitImagePath: event.imagePath,
+      durationMinutes: inflight.durationMinutes,
+      feeCents: inflight.feeCents,
+      status: 'exited',
+      paymentStatus: 'paid',
+      terminalTxnId: body.cardNo || null,
+      cardScheme,
+      paymentTimestamp,
+    });
+    parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome: 'paid', transactionId: txn.id });
+  } else {
+    // Card declined → record the failed attempt but DO NOT close the session.
+    // The car is still inside (status stays 'entered'); the driver can retry or
+    // staff can manually release.
+    updateTransaction(txn.id, {
+      status: 'failed',
+      terminalTxnId: body.cardNo || null,
+      paymentMethod: cardScheme,
+      paymentTimestamp,
+    });
+    parkingEvents.emit('exit-declined', { sessionId: inflight.sessionId, transactionId: txn.id });
+  }
 }
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
@@ -849,22 +887,32 @@ export async function simulateCompletedSession(
   // real capture. Reuse the live-flow DB primitives: open a session, backdate
   // its entry, then close it. No terminal, no gate, no cloud push.
   const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
-  const imagePath = cam ? await captureFrameToFile(cam.id, norm) : null;
+  // Simulated sessions carry NO capture image (synthetic test record).
+  const imagePath = null;
   const session = createEntrySession(norm, laneId, cam?.id ?? null, imagePath);
   updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString(), notes: 'Simulated (dev tool)' });
-  recordExit(session.id, {
+  const paymentTs = paymentStatus === 'paid' ? new Date(exitMs).toISOString() : null;
+  const exited = recordExit(session.id, {
     exitAt: new Date(exitMs).toISOString(),
     exitLaneId: laneId,
     exitCameraId: cam?.id ?? null,
     exitImagePath: imagePath,
     durationMinutes,
     feeCents,
+    status: 'exited',
     paymentStatus,
     terminalTxnId: null,
     cardScheme: null,
-    paymentTimestamp: paymentStatus === 'paid' ? new Date(exitMs).toISOString() : null,
-  });
-  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min policy=${policy?.policyName ?? 'NONE'} img=${imagePath ? 'yes' : 'none'} → fee=${feeCents}c status=${paymentStatus}`);
+    paymentTimestamp: paymentTs,
+  }) ?? session;
+  // Mirror to the cloud: the exit closes the record; a paid sim also gets a
+  // transaction so the ledger + cloud payment mirror show 'paid' (free = none).
+  if (paymentStatus === 'paid') {
+    const txn = createTransaction({ sessionId: session.id, status: 'paid', amountCents: feeCents, paymentTimestamp: paymentTs });
+    enqueueTransaction(exited, txn);
+  }
+  enqueueExit(exited);
+  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min policy=${policy?.policyName ?? 'NONE'} img=${imagePath ? 'yes' : 'none'} → fee=${feeCents}c status=${paymentStatus} → cloud`);
   return { ok: true, sessionId: session.id, durationMinutes, feeCents, scopeName: policy?.policyName, currency: policy?.currency, paymentStatus };
 }
 
@@ -887,12 +935,15 @@ export async function simulateEntryAt(
     return { ok: false, error: 'already_inside — this plate has an open session; press Exit first' };
   }
   const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
-  // Grab a snapshot off the camera's live SDK feed (if any) so the session has a
-  // real capture image, not just a placeholder.
-  const imagePath = cam ? await captureFrameToFile(cam.id, norm) : null;
+  // Simulator entries carry NO capture image — they're synthetic test records,
+  // not a real plate read, so a live-feed snapshot would be misleading.
+  const imagePath = null;
   const session = createEntrySession(norm, laneId, cam?.id ?? null, imagePath);
-  updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString() });
-  flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} img=${imagePath ? 'yes' : 'none'} session=${session.id}`);
+  const stored = updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString() }) ?? session;
+  // Mirror to the cloud like a real entry (no gate/turnstile side effects — the
+  // point of the simulator — but the record should still reach qparking SaaS).
+  enqueueEntry(stored);
+  flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} img=${imagePath ? 'yes' : 'none'} session=${session.id} → cloud`);
   return { ok: true, sessionId: session.id };
 }
 
@@ -917,18 +968,17 @@ export async function simulateExitAt(
   }
   const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
   if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one so the flow can route to this lane` };
-  // Snapshot the exit off the camera's live SDK feed (if any).
-  const imagePath = await captureFrameToFile(cam.id, norm);
+  // Simulator exits carry NO capture image (synthetic test record).
   const event: PlateEvent = {
     cameraId: cam.id,
     plate: norm,
     confidence: 1.0,
-    imagePath,
+    imagePath: null,
     timestamp: exitIso,
     direction: 'exit',
     exitAtOverride: new Date(exitMs).toISOString(),
   };
-  flog(`DEV SIMULATE EXIT: lane="${lane.name}" plate=${norm} exitAt=${exitIso} img=${imagePath ? 'yes' : 'none'} via camera=${cam.id}`);
+  flog(`DEV SIMULATE EXIT: lane="${lane.name}" plate=${norm} exitAt=${exitIso} img=none via camera=${cam.id}`);
   lprEvents.emit('plate', event);
   return { ok: true, cameraId: cam.id };
 }

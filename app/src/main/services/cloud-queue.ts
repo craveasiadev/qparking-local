@@ -28,7 +28,7 @@ import {
   type SyncOp,
 } from './db';
 import { getCloudApi } from './cloud-api';
-import type { ParkingSession } from '../../shared/types';
+import type { ParkingSession, Transaction } from '../../shared/types';
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
 const MAX_ATTEMPTS = 6;
@@ -113,20 +113,6 @@ export function enqueueEntry(session: ParkingSession): void {
   scheduleDrain();
 }
 
-/**
- * Common payment-detail block we send to qparking on every exit/update.
- * Keeps the payload shape consistent so a declined-then-paid retry
- * overwrites cleanly instead of leaving stale fields behind.
- */
-function paymentFields(session: ParkingSession) {
-  return {
-    payment_status: session.paymentStatus,
-    payment_method: session.cardScheme ?? null,
-    terminal_txn_id: session.terminalTxnId ?? null,
-    payment_timestamp: session.paymentTimestamp ?? null,
-  };
-}
-
 // site_id must equal the ENTRY record's site_id — the cloud correlates
 // entry↔exit by (site_id + plate_number). So resolve the lane ENTRY-first here
 // (and in update/delete) even when the car exits through a different lane whose
@@ -138,7 +124,8 @@ export function enqueueExit(session: ParkingSession): void {
   if (!lane?.policyId) return;
   // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
   // and the freshly-captured exit image. Cloud upsert is idempotent per column
-  // so re-uploading the entry image is safe.
+  // so re-uploading the entry image is safe. Payment outcome is NOT sent here —
+  // it rides on its own transaction sync (enqueueTransaction → /transactions).
   const entryImage = readImageAsBase64(session.entryImagePath);
   const exitImage  = readImageAsBase64(session.exitImagePath);
   enqueueSync('session.exit', {
@@ -148,7 +135,7 @@ export function enqueueExit(session: ParkingSession): void {
     exit_time: session.exitAt,
     fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
     duration_minutes: session.durationMinutes ?? 0,
-    ...paymentFields(session),
+    status: session.status,
     ...(entryImage ? { entry_image_base64: entryImage } : {}),
     ...(exitImage  ? { exit_image_base64:  exitImage  } : {}),
   });
@@ -171,7 +158,7 @@ export function enqueueUpdate(session: ParkingSession): void {
       exit_time: session.exitAt,
       fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
       duration_minutes: session.durationMinutes ?? 0,
-      ...paymentFields(session),
+      status: session.status,
     });
   } else {
     enqueueSync('session.update', {
@@ -180,6 +167,25 @@ export function enqueueUpdate(session: ParkingSession): void {
       entry_time: session.entryAt,
     });
   }
+  scheduleDrain();
+}
+
+/**
+ * Push a payment transaction to qparking SaaS (/transactions/upsert). Idempotent
+ * on local_transaction_id, so re-sending the same attempt (pending → paid) just
+ * updates the cloud row. The cloud correlates it to the parking record by plate.
+ */
+export function enqueueTransaction(session: ParkingSession, txn: Transaction): void {
+  enqueueSync('transaction.upsert', {
+    local_transaction_id: txn.localTransactionId,
+    plate_number: session.plate,
+    status: txn.status,
+    amount: (txn.amountCents / 100).toFixed(2),
+    payment_method: txn.paymentMethod ?? null,
+    terminal_txn_id: txn.terminalTxnId ?? null,
+    order_id: txn.orderId ?? null,
+    payment_timestamp: txn.paymentTimestamp ?? null,
+  });
   scheduleDrain();
 }
 
@@ -269,11 +275,25 @@ async function drainOnce(): Promise<void> {
 async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
   const cloud = getCloudApi();
   if (!cloud) return { ok: false, error: 'qparking_not_configured' };
-  // All session ops currently hit the same parking-records upsert endpoint
-  // — the server differentiates entry vs exit vs update by what fields are
-  // present (exit_time present = closing record; absent = open/update).
-  // Delete is the exception: we use a body flag the server recognises as
-  // "mark this record cancelled".
+  // Transactions have their own endpoint (the payment ledger). All session ops
+  // hit parking-records/upsert — the server differentiates entry vs exit vs
+  // update by what fields are present (exit_time present = closing record;
+  // absent = open/update). Delete is the exception: a body flag the server
+  // recognises as "soft-delete this record".
+  if (op === 'transaction.upsert') {
+    try {
+      const response = await cloud.post('/transactions/upsert', payload);
+      return { ok: true, status: response.status };
+    } catch (error: any) {
+      if (axios.isAxiosError(error) && error.response) {
+        const responseBody: any = error.response.data;
+        const message = responseBody?.message || responseBody?.error || error.response.statusText;
+        return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
+      }
+      const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+      return { ok: false, error: isTimeout ? 'timeout (10s)' : (error?.message ?? String(error)) };
+    }
+  }
   const body = op === 'session.delete' ? { ...payload, _delete: true } : payload;
   try {
     const response = await cloud.post('/parking-records/upsert', body);

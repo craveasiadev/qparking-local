@@ -114,6 +114,8 @@ export interface BridgeApi {
     /** ISO datetime range on exit_at (inclusive). */
     exitFrom?: string | null;
     exitTo?: string | null;
+    /** Exact journey-status match (entered / exited / manual_release). */
+    status?: string | null;
     /** Exact payment-status match (paid / pending / declined / …). */
     paymentStatus?: string | null;
   }): Promise<{

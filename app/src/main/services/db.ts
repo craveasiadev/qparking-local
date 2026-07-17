@@ -12,8 +12,9 @@ import type {
   SeasonPass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule,
   ParkingSpace, Site, SyncOp, SyncQueueRow,
-  ActivityLog,
+  ActivityLog, Transaction, TransactionStatus,
 } from '../../shared/types';
+import { randomUUID } from 'node:crypto';
 
 let db: Database.Database | null = null;
 
@@ -178,6 +179,11 @@ function applySchema(db: Database.Database) {
       exit_image_path TEXT,
       duration_minutes INTEGER,
       fee_cents INTEGER,
+      -- The car's physical journey — the authoritative session state.
+      status TEXT NOT NULL DEFAULT 'entered'
+        CHECK (status IN ('entered','exited','manual_release')),
+      -- Denormalised MIRROR of the latest transaction, kept for the operator
+      -- UI. Payment outcome lives in the transactions table.
       payment_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (payment_status IN ('pending','paid','declined','cancelled','free','manual_release')),
       terminal_txn_id TEXT,
@@ -187,6 +193,25 @@ function applySchema(db: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_plate_open ON sessions (plate) WHERE exit_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_sessions_entry_at ON sessions (entry_at DESC);
+
+    -- Payment ledger. One row per payment attempt against a session; the
+    -- authoritative record of whether money moved (the session's payment_status
+    -- is just a mirror of the latest meaningful row here).
+    CREATE TABLE IF NOT EXISTS transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      local_transaction_id TEXT NOT NULL UNIQUE,
+      session_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','paid','failed','refunded','voided')),
+      amount_cents INTEGER NOT NULL DEFAULT 0,
+      payment_method TEXT,
+      terminal_txn_id TEXT,
+      order_id TEXT,
+      payment_timestamp TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_transactions_session ON transactions (session_id);
 
     CREATE TABLE IF NOT EXISTS rate_policies (
       policy_id TEXT PRIMARY KEY,
@@ -421,6 +446,16 @@ function applySchema(db: Database.Database) {
   for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT']) {
     try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
   }
+  // 2026-07-17: split the car's journey (sessions.status) out of the payment
+  // outcome (now the transactions table; payment_status kept as a mirror). Add
+  // the column then backfill it from existing rows — done ONCE (the ADD throws
+  // on re-run, skipping the backfill so we never clobber live status values).
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'entered' CHECK (status IN ('entered','exited','manual_release'))`);
+    db.exec(`UPDATE sessions SET status='manual_release' WHERE payment_status='manual_release'`);
+    db.exec(`UPDATE sessions SET status='exited' WHERE exit_at IS NOT NULL AND payment_status<>'manual_release'`);
+    db.exec(`UPDATE sessions SET status='entered' WHERE exit_at IS NULL`);
+  } catch { /* already migrated */ }
   // One-shot correction for the W4G default port. Earlier dev builds
   // defaulted tngPort to 8080 (vendor docs don't specify, my initial guess
   // was wrong) — the actual test rig at 192.168.1.105 serves on plain
@@ -464,6 +499,70 @@ function applySchema(db: Database.Database) {
   // operators can see which rules are dimmed and the exit flow can skip
   // inactive rules even if they technically match the moment.
   try { db.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
+
+  // 2026-07-17: rebuild `sessions` when its payment_status CHECK is stale.
+  // Very old installs created the table with a restrictive CHECK (e.g. it
+  // predates 'manual_release' / 'declined' / 'cancelled'), and SQLite can't
+  // ALTER a CHECK constraint — so a manual release or a declined exit hits
+  // "CHECK constraint failed". We rebuild ONCE to the canonical schema. This
+  // runs AFTER the column-adds above, so every column we copy already exists.
+  const CANONICAL_PAY_CHECK = "payment_status IN ('pending','paid','declined','cancelled','free','manual_release')";
+  try {
+    const meta = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'").get() as { sql?: string } | undefined;
+    if (meta?.sql && !meta.sql.includes(CANONICAL_PAY_CHECK)) {
+      db.exec('BEGIN');
+      db.exec(`CREATE TABLE sessions_rebuild (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plate TEXT NOT NULL,
+        entry_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        entry_lane_id INTEGER,
+        entry_camera_id INTEGER,
+        entry_image_path TEXT,
+        exit_at TEXT,
+        exit_lane_id INTEGER,
+        exit_camera_id INTEGER,
+        exit_image_path TEXT,
+        duration_minutes INTEGER,
+        fee_cents INTEGER,
+        status TEXT NOT NULL DEFAULT 'entered'
+          CHECK (status IN ('entered','exited','manual_release')),
+        payment_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (${CANONICAL_PAY_CHECK}),
+        terminal_txn_id TEXT,
+        card_scheme TEXT,
+        payment_timestamp TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )`);
+      db.exec(`INSERT INTO sessions_rebuild
+        (id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
+         exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
+         status, payment_status, terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at)
+        SELECT
+         id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
+         exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
+         status,
+         -- Sanitise any legacy payment_status value so it passes the new CHECK
+         -- ('release' was an old spelling of 'manual_release'; map the rest to pending).
+         CASE
+           WHEN payment_status IN ('pending','paid','declined','cancelled','free','manual_release') THEN payment_status
+           WHEN payment_status='release' THEN 'manual_release'
+           ELSE 'pending'
+         END,
+         terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at
+        FROM sessions`);
+      db.exec('DROP TABLE sessions');
+      db.exec('ALTER TABLE sessions_rebuild RENAME TO sessions');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_plate_open ON sessions (plate) WHERE exit_at IS NULL');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_entry_at ON sessions (entry_at DESC)');
+      db.exec('COMMIT');
+      console.log('[db] rebuilt sessions table to refresh stale payment_status CHECK');
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* no active txn */ }
+    console.error('[db] sessions rebuild failed:', e);
+  }
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -695,7 +794,7 @@ function rowToSession(row: any): ParkingSession {
     entryAt: row.entry_at, entryLaneId: row.entry_lane_id, entryCameraId: row.entry_camera_id, entryImagePath: row.entry_image_path,
     exitAt: row.exit_at, exitLaneId: row.exit_lane_id, exitCameraId: row.exit_camera_id, exitImagePath: row.exit_image_path,
     durationMinutes: row.duration_minutes, feeCents: row.fee_cents,
-    paymentStatus: row.payment_status, terminalTxnId: row.terminal_txn_id,
+    status: row.status, paymentStatus: row.payment_status, terminalTxnId: row.terminal_txn_id,
     cardScheme: row.card_scheme ?? null,
     paymentTimestamp: row.payment_timestamp ?? null,
     notes: row.notes,
@@ -734,15 +833,18 @@ export function recordExit(sessionId: number, patch: {
   exitImagePath: string | null;
   durationMinutes: number;
   feeCents: number;
+  /** Journey status — an exit is always 'exited'. */
+  status?: ParkingSession['status'];
+  /** Mirror of the payment outcome for the operator UI. */
   paymentStatus: ParkingSession['paymentStatus'];
   terminalTxnId: string | null;
   cardScheme?: string | null;
   paymentTimestamp?: string | null;
 }): ParkingSession | null {
-  getDb().prepare(`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+  getDb().prepare(`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
     .run(
       patch.exitAt, patch.exitLaneId, patch.exitCameraId, patch.exitImagePath,
-      patch.durationMinutes, patch.feeCents, patch.paymentStatus, patch.terminalTxnId,
+      patch.durationMinutes, patch.feeCents, patch.status ?? 'exited', patch.paymentStatus, patch.terminalTxnId,
       patch.cardScheme ?? null, patch.paymentTimestamp ?? null,
       sessionId,
     );
@@ -751,7 +853,7 @@ export function recordExit(sessionId: number, patch: {
 
 export function manualReleaseSession(sessionId: number, reason: string): ParkingSession | null {
   const now = new Date().toISOString();
-  getDb().prepare(`UPDATE sessions SET exit_at=?, payment_status='manual_release', notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+  getDb().prepare(`UPDATE sessions SET exit_at=?, status='manual_release', payment_status='manual_release', notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
     .run(now, reason, sessionId);
   return getSessionById(sessionId);
 }
@@ -771,6 +873,7 @@ export function updateSessionFields(sessionId: number, patch: {
   exitAt?: string | null;
   feeCents?: number;
   durationMinutes?: number;
+  status?: ParkingSession['status'];
   paymentStatus?: ParkingSession['paymentStatus'];
   notes?: string;
 }): ParkingSession | null {
@@ -781,6 +884,7 @@ export function updateSessionFields(sessionId: number, patch: {
   if (patch.exitAt !== undefined) { sets.push('exit_at = ?'); vals.push(patch.exitAt); }
   if (patch.feeCents !== undefined) { sets.push('fee_cents = ?'); vals.push(patch.feeCents); }
   if (patch.durationMinutes !== undefined) { sets.push('duration_minutes = ?'); vals.push(patch.durationMinutes); }
+  if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
   if (patch.paymentStatus !== undefined) { sets.push('payment_status = ?'); vals.push(patch.paymentStatus); }
   if (patch.notes !== undefined) { sets.push('notes = ?'); vals.push(patch.notes); }
   if (sets.length === 0) return getSessionById(sessionId);
@@ -804,6 +908,8 @@ export interface SessionFilters {
   entryTo?: string | null;
   exitFrom?: string | null;
   exitTo?: string | null;
+  /** Exact journey-status match (entered / exited / manual_release). */
+  status?: string | null;
   /** Exact payment-status match (paid / pending / declined / …). */
   paymentStatus?: string | null;
 }
@@ -815,6 +921,7 @@ function buildSessionFilters(filters: SessionFilters): { clauses: string[]; args
     clauses.push('UPPER(plate) LIKE ?');
     args.push(`%${filters.plateSearch.trim().toUpperCase()}%`);
   }
+  if (filters.status) { clauses.push('status = ?'); args.push(filters.status); }
   if (filters.paymentStatus) { clauses.push('payment_status = ?'); args.push(filters.paymentStatus); }
   if (filters.entryFrom) { clauses.push('entry_at >= ?'); args.push(filters.entryFrom); }
   if (filters.entryTo)   { clauses.push('entry_at <= ?'); args.push(filters.entryTo); }
@@ -860,6 +967,83 @@ export function listSessionsPage(opts: SessionFilters & {
 export function deleteSession(sessionId: number): boolean {
   const info = getDb().prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
   return info.changes > 0;
+}
+
+// ─── transactions ────────────────────────────────────────────────────────────
+
+function rowToTransaction(row: any): Transaction {
+  return {
+    id: row.id,
+    localTransactionId: row.local_transaction_id,
+    sessionId: row.session_id,
+    status: row.status,
+    amountCents: row.amount_cents,
+    paymentMethod: row.payment_method ?? null,
+    terminalTxnId: row.terminal_txn_id ?? null,
+    orderId: row.order_id ?? null,
+    paymentTimestamp: row.payment_timestamp ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Open a new payment attempt for a session. Generates the idempotency key. */
+export function createTransaction(patch: {
+  sessionId: number;
+  status?: TransactionStatus;
+  amountCents: number;
+  paymentMethod?: string | null;
+  terminalTxnId?: string | null;
+  orderId?: string | null;
+  paymentTimestamp?: string | null;
+}): Transaction {
+  const localTransactionId = randomUUID();
+  const info = getDb().prepare(
+    `INSERT INTO transactions (local_transaction_id, session_id, status, amount_cents, payment_method, terminal_txn_id, order_id, payment_timestamp)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).run(
+    localTransactionId, patch.sessionId, patch.status ?? 'pending', patch.amountCents,
+    patch.paymentMethod ?? null, patch.terminalTxnId ?? null, patch.orderId ?? null, patch.paymentTimestamp ?? null,
+  );
+  return getTransactionById(Number(info.lastInsertRowid))!;
+}
+
+/** Update a payment attempt's outcome. Only supplied fields change. */
+export function updateTransaction(id: number, patch: {
+  status?: TransactionStatus;
+  amountCents?: number;
+  paymentMethod?: string | null;
+  terminalTxnId?: string | null;
+  paymentTimestamp?: string | null;
+}): Transaction | null {
+  const sets: string[] = [];
+  const vals: any[] = [];
+  if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
+  if (patch.amountCents !== undefined) { sets.push('amount_cents = ?'); vals.push(patch.amountCents); }
+  if (patch.paymentMethod !== undefined) { sets.push('payment_method = ?'); vals.push(patch.paymentMethod); }
+  if (patch.terminalTxnId !== undefined) { sets.push('terminal_txn_id = ?'); vals.push(patch.terminalTxnId); }
+  if (patch.paymentTimestamp !== undefined) { sets.push('payment_timestamp = ?'); vals.push(patch.paymentTimestamp); }
+  if (sets.length === 0) return getTransactionById(id);
+  sets.push('updated_at = CURRENT_TIMESTAMP');
+  vals.push(id);
+  getDb().prepare(`UPDATE transactions SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  return getTransactionById(id);
+}
+
+export function getTransactionById(id: number): Transaction | null {
+  const row = getDb().prepare('SELECT * FROM transactions WHERE id = ?').get(id) as any;
+  return row ? rowToTransaction(row) : null;
+}
+
+export function listTransactionsForSession(sessionId: number): Transaction[] {
+  return (getDb().prepare('SELECT * FROM transactions WHERE session_id = ? ORDER BY id ASC').all(sessionId) as any[]).map(rowToTransaction);
+}
+
+/** The most recent still-open (pending) attempt for a session, if any. Used to
+ *  void an in-flight charge when a session is manually released. */
+export function getOpenTransactionForSession(sessionId: number): Transaction | null {
+  const row = getDb().prepare(`SELECT * FROM transactions WHERE session_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`).get(sessionId) as any;
+  return row ? rowToTransaction(row) : null;
 }
 
 // ─── sync queue ────────────────────────────────────────────────────────────

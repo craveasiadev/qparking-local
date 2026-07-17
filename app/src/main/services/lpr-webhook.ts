@@ -229,16 +229,29 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
   }
 
   const plate = normalisePlate(extracted.plate);
-  const imagePath = extracted.image
-    ? await saveImage(plate, extracted.image).catch(() => null)
-    : null;
 
   // Cache the pushed frame so the Live display can show a near-live view for
-  // WebSocket/RTSP-only cameras that have no HTTP snapshot URL.
+  // WebSocket/RTSP-only cameras that have no HTTP snapshot URL. Done before the
+  // no-read guard so the operator still sees the feed even on a failed read.
   if (extracted.image) {
     const raw = extracted.image.replace(/^data:image\/[a-z]+;base64,/i, '');
     latestFrames.set(camera.id, { base64: raw, contentType: 'image/jpeg', at: new Date().toISOString() });
   }
+
+  // The ANPR camera pushes a frame even when it CAN'T read a plate — the plate
+  // comes through as 'NONE' / '' / 'UNKNOWN'. Ignore those: don't save an image,
+  // don't emit, don't create a session. Otherwise the DB fills with phantom
+  // no-plate rows. The camera still gets a 200 so it doesn't retry.
+  if (isNoReadPlate(plate)) {
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ok: true, ignored: 'no_plate', cameraId: camera.id }));
+    return;
+  }
+
+  const imagePath = extracted.image
+    ? await saveImage(plate, extracted.image).catch(() => null)
+    : null;
 
   const direction = (extracted.direction as PlateEvent['direction']) ?? camera.direction;
 
@@ -343,6 +356,14 @@ function loosenJson(rawJson: string): string {
  *  the same physical plate can come in as "vmm 1234" or "VMM-1234". */
 export function normalisePlate(plate: string): string {
   return plate.replace(/[\s\-_]+/g, '').toUpperCase();
+}
+
+/** True when the ANPR camera reported no readable plate. Compared against the
+ *  already-normalised plate (upper-cased, separators stripped), so 'NO PLATE'
+ *  and 'NO_PLATE' both arrive here as 'NOPLATE'. */
+export function isNoReadPlate(plate: string): boolean {
+  const p = (plate ?? '').trim().toUpperCase();
+  return p === '' || p === 'NONE' || p === 'UNKNOWN' || p === 'NOPLATE' || p === 'NULL';
 }
 
 /** Saves a base64 JPEG (with or without data: prefix) under userData/plates/<date>/<plate>-<ts>.jpg. */

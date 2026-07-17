@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
-  Ticket, Grid3x3, MonitorPlay, MapPin,
+  Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, X,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -81,6 +81,37 @@ interface DebugLogEntry {
   text: string;
 }
 
+/** A staff-facing alert toast. Distinct from the low-level parking-flow debug
+ *  log — these are the few events an operator must ACT on. */
+interface StaffAlert { id: number; tone: 'error' | 'warn' | 'success'; title: string; detail: string; }
+
+/** Turn a raw parking-flow 'warning' kind into a plain-language message an
+ *  on-site operator can act on. */
+function describeWarning(kind: string, d: any): { title: string; detail: string } {
+  switch (kind) {
+    case 'exit-timeout':
+      return { title: 'Payment device not responding', detail: 'No response from the card reader within 15s. Check the payment controller is powered on and reachable on the network (IP / port).' };
+    case 'exit-no-terminal':
+      return { title: 'No payment terminal on this lane', detail: 'Wire a payment terminal to this lane (Lanes → Terminal), then retrigger the exit.' };
+    case 'exit-terminal-disabled':
+      return { title: 'Payment terminal is disabled', detail: 'Enable this lane\'s terminal under Payment terminals, then retrigger.' };
+    case 'exit-terminal-offline':
+      return { title: 'Payment terminal offline', detail: 'The terminal isn\'t reachable. Check its power and network connection.' };
+    case 'exit-tng-not-configured':
+      return { title: 'Payment device not configured', detail: 'Set the W4G device host / port for this lane\'s terminal, then retrigger.' };
+    case 'exit-charge-crashed':
+      return { title: 'Payment failed unexpectedly', detail: d?.message ? String(d.message) : 'The charge crashed mid-way. Retrigger the exit.' };
+    case 'exit-busy':
+      return { title: 'Payment already in progress', detail: 'A charge is already running on this lane — wait for it to finish.' };
+    case 'exit-without-entry':
+      return { title: 'Exit with no entry record', detail: `No open session for ${d?.plate ?? 'this plate'}. Check the plate reading or create an entry.` };
+    case 'exit-no-lane':
+      return { title: 'Exit on an unconfigured lane', detail: 'The exit camera isn\'t mapped to a lane. Assign it under Cameras / Lanes.' };
+    default:
+      return { title: 'Parking-flow warning', detail: kind || 'Unknown warning' };
+  }
+}
+
 export function App() {
   const [page, setPage] = useState<Page>('dashboard');
   const site = useCurrentSite();
@@ -92,6 +123,15 @@ export function App() {
   const [devHint, setDevHint] = useState<string | null>(null);
   const devTapCount = useRef(0);
   const devTapTimer = useRef<number | null>(null);
+  const [alerts, setAlerts] = useState<StaffAlert[]>([]);
+  const alertId = useRef(0);
+
+  function pushAlert(a: Omit<StaffAlert, 'id'>, ttlMs = 12_000) {
+    const id = ++alertId.current;
+    setAlerts((cur) => [...cur, { ...a, id }].slice(-4)); // keep the 4 most recent
+    if (ttlMs > 0) window.setTimeout(() => setAlerts((cur) => cur.filter((x) => x.id !== id)), ttlMs);
+  }
+  const dismissAlert = (id: number) => setAlerts((cur) => cur.filter((x) => x.id !== id));
 
   useEffect(() => {
     window.bridge.getAppVersion()
@@ -115,6 +155,22 @@ export function App() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [debugLog]);
+
+  // App-wide staff alerts. Surface the few parking-flow events an operator must
+  // ACT on (payment device errors, declines) as toasts on ANY page — the
+  // low-level debug log below is for diagnosis, this is for the person at the gate.
+  useEffect(() => {
+    const off = window.bridge.onEvent('session', (p: any) => {
+      const kind = p?.kind; const d = p?.payload ?? {};
+      if (kind === 'warning') {
+        const m = describeWarning(d?.kind, d);
+        pushAlert({ tone: 'error', title: m.title, detail: m.detail });
+      } else if (kind === 'exit-declined') {
+        pushAlert({ tone: 'error', title: 'Card declined', detail: 'The payment was declined — the barrier stays closed. Ask the driver to retry, or release the car manually from Sessions.' });
+      }
+    });
+    return off;
+  }, []);
 
   useEffect(() => {
     window.bridge.getSettings().then((s: any) => setDevMode(!!s.devMode)).catch(() => null);
@@ -276,6 +332,39 @@ export function App() {
           )}
         </div>
       </main>
+
+      {/* App-wide staff alert toasts — float top-right over every page so a
+          payment device error / decline is impossible to miss at the gate. */}
+      {alerts.length > 0 && (
+        <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 w-[360px] max-w-[calc(100vw-2rem)]">
+          {alerts.map((a) => (
+            <div
+              key={a.id}
+              className={`rounded-xl border shadow-lg p-3 flex items-start gap-3 animate-in ${
+                a.tone === 'error'
+                  ? 'bg-red-50 border-red-300 text-red-900'
+                  : a.tone === 'warn'
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+              }`}
+              role="alert"
+            >
+              <AlertTriangle size={18} className="mt-0.5 flex-shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-bold">{a.title}</div>
+                <div className="text-xs mt-0.5 leading-snug opacity-90">{a.detail}</div>
+              </div>
+              <button
+                onClick={() => dismissAlert(a.id)}
+                className="flex-shrink-0 opacity-60 hover:opacity-100"
+                title="Dismiss"
+              >
+                <X size={15} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

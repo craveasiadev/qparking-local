@@ -5,7 +5,7 @@ import {
   Image as ImageIcon, Zap, ArrowDown, ArrowUp, Eye, Filter,
   LogIn, LogOut, Clock, Banknote,
 } from 'lucide-react';
-import type { ParkingLane, ParkingSession, RatePolicy } from '@shared/types';
+import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 
 const PAGE_SIZE = 20;
@@ -233,6 +233,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [range, setRange] = useState<DateRangeFilters>(EMPTY_RANGE);
   const [debouncedRange, setDebouncedRange] = useState<DateRangeFilters>(EMPTY_RANGE);
   const [statusFilter, setStatusFilter] = useState('pending');
+  const [sessionStatusFilter, setSessionStatusFilter] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   useEffect(() => {
     const h = setTimeout(() => setDebouncedPlateSearch(plateSearch.trim()), 300);
@@ -251,6 +252,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
+  const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [pageLoading, setPageLoading] = useState(false);
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
@@ -278,6 +280,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         exitTo: debouncedRange.exitTo ? toIso(debouncedRange.exitTo) : null,
         // A plate search always spans EVERY status — you're hunting a specific
         // car, so scoping to "pending" would hide it if it already paid/left.
+        status: debouncedPlateSearch ? null : (sessionStatusFilter || null),
         paymentStatus: debouncedPlateSearch ? null : (statusFilter || null),
       });
       setRows(result.rows);
@@ -297,18 +300,31 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   async function fetchAux() {
     setPolicies(await window.bridge.listRatePolicies());
     setLanes(await window.bridge.listLanes());
+    setCameras(await window.bridge.listCameras());
   }
+
+  // Exit-capable lanes for the manual-release gate picker. A lane's direction is
+  // derived from its cameras (the source of truth): a car can leave through an
+  // 'exit' or 'dual' lane. Fall back to all lanes if none qualify, so the
+  // operator is never left with an empty picker.
+  const exitLanes = (() => {
+    const filtered = lanes.filter((l) => {
+      const dirs = new Set(cameras.filter((c) => c.laneId === l.id).map((c) => c.direction));
+      return dirs.has('exit') || dirs.has('dual');
+    });
+    return filtered.length > 0 ? filtered : lanes;
+  })();
 
   const [runRefresh, refreshing] = useAsyncAction(async () => {
     await Promise.all([fetchPage(), fetchAux()]);
   });
 
-  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter]);
+  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter, sessionStatusFilter]);
   useEffect(() => {
     const off = window.bridge.onEvent('session', () => { void fetchPage(); });
     return off;
-  }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter]);
-  useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange, statusFilter]);
+  }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter, sessionStatusFilter]);
+  useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange, statusFilter, sessionStatusFilter]);
   useEffect(() => { setSelected(new Set()); }, [tab, page]);
 
   function policyForSession(s: ParkingSession): RatePolicy | null {
@@ -373,6 +389,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     setPlateSearch('');
     setRange(EMPTY_RANGE);
     setStatusFilter('');
+    setSessionStatusFilter('');
   }
 
   // Set the entry-date range to a common preset (local wall-clock → the
@@ -386,7 +403,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     setRange((r) => ({ ...r, entryFrom: toLocalInput(from.toISOString()), entryTo: toLocalInput(now.toISOString()) }));
   }
 
-  const hasAnyFilter = !!debouncedPlateSearch || activeFilterCount > 0 || !!statusFilter;
+  const hasAnyFilter = !!debouncedPlateSearch || activeFilterCount > 0 || !!statusFilter || !!sessionStatusFilter;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
@@ -427,13 +444,25 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
             )}
           </div>
           <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            value={sessionStatusFilter}
+            onChange={(e) => setSessionStatusFilter(e.target.value)}
             disabled={!!plateSearch.trim()}
-            title={plateSearch.trim() ? 'Plate search covers every status' : 'Filter by payment status'}
+            title={plateSearch.trim() ? 'Plate search covers every status' : 'Filter by session status'}
             className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <option value="">All status</option>
+            <option value="entered">Entered</option>
+            <option value="exited">Exited</option>
+            <option value="manual_release">Manual release</option>
+          </select>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            disabled={!!plateSearch.trim()}
+            title={plateSearch.trim() ? 'Plate search covers every payment status' : 'Filter by payment status'}
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">All payment</option>
             <option value="paid">Paid</option>
             <option value="pending">Pending</option>
             <option value="declined">Declined</option>
@@ -562,6 +591,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 <th className="text-right px-3 py-2 font-bold">Duration</th>
                 <th className="text-right px-3 py-2 font-bold">Fee</th>
                 <th className="text-left px-3 py-2 font-bold">Status</th>
+                <th className="text-left px-3 py-2 font-bold">Payment</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -599,6 +629,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                           </span>
                         : '—'}
                     </td>
+                    <td className="px-3 py-2"><SessionStatusBadge status={s.status} /></td>
                     <td className="px-3 py-2"><StatusBadge status={s.paymentStatus} /></td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button
@@ -612,7 +643,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={9} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
+                <tr><td colSpan={10} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
               )}
             </tbody>
           </table>
@@ -644,7 +675,10 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono font-bold text-base">{s.plate}</span>
-                    <StatusBadge status={s.paymentStatus} />
+                    <div className="flex items-center gap-1">
+                      <SessionStatusBadge status={s.status} />
+                      <StatusBadge status={s.paymentStatus} />
+                    </div>
                   </div>
                   <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
                     <span><span className="text-gray-400">In:</span> {new Date(s.entryAt).toLocaleString()}</span>
@@ -744,7 +778,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       {releasing && (
         <ReleaseSessionModal
           session={releasing.session}
-          lanes={lanes}
+          lanes={exitLanes}
           defaultLaneId={releasing.laneId}
           onClose={() => setReleasing(null)}
           onReleased={async () => { setReleasing(null); await fetchPage(); }}
@@ -921,6 +955,7 @@ function ViewSessionModal({
             <div className="flex items-center gap-3 flex-wrap">
               <h2 className="text-base font-bold">Session #{s.id}</h2>
               <span className="font-mono font-bold text-lg">{s.plate}</span>
+              <SessionStatusBadge status={s.status} />
               <StatusBadge status={s.paymentStatus} />
             </div>
             <p className="text-xs text-gray-500 mt-1 inline-flex items-center gap-1.5">
@@ -1129,9 +1164,15 @@ function ReleaseSessionModal({
 }: { session: ParkingSession; lanes: ParkingLane[]; defaultLaneId: number | null; onClose: () => void; onReleased: () => void }) {
   useEscapeToClose(onClose);
   const [reason, setReason] = useState('');
-  const [laneId, setLaneId] = useState<number | null>(
-    defaultLaneId ?? session.exitLaneId ?? session.entryLaneId ?? lanes[0]?.id ?? null,
-  );
+  // Default to a lane that's actually in the (exit-only) list: the lane the
+  // operator triggered from, else the session's own exit lane, else the first
+  // exit lane. Never the entry lane — it's not a valid exit gate here.
+  const [laneId, setLaneId] = useState<number | null>(() => {
+    const inList = (id: number | null | undefined) => id != null && lanes.some((l) => l.id === id);
+    if (inList(defaultLaneId)) return defaultLaneId!;
+    if (inList(session.exitLaneId)) return session.exitLaneId!;
+    return lanes[0]?.id ?? null;
+  });
   const [error, setError] = useState<string | null>(null);
   const [go, busy] = useAsyncAction(async () => {
     if (!reason.trim()) { setError('Reason is required.'); return; }
@@ -1432,4 +1473,15 @@ function StatusBadge({ status }: { status: ParkingSession['paymentStatus'] }) {
     manual_release: 'bg-purple-50 text-purple-800 border-purple-200',
   };
   return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${map[status]}`}>{status.replace('_', ' ')}</span>;
+}
+
+/** The car's journey status (entered / exited / manual release), distinct from
+ *  the payment outcome shown by StatusBadge. */
+function SessionStatusBadge({ status }: { status: ParkingSession['status'] }) {
+  const map: Record<ParkingSession['status'], string> = {
+    entered: 'bg-blue-50 text-blue-800 border-blue-200',
+    exited: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+    manual_release: 'bg-purple-50 text-purple-800 border-purple-200',
+  };
+  return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${map[status] ?? 'bg-gray-100 text-gray-600 border-gray-200'}`}>{status.replace('_', ' ')}</span>;
 }

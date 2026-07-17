@@ -88,6 +88,7 @@ import {
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
+  getTransactionById, getOpenTransactionForSession, updateTransaction,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses,
   getCurrentSite,
@@ -106,7 +107,7 @@ import { openGateSimulator, sendGateEvent } from './gate-simulator';
 import { openFaceGate, pingFaceGate } from './services/face-gate';
 import {
   startSyncDrain, syncEvents, getSyncStatus, drainNow,
-  enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete,
+  enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete, enqueueTransaction,
   backfillAllSessions,
 } from './services/cloud-queue';
 import {
@@ -286,7 +287,7 @@ function createTray() {
 
 function wireRendererEvents() {
   lprEvents.on('plate', (event) => sendToRenderer('plate-detected', event));
-  for (const ev of ['entry','exit-pending','exit-completed','warning','rescan-ignored'] as const) {
+  for (const ev of ['entry','exit-pending','exit-completed','exit-declined','warning','rescan-ignored'] as const) {
     parkingEvents.on(ev, (payload) => sendToRenderer('session', { kind: ev, payload }));
   }
 
@@ -358,15 +359,44 @@ function wireRendererEvents() {
       sendGateEvent({ state: 'closed', direction: 'out', reason: 'no-terminal', holdMs: 5_000 });
     } else if (kind === 'exit-terminal-offline') {
       sendGateEvent({ state: 'closed', direction: 'out', reason: 'terminal-offline', holdMs: 5_000 });
+    } else if (kind === 'exit-timeout') {
+      // The charge attempt timed out — car stays inside (session 'entered').
+      // Push the failed attempt to the ledger so the cloud sees the decline/
+      // stuck transaction; the operator retriggers or manually releases.
+      if (p?.sessionId && p?.transactionId) {
+        const session = getSessionById(p.sessionId);
+        const txn = getTransactionById(p.transactionId);
+        if (session && txn) enqueueTransaction(session, txn);
+      }
     }
+  });
+  parkingEvents.on('exit-declined', (p: any) => {
+    // Card declined — the car is still inside (session stays 'entered'). Show
+    // the decline on the gate screen and push the failed transaction to the
+    // ledger. The barrier stays CLOSED — operator retriggers or releases.
+    const session = p?.sessionId ? getSessionById(p.sessionId) : null;
+    if (session && p?.transactionId) {
+      const txn = getTransactionById(p.transactionId);
+      if (txn) enqueueTransaction(session, txn);
+    }
+    sendGateEvent({
+      state: 'closed',
+      plate: session?.plate,
+      direction: 'out',
+      reason: 'declined',
+      holdMs: 5_000,
+    });
   });
   parkingEvents.on('exit-completed', (p: any) => {
     const session = p?.sessionId ? getSessionById(p.sessionId) : null;
-    // Always mirror the exit to qparking SaaS — even on decline — so Finance
-    // can show decline rates and operators can audit stuck transactions.
-    // The gate-open + face-turnstile actions remain gated on a successful
-    // outcome because a declined card MUST NOT raise the barrier.
+    // The car has left: mirror the exit (status change) to qparking SaaS, and
+    // push the payment transaction to the ledger if this exit carried one
+    // (free / pass exits have no transaction).
     if (session) enqueueExit(session);
+    if (session && p?.transactionId) {
+      const txn = getTransactionById(p.transactionId);
+      if (txn) enqueueTransaction(session, txn);
+    }
     const allowed = ['paid','free','manual_release'].includes(p?.outcome);
     if (!allowed) return;
     const laneName = session?.exitLaneId ? getLane(session.exitLaneId)?.name : undefined;
@@ -492,6 +522,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
   entryTo?: string | null;
   exitFrom?: string | null;
   exitTo?: string | null;
+  status?: string | null;
   paymentStatus?: string | null;
 }) => ({
   rows: listSessionsPage(opts).map((s) => ({ ...s, livePreviewFeeCents: previewFeeForOpenSession(s) })),
@@ -501,6 +532,7 @@ ipcMain.handle('sessions:page', (_e, opts: {
     entryTo: opts.entryTo ?? null,
     exitFrom: opts.exitFrom ?? null,
     exitTo: opts.exitTo ?? null,
+    status: opts.status ?? null,
     paymentStatus: opts.paymentStatus ?? null,
   }),
 }));
@@ -536,8 +568,17 @@ ipcMain.handle('sessions:delete-bulk', (_e, opts: { ids?: number[]; tab?: 'open'
   return { deleted };
 });
 ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
+  // Void any in-flight (pending) payment attempt so the ledger doesn't leave a
+  // dangling 'pending' for a session released without a completed payment.
+  const openTxn = getOpenTransactionForSession(id);
   const session = manualReleaseSession(id, reason);
-  if (session) enqueueUpdate(session);
+  if (session) {
+    if (openTxn) {
+      const voided = updateTransaction(openTxn.id, { status: 'voided' });
+      if (voided) enqueueTransaction(session, voided);
+    }
+    enqueueUpdate(session);
+  }
   // Let the car out — open the barrier at the operator-chosen lane (falling
   // back to the session's own exit/entry lane). Fire-and-forget so the release
   // returns promptly; the barrier open is best-effort.

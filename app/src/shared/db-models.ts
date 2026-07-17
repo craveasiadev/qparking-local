@@ -118,7 +118,14 @@ export interface ParkingSession {
   durationMinutes: number | null;
   /** Final amount in CENTS (so 100 = RM 1.00). */
   feeCents: number | null;
-  /** Payment status from terminal. */
+  /** The car's physical journey — the authoritative session state.
+   *   entered        — car is inside the lot
+   *   exited         — car paid (or free) and left
+   *   manual_release — staff released the car without a successful payment */
+  status: 'entered' | 'exited' | 'manual_release';
+  /** DEPRECATED as a source of truth — kept as a denormalised MIRROR of the
+   *  latest transaction so the existing operator UI keeps working. Payment
+   *  outcome now lives in the `transactions` table. */
   paymentStatus: 'pending' | 'paid' | 'declined' | 'cancelled' | 'free' | 'manual_release';
   /** ECPI txnID from the terminal once paid. */
   terminalTxnId: string | null;
@@ -128,6 +135,32 @@ export interface ParkingSession {
   paymentTimestamp: string | null;
   /** Optional notes (manual release reason, etc). */
   notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── transactions ────────────────────────────────────────────────────────────
+
+/** A single payment attempt against a session. One session can own many
+ *  transactions (a declined attempt followed by a paid retry). The session's
+ *  payment mirror is derived from the latest meaningful transaction. */
+export type TransactionStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'voided';
+
+export interface Transaction {
+  id: number;
+  /** Client-generated UUID — the idempotency key the cloud upserts on, and
+   *  re-sent on every sync retry. */
+  localTransactionId: string;
+  sessionId: number;
+  status: TransactionStatus;
+  /** Amount attempted/charged for THIS transaction, in CENTS. */
+  amountCents: number;
+  /** Card scheme from the W4G reader (VISA_W4G | TNG_CARD | ...). */
+  paymentMethod: string | null;
+  terminalTxnId: string | null;
+  /** W4G order id assigned to the PayRequest. */
+  orderId: string | null;
+  paymentTimestamp: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -286,7 +319,9 @@ export interface Site {
 
 // ─── sync_queue ──────────────────────────────────────────────────────────────
 
-export type SyncOp = 'session.entry' | 'session.exit' | 'session.update' | 'session.delete';
+export type SyncOp =
+  | 'session.entry' | 'session.exit' | 'session.update' | 'session.delete'
+  | 'transaction.upsert';
 
 export interface SyncQueueRow {
   id: number;
