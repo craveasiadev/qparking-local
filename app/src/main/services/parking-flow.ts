@@ -29,7 +29,7 @@ import {
   createTransaction, updateTransaction,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
-import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId } from './payment-tng';
+import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog } from './payment-tng';
 import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
 
 // Stamped into every parking-flow log line so the operator can verify they're
@@ -90,6 +90,19 @@ interface ActiveExit {
   startedAt: number;
 }
 const exitsInFlight = new Map<number, ActiveExit>(); // keyed by laneId — one exit txn per lane
+
+// ─── auto-retrigger ─────────────────────────────────────────────────────────
+// When a paid exit charge fails / times out / is declined, optionally re-fire
+// the PayRequest at the same terminal after a short delay so the driver can tap
+// again without staff intervention. Gated by settings.tngAutoRetrigger (default
+// on). See maybeAutoRetrigger().
+const AUTO_RETRIGGER_DELAY_MS = 2_000;
+// Safety cap: an abandoned car at the gate must NOT re-arm the lane forever —
+// each cycle also holds the lane's busy-guard, blocking every other exit. After
+// this many auto attempts we stop and wait for a manual release/retrigger.
+const MAX_AUTO_RETRIGGERS = 3;
+// attempts counted per sessionId; cleared on success / exit / cap reached.
+const autoRetriggerCounts = new Map<number, number>();
 
 export function startParkingFlow() {
   lprEvents.on('plate', handlePlateEvent);
@@ -326,7 +339,11 @@ async function startTngExitCharge(
     amountCents: feeCents,
     orderId,
   });
+  const attemptNo = (autoRetriggerCounts.get(inflight.sessionId) ?? 0) + 1;
   flog(`W4G exit: PayRequest → ${device.name} @ ${device.host}:${device.port} orderId=${orderId} plate=${plate} fare=${feeCents}c txn=${txn.id}`);
+  // Correlation line into the W4G live log so every later device frame (which
+  // only carries orderId) can be traced back to this plate / session / lane.
+  w4gLog('info', `EXIT CHARGE start · attempt ${attemptNo}/${MAX_AUTO_RETRIGGERS + 1} · plate=${plate} session=${inflight.sessionId} lane=${lane.id} device="${device.name}" (${device.host}:${device.port}) fare=RM ${(feeCents / 100).toFixed(2)} orderId=${orderId} txn=${txn.id}`, { plate, sessionId: inflight.sessionId, laneId: lane.id, device: device.name, host: device.host, port: device.port, feeCents, orderId, txnId: txn.id, attemptNo });
 
   let body: { state: string; payType: number; cardNo: string; apprCode: string; payTime: number } | null = null;
   try {
@@ -354,7 +371,9 @@ async function startTngExitCharge(
     // car is still inside: leave the session 'entered' and let the operator
     // retrigger (a fresh attempt = a new transaction). Record the failed attempt.
     updateTransaction(txn.id, { status: 'failed' });
+    w4gLog('error', `EXIT CHARGE result=TIMEOUT/NO-RESPONSE · plate=${plate} session=${inflight.sessionId} orderId=${orderId} txn=${txn.id} — transaction marked FAILED, gate stays CLOSED. ⚠️ If the customer's card actually deducted, the callback was lost (money taken, not recorded).`, { plate, sessionId: inflight.sessionId, orderId, txnId: txn.id });
     parkingEvents.emit('warning', { kind: 'exit-timeout', sessionId: inflight.sessionId, transactionId: txn.id });
+    maybeAutoRetrigger(lane, device, entryAt, event, inflight);
     return;
   }
 
@@ -364,6 +383,8 @@ async function startTngExitCharge(
   flog(`TNG-only exit outcome=${approved ? 'paid' : 'declined'} payType=${body.payType} card=${body.cardNo} appr=${body.apprCode} txn=${txn.id}`);
 
   if (approved) {
+    // Paid → cancel any pending auto-retrigger cycle for this session.
+    autoRetriggerCounts.delete(inflight.sessionId);
     updateTransaction(txn.id, {
       status: 'paid',
       terminalTxnId: body.cardNo || null,
@@ -384,6 +405,7 @@ async function startTngExitCharge(
       cardScheme,
       paymentTimestamp,
     });
+    w4gLog('recv', `EXIT CHARGE result=PAID · plate=${plate} session=${inflight.sessionId} orderId=${orderId} txn=${txn.id} scheme=${cardScheme} card=${body.cardNo || '-'} appr=${body.apprCode || '-'} — recorded PAID, gate OPENING.`, { plate, sessionId: inflight.sessionId, orderId, txnId: txn.id, cardScheme });
     parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome: 'paid', transactionId: txn.id });
   } else {
     // Card declined → record the failed attempt but DO NOT close the session.
@@ -395,8 +417,88 @@ async function startTngExitCharge(
       paymentMethod: cardScheme,
       paymentTimestamp,
     });
+    w4gLog('error', `EXIT CHARGE result=DECLINED · plate=${plate} session=${inflight.sessionId} orderId=${orderId} txn=${txn.id} state=${body.state} card=${body.cardNo || '-'} — no money taken, gate stays CLOSED.`, { plate, sessionId: inflight.sessionId, orderId, txnId: txn.id, state: body.state });
     parkingEvents.emit('exit-declined', { sessionId: inflight.sessionId, transactionId: txn.id });
+    maybeAutoRetrigger(lane, device, entryAt, event, inflight);
   }
+}
+
+/**
+ * After a failed / timed-out / declined paid exit, optionally re-fire the charge
+ * at the same terminal so the driver can tap again without staff manually
+ * retriggering. Controlled by settings.tngAutoRetrigger (default on) and capped
+ * at MAX_AUTO_RETRIGGERS per session. Each retry is a brand-new transaction with
+ * its own OrderId. No-ops (and clears the counter) when the toggle is off, the
+ * cap is reached, or the session is no longer chargeable (already paid/exited or
+ * released).
+ *
+ * ⚠️ Double-charge caveat: a *timeout* can mean "the tap actually succeeded but
+ * its PayResult callback never reached us" (network/firewall). In that case a
+ * retrigger asks the driver to tap again → a second real deduction. Only safe
+ * once the callback path is reliable; that's why the operator can switch it off.
+ */
+function maybeAutoRetrigger(
+  lane: ParkingLane,
+  device: PaymentTerminal,
+  entryAt: string,
+  event: PlateEvent,
+  prev: ActiveExit,
+): void {
+  const tag = `plate=${prev.plate} session=${prev.sessionId} lane=${lane.id}`;
+  if (!getSettings().tngAutoRetrigger) {
+    w4gLog('info', `AUTO-RETRIGGER off (toggle disabled) · ${tag} — not re-arming; awaiting manual retrigger.`);
+    return;
+  }
+
+  const attempts = autoRetriggerCounts.get(prev.sessionId) ?? 0;
+  if (attempts >= MAX_AUTO_RETRIGGERS) {
+    w4gLog('error', `AUTO-RETRIGGER stopped · ${tag} — hit the ${MAX_AUTO_RETRIGGERS}-attempt cap; awaiting manual release/retrigger.`, { sessionId: prev.sessionId, attempts });
+    autoRetriggerCounts.delete(prev.sessionId);
+    return;
+  }
+
+  // Stop if the car is no longer chargeable (already paid/exited, or the session
+  // was voided by a manual release).
+  const session = getSessionById(prev.sessionId);
+  if (!session || session.status === 'exited' || session.paymentStatus === 'paid') {
+    w4gLog('info', `AUTO-RETRIGGER skipped · ${tag} — session no longer chargeable (${!session ? 'gone' : `status=${session.status} payment=${session.paymentStatus}`}).`, { sessionId: prev.sessionId });
+    autoRetriggerCounts.delete(prev.sessionId);
+    return;
+  }
+
+  autoRetriggerCounts.set(prev.sessionId, attempts + 1);
+  w4gLog('send', `AUTO-RETRIGGER scheduled #${attempts + 1}/${MAX_AUTO_RETRIGGERS} · ${tag} — re-arming "${device.name}" in ${AUTO_RETRIGGER_DELAY_MS}ms.`, { sessionId: prev.sessionId, attempt: attempts + 1, max: MAX_AUTO_RETRIGGERS, delayMs: AUTO_RETRIGGER_DELAY_MS });
+  parkingEvents.emit('warning', { kind: 'exit-auto-retrigger', sessionId: prev.sessionId, laneId: lane.id, attempt: attempts + 1, max: MAX_AUTO_RETRIGGERS });
+
+  setTimeout(() => {
+    // Re-check at fire time — in the delay window the car may have been released
+    // or another exit may have grabbed the lane.
+    const s = getSessionById(prev.sessionId);
+    if (!s || s.status === 'exited' || s.paymentStatus === 'paid') {
+      w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — session no longer chargeable (${!s ? 'gone' : `status=${s.status} payment=${s.paymentStatus}`}).`, { sessionId: prev.sessionId });
+      autoRetriggerCounts.delete(prev.sessionId);
+      return;
+    }
+    if (exitsInFlight.has(lane.id)) {
+      w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — lane already busy with another attempt.`, { sessionId: prev.sessionId, laneId: lane.id });
+      return;
+    }
+    if (!device.enabled) {
+      w4gLog('error', `AUTO-RETRIGGER aborted at fire · ${tag} — terminal "${device.name}" is disabled.`, { sessionId: prev.sessionId });
+      autoRetriggerCounts.delete(prev.sessionId);
+      return;
+    }
+    // Re-establish the in-flight guard (cleared on the previous attempt) and
+    // reuse the ORIGINAL duration/fee snapshot so the charge amount doesn't
+    // drift with the extra seconds spent retrying.
+    w4gLog('send', `AUTO-RETRIGGER firing #${attempts + 1}/${MAX_AUTO_RETRIGGERS} · ${tag} — starting a fresh charge now.`, { sessionId: prev.sessionId, attempt: attempts + 1 });
+    exitsInFlight.set(lane.id, { ...prev, startedAt: Date.now() });
+    startTngExitCharge(lane, device, prev.plate, prev.feeCents, entryAt, event).catch((e) => {
+      w4gLog('error', `AUTO-RETRIGGER crashed · ${tag} — ${e?.message ?? String(e)}`, { sessionId: prev.sessionId });
+      parkingEvents.emit('warning', { kind: 'exit-charge-crashed', sessionId: prev.sessionId, message: e?.message ?? String(e) });
+      exitsInFlight.delete(lane.id);
+    });
+  }, AUTO_RETRIGGER_DELAY_MS);
 }
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }

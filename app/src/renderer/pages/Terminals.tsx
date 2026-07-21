@@ -31,6 +31,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
   const [status, setStatus] = useState<TngStatus | null>(null);
   const [callbackPorts, setCallbackPorts] = useState<string>('');
   const [enabled, setEnabled] = useState<boolean>(false);
+  const [autoRetrigger, setAutoRetrigger] = useState<boolean>(true);
   const [editing, setEditing] = useState<Partial<PaymentTerminal> | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
@@ -46,6 +47,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
       setStatus(st as any);
       setCallbackPorts(settings.tngCallbackPorts || String(settings.tngCallbackPort || 80));
       setEnabled(settings.tngEnabled);
+      setAutoRetrigger(settings.tngAutoRetrigger ?? true);
     } catch { /* ignore */ }
   }
   useEffect(() => { void refresh(); }, []);
@@ -74,7 +76,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
   // The enable switch + PayResult callback port drive the single shared listener
   // (one inbound server all devices POST to). Saving either restarts/stops the
   // listener via the main-process settings:save handler.
-  async function persistListener(patch: { tngEnabled?: boolean; tngCallbackPort?: number; tngCallbackPorts?: string }) {
+  async function persistListener(patch: { tngEnabled?: boolean; tngCallbackPort?: number; tngCallbackPorts?: string; tngAutoRetrigger?: boolean }) {
     await window.bridge.saveSettings(patch);
     try { setStatus(await window.bridge.tngStatus() as any); } catch { /* ignore */ }
   }
@@ -92,6 +94,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
     await persistListener({ tngCallbackPorts: normalized, tngCallbackPort: ports[0] });
   });
   function toggleEnabled(v: boolean) { setEnabled(v); void persistListener({ tngEnabled: v }); }
+  function toggleAutoRetrigger(v: boolean) { setAutoRetrigger(v); void persistListener({ tngAutoRetrigger: v }); }
 
   const q = search.trim().toLowerCase();
   const filterActive = q !== '' || statusFilter !== 'all';
@@ -126,6 +129,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
       </header>
 
       <ListenerPanel status={status} enabled={enabled} onToggleEnabled={toggleEnabled}
+        autoRetrigger={autoRetrigger} onToggleAutoRetrigger={toggleAutoRetrigger}
         callbackPorts={callbackPorts} onChangeCallbackPorts={setCallbackPorts}
         onSaveCallbackPorts={() => saveCallbackPorts()} savingCallbackPorts={savingCallbackPorts} />
 
@@ -193,10 +197,12 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
 /** Global W4G callback listener — one inbound server ALL devices POST their
  *  PayResult to (matched by order id). The enable switch and callback port are
  *  shared, not per-device; changing them restarts/stops the listener. */
-function ListenerPanel({ status, enabled, onToggleEnabled, callbackPorts, onChangeCallbackPorts, onSaveCallbackPorts, savingCallbackPorts }: {
+function ListenerPanel({ status, enabled, onToggleEnabled, autoRetrigger, onToggleAutoRetrigger, callbackPorts, onChangeCallbackPorts, onSaveCallbackPorts, savingCallbackPorts }: {
   status: TngStatus | null;
   enabled: boolean;
   onToggleEnabled: (v: boolean) => void;
+  autoRetrigger: boolean;
+  onToggleAutoRetrigger: (v: boolean) => void;
   callbackPorts: string;
   onChangeCallbackPorts: (v: string) => void;
   onSaveCallbackPorts: () => void;
@@ -222,6 +228,21 @@ function ListenerPanel({ status, enabled, onToggleEnabled, callbackPorts, onChan
           <div className="text-sm font-semibold">Enable Touch'n'Go W4G payments</div>
           <div className="text-[11px] text-gray-500 mt-0.5">
             ON = the PayResult callback server runs and exits are charged on the lane's device. OFF = no listener; paid exits can't collect.
+          </div>
+        </div>
+      </label>
+
+      {/* Auto-retrigger — re-arm the terminal after a failed/timed-out tap so the
+          driver can try again without staff intervention. Capped per session. */}
+      <label className="mt-2 flex items-start gap-3 p-3 rounded-lg border border-gray-200 hover:border-gray-300 cursor-pointer">
+        <input type="checkbox" className="mt-0.5 w-4 h-4 accent-gray-900" checked={autoRetrigger} onChange={(e) => onToggleAutoRetrigger(e.target.checked)} />
+        <div>
+          <div className="text-sm font-semibold">Auto-retrigger terminal after a failed / timed-out payment</div>
+          <div className="text-[11px] text-gray-500 mt-0.5">
+            ON = when an exit charge times out or is declined, the terminal is automatically re-armed after 2s (up to 3 tries) so the driver can tap again. OFF = a failed tap needs a manual retrigger.
+          </div>
+          <div className="text-[11px] text-amber-600 mt-0.5">
+            ⚠️ Leave OFF until the PayResult callback path is confirmed working — a re-arm after a lost callback can charge a card twice.
           </div>
         </div>
       </label>

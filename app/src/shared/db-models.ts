@@ -468,4 +468,14 @@ export interface AppSettings {
    *  After this timeout we PayCancel the order and continue with the ECPI
    *  terminal alone (or mark the session declined if that also timed out). */
   tngTimeoutSeconds: number;
+  /** When a paid exit charge fails / times out / is declined, automatically
+   *  re-fire the PayRequest at the same terminal after a short delay (2s) so
+   *  the driver can tap again without staff having to manually retrigger.
+   *  Capped per session (see MAX_AUTO_RETRIGGERS in parking-flow) so an
+   *  abandoned car can't hold the lane forever. Default ON — turn OFF to make
+   *  a failed tap require a manual retrigger.
+   *  ⚠️ Re-arming after a *timeout* can double-charge if a tap actually
+   *  succeeded but its PayResult callback was lost (network/firewall). Only
+   *  fully safe once the PayResult callback path is reliable. */
+  tngAutoRetrigger: boolean;
 }

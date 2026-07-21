@@ -129,7 +129,7 @@ const DEVICE_HARDCODED_CALLBACK_PORT = 80;
  * so the two streams don't collide). That way the operator can scroll
  * back through W4G activity after an app restart without losing context.
  */
-function w4gLog(direction: 'send' | 'recv' | 'error' | 'info', message: string, payload?: unknown): void {
+export function w4gLog(direction: 'send' | 'recv' | 'error' | 'info', message: string, payload?: unknown): void {
   w4gEvents.emit('log', { direction, message, payload });
   try { logTerminal(-1, direction, message, payload); } catch { /* DB best-effort */ }
 }
@@ -178,6 +178,29 @@ function buildListenerHandler(): http.RequestListener {
 
 // ─── inbound callback server ────────────────────────────────────────────
 
+/** Non-internal IPv4 addresses of this host — the LAN IPs the W4G device
+ *  can POST its PayResult callback to. Used in the "Listener UP" / timeout
+ *  logs (so the operator sees the EXACT URL to enter in the device's SERVER
+ *  IP field, not a `<your-lan-ip>` placeholder) and in w4gStatus(). */
+function lanIPv4Addresses(): string[] {
+  const out: string[] = [];
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const nic of interfaces ?? []) {
+      if (nic.family === 'IPv4' && !nic.internal) out.push(nic.address);
+    }
+  }
+  return out;
+}
+
+/** Human-readable list of the callback URLs the device should POST to, using
+ *  this host's real LAN IPs. Falls back to a labelled placeholder when no
+ *  LAN IPv4 is up yet (e.g. cable unplugged). */
+function callbackUrlsForPort(port: number): string {
+  const ips = lanIPv4Addresses();
+  if (ips.length === 0) return `http://<this-host-lan-ip>:${port}/w4g/PayResult (no LAN IPv4 detected — check the network cable/adapter)`;
+  return ips.map((ip) => `http://${ip}:${port}/w4g/PayResult`).join('  |  ');
+}
+
 /** Parse "80, 120, 240" → [80, 120, 240] — valid 1–65535, deduped, order kept. */
 function parseCallbackPorts(raw: string): number[] {
   const out: number[] = [];
@@ -210,7 +233,7 @@ export function startW4gServer(): void {
       const note = port === DEVICE_HARDCODED_CALLBACK_PORT
         ? ' (matches the W4G firmware\'s hardcoded callback port)'
         : '';
-      w4gLog('info', `Listener UP on 0.0.0.0:${port}${note} — device callback URL: http://<your-lan-ip>:${port}/w4g/PayResult`);
+      w4gLog('info', `Listener UP on 0.0.0.0:${port}${note} — set the W4G device's SERVER IP so it POSTs PayResult to: ${callbackUrlsForPort(port)}`);
     });
     srv.on('error', (e: any) => {
       lastError = e.message;
@@ -371,7 +394,7 @@ export function payRequest(opts: {
     pending.timer = setTimeout(() => {
       if (!pendingByOrderId.has(orderId)) return;
       pendingByOrderId.delete(orderId);
-      w4gLog('error', `PayRequest TIMEOUT after ${timeoutMs}ms — no PayResult callback received from device. Check that the device's PayResult URL points at http://<this-host>:${activePorts[0] ?? getSettings().tngCallbackPort}/w4g/PayResult`, { orderId, timeoutMs });
+      w4gLog('error', `PayRequest TIMEOUT after ${timeoutMs}ms — no PayResult callback received from device. Confirm (1) a card was actually tapped, and (2) the device's SERVER IP POSTs PayResult to: ${callbackUrlsForPort(activePorts[0] ?? getSettings().tngCallbackPort)}`, { orderId, timeoutMs });
       // Fire-and-forget cancel (against the SAME device) so it doesn't keep
       // holding the card for the full reader-side timeout.
       payCancel(orderId, { host, port }).catch(() => null);
@@ -738,12 +761,7 @@ export function w4gStatus(): {
   lastError?: string;
 } {
   const setting = getSettings();
-  const addresses: string[] = [];
-  for (const interfaces of Object.values(os.networkInterfaces())) {
-    for (const nic of interfaces ?? []) {
-      if (nic.family === 'IPv4' && !nic.internal) addresses.push(nic.address);
-    }
-  }
+  const addresses = lanIPv4Addresses();
   return {
     enabled: setting.tngEnabled,
     listening: activePorts.length > 0,

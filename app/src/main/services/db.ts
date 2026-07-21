@@ -588,6 +588,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   tngCallbackPort: 80,
   tngCallbackPorts: '80',
   tngTimeoutSeconds: 30,
+  tngAutoRetrigger: true,
 };
 
 export function getSettings(): AppSettings {
