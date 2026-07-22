@@ -571,8 +571,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   qparkingBaseUrl: '',
   qparkingApiKey: '',
   lprWebhookPort: 6001,
-  apiPort: 6000,
-  imageStorePath: '',
   exitGracePeriodSeconds: 90,
   faceappBaseUrl: '',
   faceappApiToken: '',
@@ -1271,6 +1269,82 @@ export function upsertSite(site: Site): Site {
       site.parkingSiteType, site.logoUrl,
     );
   return getSite(site.id)!;
+}
+
+// ─── site binding (which cloud site this install is provisioned for) ─────────
+// The box is bound to exactly ONE site (see "one site per install" throughout).
+// The bound site id is stored as a raw `settings` row — deliberately NOT part of
+// AppSettings, so it never surfaces in the Settings form or a settings patch —
+// and is the source of truth for "which site does this box belong to". Pointing
+// the API key at a different site is a re-provision (see the site:rebind IPC),
+// which clears the old site's local data and re-binds.
+
+const BOUND_SITE_KEY = 'boundSiteId';
+
+/** The cloud site id this install is provisioned for, or null if never bound. */
+export function getBoundSiteId(): string | null {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(BOUND_SITE_KEY) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+/** Record which cloud site this install is bound to. */
+export function setBoundSiteId(siteId: string): void {
+  getDb()
+    .prepare('INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .run(BOUND_SITE_KEY, siteId);
+}
+
+/** Stamp the API key that owns a site row (the UNIQUE local_server_api_key
+ *  column the SiteResource payload can't populate itself). */
+export function bindSiteApiKey(siteId: string, apiKey: string): void {
+  getDb().prepare('UPDATE sites SET local_server_api_key = ? WHERE id = ?').run(apiKey, siteId);
+}
+
+/** True when this install is bound to a site AND that's the site the currently
+ *  cached credentials actually resolve to. Outbound pushes (equipment mirror,
+ *  session queue drain) gate on this so nothing leaks to a site the box has not
+ *  been provisioned for — e.g. in the window after the API key is changed but
+ *  before the operator confirms the re-provision. */
+export function isBoundToCurrentSite(): boolean {
+  const bound = getBoundSiteId();
+  if (!bound) return false;
+  const current = getCurrentSite();
+  return !!current && current.id === bound;
+}
+
+/**
+ * Wipe this install's site-specific data so the box can be re-provisioned to a
+ * different cloud site. Always clears operational data (sessions, the payment
+ * ledger, terminal logs, the outbound sync queue) and the cloud mirrors
+ * (policies + rules, passes, spaces, activity logs, cached site rows). Physical
+ * equipment (cameras / lanes / terminals) is cleared only when the operator
+ * opts in, since the same hardware box may serve the new site. The site binding
+ * is re-established by the caller after the first sync against the new key.
+ */
+export function resetLocalDataForRebind(opts: { wipeEquipment: boolean }): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    // Operational / locally-owned data belonging to the old site.
+    db.exec('DELETE FROM transactions');
+    db.exec('DELETE FROM sessions');
+    db.exec('DELETE FROM terminal_log');
+    db.exec('DELETE FROM sync_queue');
+    // Cloud mirrors — re-pulled fresh for the new site on the next sync.
+    db.exec('DELETE FROM tariff_rules');
+    db.exec('DELETE FROM rate_policies');
+    db.exec('DELETE FROM season_passes');
+    db.exec('DELETE FROM parking_spaces');
+    db.exec('DELETE FROM activity_logs');
+    db.exec('DELETE FROM sites');
+    // The bound-site marker is stale until the caller re-binds post-sync.
+    db.prepare('DELETE FROM settings WHERE key = ?').run(BOUND_SITE_KEY);
+    if (opts.wipeEquipment) {
+      db.exec('DELETE FROM cameras');
+      db.exec('DELETE FROM lanes');
+      db.exec('DELETE FROM terminals');
+    }
+  });
+  tx();
 }
 
 /** The site-wide default rate plan (cloud RatePolicy flagged is_site_default).

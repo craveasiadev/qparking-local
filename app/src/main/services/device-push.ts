@@ -9,7 +9,7 @@
  * does NOT need a rate policy assigned first. Optional links (terminal, gate
  * relay, …) are sent as null when unset.
  */
-import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection } from './db';
+import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection, isBoundToCurrentSite } from './db';
 import { getCloudApi, describeRequestError } from './cloud-api';
 import type { EquipmentPushItem } from '../../shared/types';
 
@@ -20,6 +20,10 @@ export type { EquipmentPushItem };
 /** Push `error` codes that mean "nothing to send yet", not a genuine failure. */
 const SKIP_REASONS = new Set([
   'qparking_not_configured',
+  // The box isn't provisioned to the site the current key resolves to — see
+  // isBoundToCurrentSite(). Skipping (not failing) keeps local equipment from
+  // mirroring onto the wrong site during a pending re-provision.
+  'site_not_bound',
 ]);
 
 /** Fold a raw PushResult into a labelled report item, classifying the known
@@ -30,6 +34,7 @@ export function toEquipmentPushItem(id: number, name: string, result: PushResult
 }
 
 async function postToCloud(path: string, body: Record<string, unknown>): Promise<PushResult> {
+  if (!isBoundToCurrentSite()) return { ok: false, error: 'site_not_bound' };
   const cloud = getCloudApi();
   if (!cloud) return { ok: false, error: 'qparking_not_configured' };
   try {

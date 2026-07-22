@@ -104,6 +104,8 @@ const api: BridgeApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (s: unknown) => ipcRenderer.invoke('settings:save', s),
   getCurrentSite: () => ipcRenderer.invoke('site:get-current'),
+  previewSiteRebind: (input: { baseUrl: string; apiKey: string }) => ipcRenderer.invoke('site:preview-rebind', input),
+  rebindSite: (input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }) => ipcRenderer.invoke('site:rebind', input),
   diagnoseLpr: () => ipcRenderer.invoke('diagnose:lpr'),
 
   // gate simulator

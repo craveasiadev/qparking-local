@@ -24,7 +24,7 @@ import fs from 'node:fs';
 import axios from 'axios';
 import {
   enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
-  syncQueueStats, getLane,
+  syncQueueStats, getLane, isBoundToCurrentSite,
   type SyncOp,
 } from './db';
 import { getCloudApi } from './cloud-api';
@@ -242,6 +242,14 @@ async function drainOnce(): Promise<void> {
       // Not configured yet — leave rows pending; they'll retry once the
       // operator fills in URL + key in Settings.
       lastError = 'qparking_not_configured';
+      return;
+    }
+
+    if (!isBoundToCurrentSite()) {
+      // Key points at a site this box isn't provisioned for (pending
+      // re-provision). Hold the queue rather than pushing the old site's
+      // sessions to the new site. A confirmed rebind clears the queue anyway.
+      lastError = 'site_not_bound';
       return;
     }
 

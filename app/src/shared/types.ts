@@ -192,6 +192,25 @@ export interface BridgeApi {
    *  Populated by the periodic syncSite(); null until the first sync lands. */
   getCurrentSite(): Promise<Site | null>;
 
+  /** Resolve which site a candidate base-URL + API key belongs to WITHOUT
+   *  persisting it, and report whether that differs from the site this box is
+   *  currently bound to. Drives the re-provision confirmation. */
+  previewSiteRebind(input: { baseUrl: string; apiKey: string }): Promise<{
+    ok: boolean;
+    changed?: boolean;
+    candidateSite?: { id: string; name: string };
+    boundSite?: { id: string; name: string } | null;
+    error?: string;
+  }>;
+  /** Commit a re-provision: persist the new credentials, wipe the old site's
+   *  local data (equipment optional), pull the new site and push equipment up. */
+  rebindSite(input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }): Promise<{
+    ok: boolean;
+    site?: { id: string; name: string } | null;
+    error?: string;
+    [k: string]: unknown;
+  }>;
+
   debug(): Promise<any>;
 
   /** Push a rate edit to qparking SaaS, then re-pull. The SaaS becomes the

@@ -91,7 +91,7 @@ import {
   getTransactionById, getOpenTransactionForSession, updateTransaction,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses,
-  getCurrentSite,
+  getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
   listActivityLogs,
 } from './services/db';
 import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
@@ -100,9 +100,10 @@ import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncRatePolicies, pushRatePolicy, syncParkingSpaces,
   startGatePoll, setGateOpenHandler,
-  syncAll, syncSite,
+  syncAll, syncSite, fetchSiteWith,
   handleDebug,
 } from './services/cloud-sync';
+import { describeRequestError } from './services/cloud-api';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
 import { openFaceGate, pingFaceGate } from './services/face-gate';
 import {
@@ -141,14 +142,12 @@ app.whenReady().then(async () => {
   getDb(); // open the DB up-front so the schema is applied before anything queries it.
 
   const settings = getSettings();
-  // In dev mode we offset the local-facing listener ports by +1000 so the
-  // dev instance can run side-by-side with a packaged install without
-  // fighting over ports (6001 → 7001 for LPR, 6000 → 7000 for the operator
-  // API). The W4G callback port stays as-is because the device firmware
-  // hardcodes 80 and gracefully skips if it's already bound. Operator's
-  // saved setting is preserved for packaged use — this is a dev-time
-  // override only.
-  const lprPort = IS_DEV_MODE ? (settings.lprWebhookPort + 1000) : settings.lprWebhookPort;
+  // Dev and packaged builds both bind the operator-configured LPR port
+  // (default 6001) so a camera pointed at 6001 works the same either way.
+  // If a packaged install is already running when you start `npm run dev`,
+  // the dev listener's bind fails with EADDRINUSE — startLprServer() logs
+  // that and keeps the rest of the app working rather than crashing.
+  const lprPort = settings.lprWebhookPort;
   console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listener → :${lprPort}`);
   startLprServer(lprPort);
   startParkingFlow();
@@ -746,8 +745,7 @@ ipcMain.handle('settings:save', (_e, patch) => {
   const next = saveSettings(patch);
   // If the LPR port changed, restart the server.
   if (patch.lprWebhookPort !== undefined) {
-    const port = IS_DEV_MODE ? (next.lprWebhookPort + 1000) : next.lprWebhookPort;
-    startLprServer(port);
+    startLprServer(next.lprWebhookPort);
   }
   // W4G TNG: stop / start / restart the callback listener as needed when
   // the operator flips the master switch or changes the callback port.
@@ -758,6 +756,50 @@ ipcMain.handle('settings:save', (_e, patch) => {
     else stopW4gServer();
   }
   return next;
+});
+
+// ─── site re-provision (changing the API key to a different site) ───────────
+// The box is bound to ONE cloud site. Pointing the API key at a different site
+// is a re-provision, not an ordinary settings edit: it must clear the old
+// site's local data so nothing leaks/lingers. The renderer previews the
+// candidate site first, and only calls site:rebind after the operator confirms.
+
+// Resolve which site a candidate key belongs to (no persistence) and report
+// whether it differs from the site this box is currently bound to.
+ipcMain.handle('site:preview-rebind', async (_e, input: { baseUrl: string; apiKey: string }) => {
+  try {
+    const candidate = await fetchSiteWith(input.baseUrl, input.apiKey);
+    const boundId = getBoundSiteId();
+    const bound = boundId ? getSite(boundId) : null;
+    return {
+      ok: true,
+      // "changed" only when the box is ALREADY bound to a different site.
+      // An unbound box (first provisioning) just adopts the site on first sync.
+      changed: !!boundId && boundId !== candidate.id,
+      candidateSite: { id: candidate.id, name: candidate.name },
+      boundSite: bound ? { id: bound.id, name: bound.name } : null,
+    };
+  } catch (error) {
+    return { ok: false, error: describeRequestError(error) };
+  }
+});
+
+// Commit the switch: persist the new credentials, wipe the old site's data
+// (equipment optional), pull the new site fresh (syncSite re-binds), then push
+// this box's equipment up to the now-correct site.
+ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }) => {
+  saveSettings({ qparkingBaseUrl: input.baseUrl, qparkingApiKey: input.apiKey });
+  resetLocalDataForRebind({ wipeEquipment: !!input.wipeEquipment });
+  const pull = await syncAll();               // syncSite adopts + binds the new site
+  const devices = await pushAllDevices();     // now bound → equipment mirrors to the new site
+  const cameras = await pushAllCameras();
+  const site = getCurrentSite();
+  return {
+    ok: true,
+    boundSite: site ? { id: site.id, name: site.name } : null,
+    ...pull, // site / policies / passes / spaces SyncResults for the report panel
+    equipment: { lanes: devices.lanes, terminals: devices.terminals, cameras: cameras.cameras },
+  };
 });
 
 // ─── TNG W4G test triggers + status ────────────────────────────────────────

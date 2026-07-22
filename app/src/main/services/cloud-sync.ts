@@ -22,10 +22,13 @@ import {
   replaceParkingSpaces,
   pruneStaleRatePolicies,
   replaceAllActivityLogs,
+  getSettings,
+  getBoundSiteId,
+  setBoundSiteId,
+  bindSiteApiKey,
 } from './db';
-import { getCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
+import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
 import type { RatePolicy, TariffRule, SeasonPass, ParkingSpace, Site } from '../../shared/types';
-import { ReplaceAll } from 'lucide-react';
 
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
@@ -228,13 +231,38 @@ export async function syncSite(): Promise<SyncResult> {
     const { data: responseBody } = await cloud.get<{ data?: any }>('/site');
     const siteRow = responseBody?.data;
     if (!siteRow?.id) return { ok: false, fetched: 0, error: 'empty_site_payload' };
-    upsertSite(mapApiRowToSite(siteRow));
+    const site = mapApiRowToSite(siteRow);
+    upsertSite(site);
+    // First-time provisioning: an unbound box (fresh install, or an existing
+    // one from before binding existed) adopts whatever site its current key
+    // resolves to. This is NOT a site switch — no reset — so existing installs
+    // keep their data and simply record which site they belong to. A DIFFERENT
+    // key later resolving to a different site is caught by the site:rebind flow.
+    if (!getBoundSiteId()) {
+      setBoundSiteId(site.id);
+      bindSiteApiKey(site.id, getSettings().qparkingApiKey);
+    }
     return { ok: true, fetched: 1 };
   } catch (error) {
     // 404 means an older qparking SaaS without the endpoint — gracefully no-op.
     if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
     return toFailedSyncResult(error);
   }
+}
+
+/**
+ * Resolve WHICH site a candidate base-URL + API key belongs to, without
+ * persisting anything. Used by the re-provision preview so the operator can be
+ * warned before a key change wipes the box. Throws on network / auth / empty
+ * payload so the caller can surface a precise reason.
+ */
+export async function fetchSiteWith(baseUrl: string, apiKey: string): Promise<Site> {
+  const cloud = buildCloudApi(baseUrl, apiKey);
+  if (!cloud) throw new Error('missing_credentials');
+  const { data: responseBody } = await cloud.get<{ data?: any }>('/site');
+  const siteRow = responseBody?.data;
+  if (!siteRow?.id) throw new Error('empty_site_payload');
+  return mapApiRowToSite(siteRow);
 }
 
 function mapApiRowToParkingSpace(parkingSpaceRow: any, fetchedAt: string): ParkingSpace {
@@ -313,6 +341,11 @@ function runFullSyncQuietly(): void {
   syncRatePolicies().catch(() => null);
   syncSeasonPasses().catch(() => null);
   syncParkingSpaces().catch(() => null);
+  // Activity logs are a site-scoped mirror too — pull them here so a site
+  // change (or a rebind that didn't re-pull) self-heals within one cadence
+  // instead of showing the previous site's audit trail until the next manual
+  // "Sync now". replaceAllActivityLogs on an empty payload clears the cache.
+  syncActivityLogs().catch(() => null);
 }
 
 /**
@@ -484,13 +517,13 @@ export async function syncActivityLogs(): Promise<SyncResult> {
     const activityLogRows = responseBody.data ?? [];
     const fetchedAt = new Date().toISOString();
 
-    if(activityLogRows.length === 0){
-      return { ok: false, fetched: 0, error: 'empty_site_payload' };
-    }
-
+    // Replace-all mirror of the cloud's audit trail. An empty payload is a
+    // legitimate state (e.g. a freshly provisioned site), so we still clear the
+    // local cache — otherwise the PREVIOUS site's logs would keep showing after
+    // a re-provision to a site that has no logs yet.
     const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow, fetchedAt));
     replaceAllActivityLogs(activityLogs);
-    return { ok: true, fetched: 1 };
+    return { ok: true, fetched: activityLogs.length };
   } catch (error) {
     // 404 means an older qparking SaaS without the endpoint — gracefully no-op.
     if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };

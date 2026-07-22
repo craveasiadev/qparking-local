@@ -8,7 +8,7 @@
  *
  * Sections, top to bottom:
  *   1. qparking SaaS sync  — cloud base URL + API key, manual "Sync now"
- *   2. Local servers       — LPR webhook / operator API ports, image store
+ *   2. Local servers       — LPR webhook port
  *   3. App updates         — check / download / install a newer build
  *   4. Maintenance         — clear Electron browser cache
  *
@@ -80,12 +80,68 @@ export function Settings() {
     return saved;
   }
 
+  // Re-provision flow: when the qparking base URL / API key changes to a key
+  // that belongs to a DIFFERENT site, saving must not silently re-point the box
+  // (that would leak this site's equipment to the other site and leave the old
+  // site's sessions/logs showing). Instead we preview the candidate site and,
+  // if it differs, prompt the operator to confirm a reset.
+  const [rebindPrompt, setRebindPrompt] = useState<{ boundName: string; candidateName: string } | null>(null);
+  const [wipeEquipment, setWipeEquipment] = useState(false);
+
   const [saveSettings, savingSettings] = useAsyncAction(async () => {
     if (!settings) return null;
+    setSyncError(null);
+    const prev = JSON.parse(savedSnapshot) as AppSettings;
+    const credsChanged =
+      settings.qparkingApiKey !== prev.qparkingApiKey || settings.qparkingBaseUrl !== prev.qparkingBaseUrl;
+    if (credsChanged && settings.qparkingApiKey && settings.qparkingBaseUrl) {
+      const preview = await window.bridge.previewSiteRebind({
+        baseUrl: settings.qparkingBaseUrl,
+        apiKey: settings.qparkingApiKey,
+      });
+      if (!preview.ok) { setSyncError(preview.error ?? 'Could not verify the site for this API key'); return; }
+      if (preview.changed) {
+        // Different site — hold the save and require explicit confirmation.
+        setWipeEquipment(false);
+        setRebindPrompt({
+          boundName: preview.boundSite?.name ?? '—',
+          candidateName: preview.candidateSite?.name ?? '—',
+        });
+        return;
+      }
+    }
     await persistSettings();
     setJustSaved(true);
     setTimeout(() => setJustSaved(false), 2000);
   });
+
+  const [confirmRebind, rebinding] = useAsyncAction(
+    async () => {
+      if (!settings) return;
+      setSyncError(null);
+      const report = await window.bridge.rebindSite({
+        baseUrl: settings.qparkingBaseUrl,
+        apiKey: settings.qparkingApiKey,
+        wipeEquipment,
+      });
+      setRebindPrompt(null);
+      // Refresh the form + snapshot (the box is now bound to the new site) and
+      // show the pull/push report so the operator sees what landed.
+      const fresh = await window.bridge.getSettings();
+      setSettings(fresh);
+      setSavedSnapshot(JSON.stringify(fresh));
+      setCloudSyncReport(report as unknown as CloudSyncReport);
+    },
+    { onError: (error) => setSyncError(String((error as any)?.message ?? error)) },
+  );
+
+  // Cancelling a switch reverts just the credential fields to their last-saved
+  // values so the box stays bound to its current site.
+  function cancelRebind() {
+    const prev = JSON.parse(savedSnapshot) as AppSettings;
+    setSettings((current) => current ? { ...current, qparkingApiKey: prev.qparkingApiKey, qparkingBaseUrl: prev.qparkingBaseUrl } : current);
+    setRebindPrompt(null);
+  }
 
   const dirty = !!settings && JSON.stringify(settings) !== savedSnapshot;
 
@@ -99,6 +155,15 @@ export function Settings() {
       setSyncError(null);
       if (!settings) return;
       if (!settings.qparkingApiKey) { setSyncError('Set an API key before syncing'); return; }
+      // "Sync now" runs against the SAVED credentials. If the operator edited
+      // the URL/key but hasn't saved, route them through Save first — that path
+      // detects a site switch and prompts for a re-provision instead of syncing
+      // against the wrong (old) key.
+      const prev = JSON.parse(savedSnapshot) as AppSettings;
+      if (settings.qparkingApiKey !== prev.qparkingApiKey || settings.qparkingBaseUrl !== prev.qparkingBaseUrl) {
+        setSyncError('You changed the API key or base URL — click Save first (it will confirm if this switches sites).');
+        return;
+      }
       setCloudSyncReport(await window.bridge.syncAllNow());
     },
     { onError: (error) => setSyncError(String((error as any)?.message ?? error)) },
@@ -152,6 +217,35 @@ export function Settings() {
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       {confirmDialog}
+      {rebindPrompt && (
+        <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4" onClick={cancelRebind}>
+          <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div className="p-5 space-y-3">
+              <h2 className="text-base font-bold">Switch this box to a different site?</h2>
+              <p className="text-sm text-gray-600">
+                This API key belongs to <strong>{rebindPrompt.candidateName}</strong>, not <strong>{rebindPrompt.boundName}</strong>.
+                Switching disconnects this box from {rebindPrompt.boundName} and <strong>permanently clears its local data</strong> —
+                sessions, transactions, activity logs and the pending cloud-sync queue — so nothing from the old site lingers.
+              </p>
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input type="checkbox" className="mt-0.5" checked={wipeEquipment} onChange={(e) => setWipeEquipment(e.target.checked)} />
+                <span>Also remove configured cameras, lanes and payment terminals (leave unchecked if the same hardware serves the new site).</span>
+              </label>
+            </div>
+            <footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+              <button onClick={cancelRebind} disabled={rebinding}
+                className="h-9 px-3 text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900 disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={() => confirmRebind()} disabled={rebinding}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+                {rebinding ? <Loader2 size={13} className="animate-spin" /> : null}
+                {rebinding ? 'Switching…' : 'Switch & reset'}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
       <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
       <p className="text-sm text-gray-500 mt-1">Server-wide configuration. Restart not required — most changes take effect immediately.</p>
 
@@ -227,16 +321,8 @@ export function Settings() {
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
         <SectionHeader icon={Server} title="Local servers" />
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Field label="LPR webhook port">
-            <input type="number" className="input" value={settings.lprWebhookPort} onChange={(e) => setSettings({ ...settings, lprWebhookPort: Number(e.target.value) })} />
-          </Field>
-          <Field label="Operator API port">
-            <input type="number" className="input" value={settings.apiPort} onChange={(e) => setSettings({ ...settings, apiPort: Number(e.target.value) })} />
-          </Field>
-        </div>
-        <Field label="Image store path (optional)">
-          <input className="input font-mono text-xs" value={settings.imageStorePath} onChange={(e) => setSettings({ ...settings, imageStorePath: e.target.value })} placeholder="leave blank to use app userData/plates" />
+        <Field label="LPR webhook port">
+          <input type="number" className="input" value={settings.lprWebhookPort} onChange={(e) => setSettings({ ...settings, lprWebhookPort: Number(e.target.value) })} />
         </Field>
       </section>
 

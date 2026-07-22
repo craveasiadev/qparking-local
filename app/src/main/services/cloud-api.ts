@@ -12,18 +12,27 @@ import { getSettings } from './db';
 export const CLOUD_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
+ * Build an axios client for explicit credentials, or null when either is
+ * blank. Used both by getCloudApi() (current Settings) and by the re-provision
+ * preview, which needs to probe a CANDIDATE key without persisting it first.
+ */
+export function buildCloudApi(baseUrl: string, apiKey: string): AxiosInstance | null {
+  if (!baseUrl || !apiKey) return null;
+  return axios.create({
+    baseURL: `${baseUrl.replace(/\/+$/, '')}/api/v1/local-server`,
+    headers: { Authorization: `Bearer ${apiKey}` },
+    timeout: CLOUD_REQUEST_TIMEOUT_MS,
+  });
+}
+
+/**
  * Build an axios client from the current Settings, or return null when the
  * operator hasn't configured the qparking SaaS yet. Re-created on every call
  * so a base-URL / API-key change in Settings applies immediately.
  */
 export function getCloudApi(): AxiosInstance | null {
   const settings = getSettings();
-  if (!settings.qparkingBaseUrl || !settings.qparkingApiKey) return null;
-  return axios.create({
-    baseURL: `${settings.qparkingBaseUrl.replace(/\/+$/, '')}/api/v1/local-server`,
-    headers: { Authorization: `Bearer ${settings.qparkingApiKey}` },
-    timeout: CLOUD_REQUEST_TIMEOUT_MS,
-  });
+  return buildCloudApi(settings.qparkingBaseUrl, settings.qparkingApiKey);
 }
 
 /** True when `error` is an HTTP response with the given status code. */

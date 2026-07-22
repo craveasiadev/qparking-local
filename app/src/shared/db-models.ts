@@ -391,10 +391,6 @@ export interface AppSettings {
   qparkingApiKey: string;
   /** Local HTTP port for LPR camera webhooks. */
   lprWebhookPort: number;
-  /** Local HTTP port for the operator REST API (used by KDS-style external dashboards). */
-  apiPort: number;
-  /** Where to store captured plate images. Falls back to userData dir if blank. */
-  imageStorePath: string;
   /** Auto-release gate after this many seconds of waiting at exit if payment doesn't complete. */
   exitGracePeriodSeconds: number;
   /** Face-auth gate integration (faceapp_main /api/external/open-gate). When
