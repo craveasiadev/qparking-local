@@ -30,6 +30,11 @@ const api: BridgeApi = {
   saveLane: (input: unknown) => ipcRenderer.invoke('lanes:save', input),
   deleteLane: (id: number) => ipcRenderer.invoke('lanes:delete', id),
 
+  // manual equipment sync (per device page)
+  previewDeviceSync: (type: 'cameras' | 'lanes' | 'terminals', direction: 'push' | 'pull') => ipcRenderer.invoke('devices:preview-sync', type, direction),
+  pushDevicesToCloud: (type: 'cameras' | 'lanes' | 'terminals') => ipcRenderer.invoke('devices:push-cloud', type),
+  pullDevicesFromCloud: (type: 'cameras' | 'lanes' | 'terminals') => ipcRenderer.invoke('devices:pull-cloud', type),
+
   // sessions
   listOpenSessions: () => ipcRenderer.invoke('sessions:open'),
   listRecentSessions: (limit: number) => ipcRenderer.invoke('sessions:recent', limit),

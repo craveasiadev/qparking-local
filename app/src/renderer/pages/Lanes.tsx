@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Cpu, Search } from 'lucide-react';
 import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
+import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 
-const EMPTY: Omit<ParkingLane, 'id'> = {
+const EMPTY: Omit<ParkingLane, 'id' | 'externalId'> = {
   name: '', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
 };
 
@@ -107,9 +108,14 @@ export function Lanes() {
             </div>
           )}
         </div>
-        <button onClick={() => { setFormError(null); setEditing({ ...EMPTY, cameraIds: [] }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
-          <Plus size={14} /> Add lane
-        </button>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            <DeviceSyncButtons type="lanes" onDone={refresh} />
+            <button onClick={() => { setFormError(null); setEditing({ ...EMPTY, cameraIds: [] }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+              <Plus size={14} /> Add lane
+            </button>
+          </div>
+        </div>
       </header>
 
       {list.length > 0 && (

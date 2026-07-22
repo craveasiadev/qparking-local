@@ -28,7 +28,7 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
 
   try {
     await cloud.post('/camera-devices/upsert', {
-      external_id: `local-${camera.id}`, // stable across pushes
+      external_id: camera.externalId, // durable identity, stable across reinstalls
       name: camera.name,
       direction: camera.direction,
       host: camera.host,
@@ -37,7 +37,7 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
       // Which lane this camera watches — cloud resolves to a UUID so
       // per-camera Open Barrier commands carry the target lane_id. Null when
       // the camera isn't assigned to a lane yet.
-      lane_external_id: lane ? `local-${lane.id}` : null,
+      lane_external_id: lane ? lane.externalId : null,
     });
     return { ok: true };
   } catch (error) {

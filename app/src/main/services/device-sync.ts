@@ -1,0 +1,193 @@
+/**
+ * Manual, operator-driven equipment sync between this box and qparking SaaS.
+ *
+ * Two directions, both destructive and both fired from the device pages
+ * (Cameras / Lanes / Terminals), never automatically:
+ *
+ *   Push to cloud  — this PC is the source of truth. Upsert every local device
+ *                    of the type, then reconcile: the cloud soft-deletes any of
+ *                    its rows whose external_id we didn't send (so a local
+ *                    delete finally propagates).
+ *   Pull from cloud — the cloud is the source of truth. Reconcile the local
+ *                     table to match the cloud set by external_id, preserving
+ *                     numeric ids for surviving devices (session refs stay
+ *                     valid) and relinking camera→lane→terminal afterwards.
+ *
+ * Both are gated on the site binding (isBoundToCurrentSite) so equipment can
+ * never sync against the wrong site. LAN-only secrets (webhook / terminal
+ * secret, SDK creds) are never on the cloud, so Pull does not restore them.
+ */
+import { getCloudApi, describeRequestError } from './cloud-api';
+import {
+  listCameras, listLanes, listTerminals,
+  reconcileCamerasFromCloud, reconcileLanesFromCloud, reconcileTerminalsFromCloud,
+  relinkDevices,
+  isBoundToCurrentSite,
+  type CloudCameraRow, type CloudLaneRow, type CloudTerminalRow,
+} from './db';
+import { pushCamera } from './camera-push';
+import { pushLane, pushTerminal, toEquipmentPushItem } from './device-push';
+import type { EquipmentPushItem } from '../../shared/types';
+
+export type DeviceType = 'cameras' | 'lanes' | 'terminals';
+
+interface CloudListBody { data?: any[] }
+
+const NOT_READY = (): { ok: false; error: string } | null => {
+  if (!getCloudApi()) return { ok: false, error: 'qparking_not_configured' };
+  if (!isBoundToCurrentSite()) return { ok: false, error: 'site_not_bound' };
+  return null;
+};
+
+// ─── cloud fetch (list) → normalized rows ────────────────────────────────────
+
+async function fetchCloudTerminals(): Promise<CloudTerminalRow[]> {
+  const { data } = await getCloudApi()!.get<CloudListBody>('/local-terminals');
+  return (data.data ?? []).map((r: any): CloudTerminalRow => ({
+    externalId: String(r.external_id),
+    name: String(r.name ?? ''),
+    host: String(r.host ?? ''),
+    port: Number(r.port ?? 5000),
+    enabled: !!r.enabled,
+  }));
+}
+
+async function fetchCloudLanes(): Promise<CloudLaneRow[]> {
+  const { data } = await getCloudApi()!.get<CloudListBody>('/local-lanes');
+  return (data.data ?? []).map((r: any): CloudLaneRow => ({
+    externalId: String(r.external_id),
+    name: String(r.name ?? ''),
+    gateRelayAddress: r.gate_relay_address ?? null,
+    enabled: !!r.enabled,
+    terminalExternalId: r.terminal_external_id ?? null,
+    policyId: r.rate_policy_id ?? null,
+  }));
+}
+
+async function fetchCloudCameras(): Promise<CloudCameraRow[]> {
+  const { data } = await getCloudApi()!.get<CloudListBody>('/camera-devices');
+  return (data.data ?? []).map((r: any): CloudCameraRow => ({
+    externalId: String(r.external_id),
+    name: String(r.name ?? ''),
+    direction: (r.direction ?? 'entry') as CloudCameraRow['direction'],
+    host: r.ip_address ?? null,
+    enabled: !!r.is_enabled,
+    laneExternalId: r.lane_external_id ?? null,
+  }));
+}
+
+/** Local external_ids for a type — the "keep" set for a push reconcile. */
+function localExternalIds(type: DeviceType): string[] {
+  if (type === 'cameras') return listCameras().map((c) => c.externalId);
+  if (type === 'lanes') return listLanes().map((l) => l.externalId);
+  return listTerminals().map((t) => t.externalId);
+}
+
+async function fetchCloudExternalIds(type: DeviceType): Promise<string[]> {
+  if (type === 'cameras') return (await fetchCloudCameras()).map((r) => r.externalId);
+  if (type === 'lanes') return (await fetchCloudLanes()).map((r) => r.externalId);
+  return (await fetchCloudTerminals()).map((r) => r.externalId);
+}
+
+const RECONCILE_PATH: Record<DeviceType, string> = {
+  cameras: '/camera-devices/reconcile',
+  lanes: '/local-lanes/reconcile',
+  terminals: '/local-terminals/reconcile',
+};
+
+// ─── preview (counts for the confirmation modal) ─────────────────────────────
+
+export interface DevicePreview {
+  ok: boolean;
+  error?: string;
+  localCount: number;
+  cloudCount: number;
+  /** Push: cloud rows that will be removed. Pull: local rows that will be removed. */
+  toRemove: number;
+  /** Rows that exist on the destination and will be overwritten/updated. */
+  toUpdate: number;
+  /** Rows that will be newly created on the destination. */
+  toAdd: number;
+}
+
+export async function previewDeviceSync(type: DeviceType, direction: 'push' | 'pull'): Promise<DevicePreview> {
+  const notReady = NOT_READY();
+  if (notReady) return { ok: false, error: notReady.error, localCount: 0, cloudCount: 0, toRemove: 0, toUpdate: 0, toAdd: 0 };
+  try {
+    const local = new Set(localExternalIds(type));
+    const cloud = new Set(await fetchCloudExternalIds(type));
+    const inBoth = [...local].filter((id) => cloud.has(id)).length;
+    if (direction === 'push') {
+      const toRemove = [...cloud].filter((id) => !local.has(id)).length; // cloud-only → soft-deleted
+      return { ok: true, localCount: local.size, cloudCount: cloud.size, toRemove, toUpdate: inBoth, toAdd: local.size - inBoth };
+    }
+    const toRemove = [...local].filter((id) => !cloud.has(id)).length; // local-only → deleted
+    return { ok: true, localCount: local.size, cloudCount: cloud.size, toRemove, toUpdate: inBoth, toAdd: cloud.size - inBoth };
+  } catch (error) {
+    return { ok: false, error: describeRequestError(error), localCount: 0, cloudCount: 0, toRemove: 0, toUpdate: 0, toAdd: 0 };
+  }
+}
+
+// ─── push (local → cloud, mirror) ────────────────────────────────────────────
+
+export interface DevicePushResult { ok: boolean; error?: string; items?: EquipmentPushItem[]; removed?: number; }
+
+export async function pushDevicesToCloud(type: DeviceType): Promise<DevicePushResult> {
+  const notReady = NOT_READY();
+  if (notReady) return notReady;
+  try {
+    const items: EquipmentPushItem[] = [];
+    if (type === 'cameras') {
+      for (const c of listCameras()) {
+        const r = await pushCamera(c.id).catch((e) => ({ ok: false, error: describeRequestError(e) }));
+        items.push(toEquipmentPushItem(c.id, c.name, r));
+      }
+    } else if (type === 'lanes') {
+      for (const l of listLanes()) {
+        const r = await pushLane(l.id).catch((e) => ({ ok: false, error: describeRequestError(e) }));
+        items.push(toEquipmentPushItem(l.id, l.name, r));
+      }
+    } else {
+      for (const t of listTerminals()) {
+        const r = await pushTerminal(t.id).catch((e) => ({ ok: false, error: describeRequestError(e) }));
+        items.push(toEquipmentPushItem(t.id, t.name, r));
+      }
+    }
+    // Reconcile: soft-delete cloud rows whose external_id we no longer have.
+    const { data } = await getCloudApi()!.post<{ removed?: number }>(RECONCILE_PATH[type], { keep: localExternalIds(type) });
+    return { ok: true, items, removed: data?.removed ?? 0 };
+  } catch (error) {
+    return { ok: false, error: describeRequestError(error) };
+  }
+}
+
+// ─── pull (cloud → local, replace) ───────────────────────────────────────────
+
+export interface DevicePullResult { ok: boolean; error?: string; applied?: number; }
+
+export async function pullDevicesFromCloud(type: DeviceType): Promise<DevicePullResult> {
+  const notReady = NOT_READY();
+  if (notReady) return notReady;
+  try {
+    let applied = 0;
+    if (type === 'cameras') {
+      const rows = await fetchCloudCameras();
+      reconcileCamerasFromCloud(rows);
+      applied = rows.length;
+    } else if (type === 'lanes') {
+      const rows = await fetchCloudLanes();
+      reconcileLanesFromCloud(rows);
+      applied = rows.length;
+    } else {
+      const rows = await fetchCloudTerminals();
+      reconcileTerminalsFromCloud(rows);
+      applied = rows.length;
+    }
+    // Re-derive numeric FKs from the external-id links now that this type's
+    // rows changed (order-independent — completes once the other type is pulled).
+    relinkDevices();
+    return { ok: true, applied };
+  } catch (error) {
+    return { ok: false, error: describeRequestError(error) };
+  }
+}

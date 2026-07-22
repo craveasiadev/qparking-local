@@ -33,6 +33,10 @@ export type OperationMode = 'maintenance' | 'live' | 'not_in_use';
  *  PayResult callback. (Replaced the former Coherent/ECPI reader model.) */
 export interface PaymentTerminal {
   id: number;
+  /** Durable cloud identity — survives reinstall/renumber. Used as the cloud
+   *  upsert key and for push/pull sync. Backfilled to `local-{id}` on existing
+   *  rows; new rows get a `dev-<uuid>`. */
+  externalId: string;
   name: string;
   /** W4G device IP on the LAN. e.g. 192.168.1.105 */
   host: string;
@@ -51,6 +55,8 @@ export interface PaymentTerminal {
  *  (/lpr/event); live video comes from the device SDK. */
 export interface LprCamera {
   id: number;
+  /** Durable cloud identity — survives reinstall/renumber. See PaymentTerminal.externalId. */
+  externalId: string;
   name: string;
   /** Which lane this camera covers — links plate detection to a parking lane. */
   laneId: number | null;
@@ -89,6 +95,8 @@ export interface LprCamera {
  *  keyed to the camera that saw the plate. */
 export interface ParkingLane {
   id: number;
+  /** Durable cloud identity — survives reinstall/renumber. See PaymentTerminal.externalId. */
+  externalId: string;
   name: string;
   /** Policy from qparking SaaS — the rate config is fetched per policy. */
   policyId: string | null;

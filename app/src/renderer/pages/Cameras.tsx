@@ -3,8 +3,9 @@ import { Plus, Trash2, Camera as CamIcon, X, Copy, Check, Activity, Loader2, Web
 import type { LprCamera, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
+import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 
-const EMPTY: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> = {
+const EMPTY: Omit<LprCamera, 'id'|'externalId'|'createdAt'|'updatedAt'> = {
   name: '', laneId: null, direction: 'entry',
   host: '', deviceUser: '', devicePassword: '', devicePort: 80,
   webhookSecret: '', enabled: true,
@@ -77,9 +78,14 @@ export function Cameras() {
             </div>
           )}
         </div>
-        <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
-          <Plus size={14} /> Add camera
-        </button>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            <DeviceSyncButtons type="cameras" onDone={refresh} />
+            <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+              <Plus size={14} /> Add camera
+            </button>
+          </div>
+        </div>
       </header>
 
       {diag && (

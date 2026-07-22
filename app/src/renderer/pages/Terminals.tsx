@@ -6,6 +6,7 @@ import {
 import type { PaymentTerminal, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
+import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 
 /**
  * Payment terminals = Alarmtech Touch'n'Go W4G devices. One device per exit
@@ -14,7 +15,7 @@ import { useConfirm } from '../hooks/useConfirm';
  * the device POSTs back to this server's callback listener (shown below).
  */
 
-const EMPTY: Omit<PaymentTerminal, 'id' | 'createdAt' | 'updatedAt'> = {
+const EMPTY: Omit<PaymentTerminal, 'id' | 'externalId' | 'createdAt' | 'updatedAt'> = {
   name: '', host: '', port: 80, timeoutSeconds: 30, enabled: true,
 };
 
@@ -122,10 +123,15 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
             </div>
           )}
         </div>
-        <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }}
-          className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
-          <Plus size={14} /> Add device
-        </button>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            <DeviceSyncButtons type="terminals" onDone={refresh} />
+            <button onClick={() => { setFormError(null); setEditing({ ...EMPTY }); }}
+              className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">
+              <Plus size={14} /> Add device
+            </button>
+          </div>
+        </div>
       </header>
 
       <ListenerPanel status={status} enabled={enabled} onToggleEnabled={toggleEnabled}

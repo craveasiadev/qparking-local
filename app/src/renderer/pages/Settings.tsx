@@ -316,7 +316,7 @@ export function Settings() {
             )}
           </div>
         )}
-        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code>; lanes, terminals and cameras are pushed up. Equipment syncs as soon as it exists — no rate policy required. Background sync re-pulls everything every 60 seconds.</p>
+        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code> and re-pulled every 60 seconds. Equipment (cameras, lanes, terminals) syncs manually from each device page's <strong>Push / Pull to cloud</strong> buttons — not here.</p>
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">

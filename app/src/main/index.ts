@@ -116,10 +116,9 @@ import {
 } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
-import { pushCamera, pushAllCameras } from './services/camera-push';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier } from './services/camera-relay';
 import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } from './services/camera-rtsp';
-import { pushTerminal, pushLane, pushAllDevices } from './services/device-push';
+import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
   pingDevice as tngPing, probeHttp as tngProbeHttp, loopbackPayResult as tngLoopback,
@@ -211,11 +210,10 @@ app.whenReady().then(async () => {
   // enabled the TNG integration. Toggling it on/off in Settings restarts
   // it via the settings:save handler below.
   if (settings.tngEnabled) startW4gServer();
-  // First-time equipment registry mirror — fire and forget so a slow WAN
-  // doesn't block boot. Order matters: lanes + terminals first so each
-  // camera's lane_external_id link resolves on its very first push.
-  // Subsequent updates push on every save.
-  pushAllDevices().then(() => pushAllCameras()).catch(() => null);
+  // Equipment (cameras / lanes / terminals) is NOT auto-pushed on boot anymore.
+  // It syncs manually, per type, from each device page's Push/Pull-to-cloud
+  // buttons — so a freshly-installed empty box can never mirror-delete the
+  // cloud's devices, and nothing leaves this PC without an explicit action.
 
   // Live-display video + plate snapshots come from the RTSP/ffmpeg feed
   // (camera-rtsp) — camera IP only. The VZ SDK now holds a warm handle per
@@ -441,10 +439,9 @@ function sendToRenderer(channel: string, payload: unknown) {
 // per-command console like the old ECPI reader had.
 ipcMain.handle('terminals:list', () => listTerminals());
 ipcMain.handle('terminals:save', (_e, input) => {
-  const saved = upsertTerminal(input);
-  // Best-effort cloud mirror — doesn't block the local save if WAN is offline.
-  pushTerminal(saved.id).catch(() => null);
-  return saved;
+  // Local-only save. Cloud sync is manual now — the operator pushes from the
+  // Terminals page's "Push to cloud" button.
+  return upsertTerminal(input);
 });
 ipcMain.handle('terminals:delete', (_e, id: number) => { deleteTerminal(id); });
 // TCP reachability probe by host:port — backs the per-device "Test connection".
@@ -453,9 +450,8 @@ ipcMain.handle('terminals:ping-host', (_e, input: { host: string; port: number }
 ipcMain.handle('cameras:list', () => listCameras());
 ipcMain.handle('cameras:save', async (_e, input) => {
   const saved = upsertCamera(input);
-  // Mirror to cloud — best-effort, doesn't block the local save.
-  pushCamera(saved.id).catch(() => null);
-  // Refresh the RTSP video feed and the warm relay connection if host/creds changed.
+  // Local-only save (cloud sync is manual via the Cameras page button). Still
+  // refresh the RTSP video feed and warm relay connection if host/creds changed.
   resyncRtspGrabbers();
   resyncCameraRelay();
   return saved;
@@ -480,10 +476,7 @@ ipcMain.handle('lanes:save', (_e, input: any) => {
   const changedCameras: number[] = Array.isArray(cameraIds) ? cameraIds.map(Number) : [];
   if (Array.isArray(cameraIds)) setLaneCameras(saved.id, changedCameras);
 
-  pushLane(saved.id).catch(() => null);
-  // Re-mirror any cameras whose lane assignment we just changed so the cloud
-  // registry reflects the new coverage.
-  for (const cid of changedCameras) pushCamera(cid).catch(() => null);
+  // Local-only save. Cloud sync is manual via the Lanes / Cameras page buttons.
   return saved;
 });
 ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));
@@ -785,20 +778,18 @@ ipcMain.handle('site:preview-rebind', async (_e, input: { baseUrl: string; apiKe
 });
 
 // Commit the switch: persist the new credentials, wipe the old site's data
-// (equipment optional), pull the new site fresh (syncSite re-binds), then push
-// this box's equipment up to the now-correct site.
+// (equipment optional) and pull the new site fresh (syncSite re-binds). Equipment
+// is NOT auto-pushed — after a rebind the operator decides per device page
+// whether to Push this box's equipment up or Pull the new site's down.
 ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }) => {
   saveSettings({ qparkingBaseUrl: input.baseUrl, qparkingApiKey: input.apiKey });
   resetLocalDataForRebind({ wipeEquipment: !!input.wipeEquipment });
   const pull = await syncAll();               // syncSite adopts + binds the new site
-  const devices = await pushAllDevices();     // now bound → equipment mirrors to the new site
-  const cameras = await pushAllCameras();
   const site = getCurrentSite();
   return {
     ok: true,
     boundSite: site ? { id: site.id, name: site.name } : null,
     ...pull, // site / policies / passes / spaces SyncResults for the report panel
-    equipment: { lanes: devices.lanes, terminals: devices.terminals, cameras: cameras.cameras },
   };
 });
 
@@ -929,16 +920,24 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
 ipcMain.handle('gate:manual-open', (_e, opts: { cameraId?: number | null; laneId?: number | null } = {}) => openBarrier(opts));
 
 ipcMain.handle('sync:all-tables', async () => {
-  // Pull cloud-owned models down (site/policies/passes/spaces), then push local
-  // equipment up. Devices (lanes + terminals) go before cameras so each
-  // camera's lane_external_id link resolves on the cloud side.
-  const pull = await syncAll();
-  const devices = await pushAllDevices();
-  const cameras = await pushAllCameras();
-  return {
-    ...pull,
-    equipment: { lanes: devices.lanes, terminals: devices.terminals, cameras: cameras.cameras },
-  };
+  // Pull-only: cloud-owned config (site / policies / passes / spaces). Equipment
+  // (cameras / lanes / terminals) is NO LONGER pushed here — it syncs manually,
+  // per type, from each device page via the Push/Pull-to-cloud buttons.
+  return await syncAll();
+});
+
+// ─── manual equipment sync (per device page: Push / Pull to cloud) ──────────
+ipcMain.handle('devices:preview-sync', (_e, type: DeviceType, direction: 'push' | 'pull') =>
+  previewDeviceSync(type, direction));
+
+ipcMain.handle('devices:push-cloud', (_e, type: DeviceType) => pushDevicesToCloud(type));
+
+ipcMain.handle('devices:pull-cloud', async (_e, type: DeviceType) => {
+  const result = await pullDevicesFromCloud(type);
+  // A pull rewrites local camera/lane rows and their links — refresh the
+  // capture pipelines so grabbers/relay track the new set.
+  if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); }
+  return result;
 });
 
 ipcMain.handle('debug', () => handleDebug());

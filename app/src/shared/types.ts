@@ -63,13 +63,31 @@ export interface EquipmentPushItem {
   error?: string;
 }
 
+/** One of the three manually-synced equipment types (per device page). */
+export type DeviceSyncType = 'cameras' | 'lanes' | 'terminals';
+
+/** Diff counts shown in the Push/Pull confirmation modal before committing. */
+export interface DeviceSyncPreview {
+  ok: boolean;
+  error?: string;
+  localCount: number;
+  cloudCount: number;
+  /** Push: cloud rows to be soft-deleted. Pull: local rows to be deleted. */
+  toRemove: number;
+  toUpdate: number;
+  toAdd: number;
+}
+
+export interface DevicePushResult { ok: boolean; error?: string; items?: EquipmentPushItem[]; removed?: number; }
+export interface DevicePullResult { ok: boolean; error?: string; applied?: number; }
+
 // ─── the bridge contract ─────────────────────────────────────────────────────
 
 /** What the bridge exposes to the renderer. Every method returns a Promise. */
 export interface BridgeApi {
   // Payment terminals (Alarmtech W4G devices) — CRUD
   listTerminals(): Promise<PaymentTerminal[]>;
-  saveTerminal(input: Omit<PaymentTerminal, 'id' | 'createdAt' | 'updatedAt'> & { id?: number }): Promise<PaymentTerminal>;
+  saveTerminal(input: Omit<PaymentTerminal, 'id' | 'externalId' | 'createdAt' | 'updatedAt'> & { id?: number }): Promise<PaymentTerminal>;
   deleteTerminal(id: number): Promise<void>;
   /** TCP reachability probe by host:port — backs the per-device "Test
    *  connection" button (works against the form values before saving). */
@@ -77,7 +95,7 @@ export interface BridgeApi {
 
   // LPR cameras
   listCameras(): Promise<LprCamera[]>;
-  saveCamera(input: Omit<LprCamera, 'id' | 'createdAt' | 'updatedAt'> & { id?: number }): Promise<LprCamera>;
+  saveCamera(input: Omit<LprCamera, 'id' | 'externalId' | 'createdAt' | 'updatedAt'> & { id?: number }): Promise<LprCamera>;
   deleteCamera(id: number): Promise<void>;
   /** Latest frame the camera PUSHED with a plate event (base64 JPEG). Live
    *  display fallback for WebSocket/RTSP-only cameras with no snapshot URL.
@@ -95,8 +113,14 @@ export interface BridgeApi {
    *  (`cameraIds` → each camera's lane_id) and which payment terminal it
    *  charges on (`terminalId`). Passing `cameraIds` reassigns exactly that
    *  set of cameras to this lane and unassigns any others previously on it. */
-  saveLane(input: Omit<ParkingLane, 'id'> & { id?: number; cameraIds?: number[] }): Promise<ParkingLane>;
+  saveLane(input: Omit<ParkingLane, 'id' | 'externalId'> & { id?: number; cameraIds?: number[] }): Promise<ParkingLane>;
   deleteLane(id: number): Promise<void>;
+
+  // Manual equipment sync (per device page): mirror local → cloud, or replace
+  // local ← cloud. Both destructive; the UI previews the diff and confirms first.
+  previewDeviceSync(type: DeviceSyncType, direction: 'push' | 'pull'): Promise<DeviceSyncPreview>;
+  pushDevicesToCloud(type: DeviceSyncType): Promise<DevicePushResult>;
+  pullDevicesFromCloud(type: DeviceSyncType): Promise<DevicePullResult>;
 
   // Sessions
   listOpenSessions(): Promise<ParkingSession[]>;

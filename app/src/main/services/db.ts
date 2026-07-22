@@ -500,6 +500,37 @@ function applySchema(db: Database.Database) {
   // inactive rules even if they technically match the moment.
   try { db.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
 
+  // 2026-07-22: stable, reinstall-proof device identity for the equipment
+  // Push/Pull-to-cloud sync. Every camera/lane/terminal carries a durable
+  // `external_id` (the cloud upsert key). Cross-device links are ALSO expressed
+  // by external_id (camera→lane, lane→terminal) so they survive a restore that
+  // renumbers local autoincrement ids. Numeric FKs stay the local source of
+  // truth for gate logic; the *_external_id columns are the transport/restore
+  // buffer that relinkDevices() resolves back to numeric FKs.
+  for (const [table, col] of [
+    ['cameras', 'external_id TEXT'],
+    ['cameras', 'lane_external_id TEXT'],
+    ['lanes', 'external_id TEXT'],
+    ['lanes', 'terminal_external_id TEXT'],
+    ['terminals', 'external_id TEXT'],
+  ] as const) {
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`); } catch { /* already there */ }
+  }
+  // Backfill existing rows to their legacy `local-{id}` id — the cloud already
+  // stores them keyed on `local-{id}`, so this preserves today's mappings.
+  for (const table of ['cameras', 'lanes', 'terminals'] as const) {
+    try { db.exec(`UPDATE ${table} SET external_id = 'local-' || id WHERE external_id IS NULL OR external_id = ''`); } catch { /* ignore */ }
+  }
+  // Backfill link external_ids from the current numeric FKs (each referenced
+  // row's external_id is now `local-{fk}` per the backfill above).
+  try { db.exec(`UPDATE cameras SET lane_external_id = 'local-' || lane_id WHERE (lane_external_id IS NULL OR lane_external_id = '') AND lane_id IS NOT NULL`); } catch { /* ignore */ }
+  try { db.exec(`UPDATE lanes SET terminal_external_id = 'local-' || terminal_id WHERE (terminal_external_id IS NULL OR terminal_external_id = '') AND terminal_id IS NOT NULL`); } catch { /* ignore */ }
+  // Uniqueness on external_id — ALTER can't add UNIQUE, so an index enforces it
+  // for both fresh and migrated installs.
+  try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cameras_external ON cameras(external_id)`); } catch { /* ignore */ }
+  try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lanes_external ON lanes(external_id)`); } catch { /* ignore */ }
+  try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_terminals_external ON terminals(external_id)`); } catch { /* ignore */ }
+
   // 2026-07-17: rebuild `sessions` when its payment_status CHECK is stale.
   // Very old installs created the table with a restrictive CHECK (e.g. it
   // predates 'manual_release' / 'declined' / 'cancelled'), and SQLite can't
@@ -624,7 +655,7 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
 
 function rowToTerminal(row: any): PaymentTerminal {
   return {
-    id: row.id, name: row.name, host: row.host, port: row.port,
+    id: row.id, externalId: row.external_id, name: row.name, host: row.host, port: row.port,
     timeoutSeconds: row.timeout_seconds, enabled: !!row.enabled,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
@@ -639,15 +670,17 @@ export function getTerminal(id: number): PaymentTerminal | null {
   return row ? rowToTerminal(row) : null;
 }
 
-export function upsertTerminal(terminal: Omit<PaymentTerminal, 'id'|'createdAt'|'updatedAt'> & { id?: number }): PaymentTerminal {
+export function upsertTerminal(terminal: Omit<PaymentTerminal, 'id'|'externalId'|'createdAt'|'updatedAt'> & { id?: number; externalId?: string }): PaymentTerminal {
   const db = getDb();
   if (terminal.id) {
+    // external_id is immutable device identity — never rewritten on edit.
     db.prepare(`UPDATE terminals SET name=?, host=?, port=?, timeout_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(terminal.name, terminal.host, terminal.port, terminal.timeoutSeconds, terminal.enabled ? 1 : 0, terminal.id);
     return getTerminal(terminal.id)!;
   }
-  const info = db.prepare(`INSERT INTO terminals (name, host, port, timeout_seconds, enabled) VALUES (?,?,?,?,?)`)
-    .run(terminal.name, terminal.host, terminal.port, terminal.timeoutSeconds, terminal.enabled ? 1 : 0);
+  const externalId = terminal.externalId ?? `dev-${randomUUID()}`;
+  const info = db.prepare(`INSERT INTO terminals (external_id, name, host, port, timeout_seconds, enabled) VALUES (?,?,?,?,?,?)`)
+    .run(externalId, terminal.name, terminal.host, terminal.port, terminal.timeoutSeconds, terminal.enabled ? 1 : 0);
   return getTerminal(Number(info.lastInsertRowid))!;
 }
 
@@ -666,7 +699,7 @@ export function logTerminal(terminalId: number, direction: 'send'|'recv'|'error'
 
 function rowToCamera(row: any): LprCamera {
   return {
-    id: row.id, name: row.name, laneId: row.lane_id, direction: row.direction,
+    id: row.id, externalId: row.external_id, name: row.name, laneId: row.lane_id, direction: row.direction,
     webhookSecret: row.webhook_secret,
     host: row.host ?? null,
     deviceUser: row.device_user ?? null, devicePassword: row.device_password ?? null,
@@ -684,15 +717,17 @@ export function getCamera(id: number): LprCamera | null {
   return row ? rowToCamera(row) : null;
 }
 
-export function upsertCamera(camera: Omit<LprCamera, 'id'|'createdAt'|'updatedAt'> & { id?: number }): LprCamera {
+export function upsertCamera(camera: Omit<LprCamera, 'id'|'externalId'|'createdAt'|'updatedAt'> & { id?: number; externalId?: string }): LprCamera {
   const db = getDb();
   if (camera.id) {
+    // external_id is immutable device identity — never rewritten on edit.
     db.prepare(`UPDATE cameras SET name=?, lane_id=?, direction=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(camera.name, camera.laneId, camera.direction, camera.host, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.enabled ? 1 : 0, camera.id);
     return getCamera(camera.id)!;
   }
-  const info = db.prepare(`INSERT INTO cameras (name, lane_id, direction, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(camera.name, camera.laneId, camera.direction, camera.host, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.enabled ? 1 : 0);
+  const externalId = camera.externalId ?? `dev-${randomUUID()}`;
+  const info = db.prepare(`INSERT INTO cameras (external_id, name, lane_id, direction, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(externalId, camera.name, camera.laneId, camera.direction, camera.host, camera.deviceUser, camera.devicePassword, camera.devicePort, camera.webhookSecret, camera.enabled ? 1 : 0);
   return getCamera(Number(info.lastInsertRowid))!;
 }
 
@@ -704,7 +739,7 @@ export function deleteCamera(id: number) {
 
 function rowToLane(row: any): ParkingLane {
   return {
-    id: row.id, name: row.name, policyId: row.policy_id,
+    id: row.id, externalId: row.external_id, name: row.name, policyId: row.policy_id,
     terminalId: row.terminal_id, gateRelayAddress: row.gate_relay_address,
     enabled: !!row.enabled,
   };
@@ -719,15 +754,17 @@ export function getLane(id: number): ParkingLane | null {
   return row ? rowToLane(row) : null;
 }
 
-export function upsertLane(lane: Omit<ParkingLane, 'id'> & { id?: number }): ParkingLane {
+export function upsertLane(lane: Omit<ParkingLane, 'id'|'externalId'> & { id?: number; externalId?: string }): ParkingLane {
   const db = getDb();
   if (lane.id) {
+    // external_id is immutable device identity — never rewritten on edit.
     db.prepare(`UPDATE lanes SET name=?, policy_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`)
       .run(lane.name, lane.policyId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0, lane.id);
     return getLane(lane.id)!;
   }
-  const info = db.prepare(`INSERT INTO lanes (name, policy_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?)`)
-    .run(lane.name, lane.policyId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0);
+  const externalId = lane.externalId ?? `dev-${randomUUID()}`;
+  const info = db.prepare(`INSERT INTO lanes (external_id, name, policy_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?,?)`)
+    .run(externalId, lane.name, lane.policyId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0);
   return getLane(Number(info.lastInsertRowid))!;
 }
 
@@ -783,6 +820,94 @@ export function deriveLaneDirection(laneId: number): 'entry' | 'exit' | 'dual' |
   if (dirs.has('entry')) return 'entry';
   if (dirs.has('exit')) return 'exit';
   return null;
+}
+
+// ─── device cloud sync (Push / Pull to qparking) ────────────────────────────
+// Numeric FKs (camera.lane_id, lane.terminal_id) stay the local source of truth
+// for gate logic. The *_external_id columns are the durable, reinstall-proof
+// link used to transport/restore that wiring. relinkDevices() re-derives the
+// numeric FKs from the external-id links after a Pull, so a restore survives id
+// renumbering and sync order doesn't matter (relink again once the other type
+// arrives). It is ONLY safe to call right after a Pull, where the external-id
+// links are freshly authoritative from the cloud.
+
+export function relinkDevices(): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    // Unmatched / null links resolve to NULL and re-resolve on a later relink.
+    db.exec(`UPDATE cameras SET lane_id = (SELECT l.id FROM lanes l WHERE l.external_id = cameras.lane_external_id)`);
+    db.exec(`UPDATE lanes SET terminal_id = (SELECT t.id FROM terminals t WHERE t.external_id = lanes.terminal_external_id)`);
+  });
+  tx();
+}
+
+export interface CloudTerminalRow { externalId: string; name: string; host: string; port: number; enabled: boolean; }
+export interface CloudLaneRow { externalId: string; name: string; gateRelayAddress: string | null; enabled: boolean; terminalExternalId: string | null; policyId: string | null; }
+export interface CloudCameraRow { externalId: string; name: string; direction: 'entry'|'exit'|'dual'; host: string | null; enabled: boolean; laneExternalId: string | null; }
+
+/**
+ * Reconcile a device table to match the cloud set exactly, keyed by external_id:
+ * rows present in both are UPDATED in place (numeric id preserved, so existing
+ * session references stay valid), cloud-only rows are INSERTED, and local rows
+ * the cloud no longer has are DELETED. LAN-only secrets (webhook/terminal
+ * secrets) and the terminal timeout are NOT on the cloud, so they're left as-is
+ * on surviving rows and default on new ones. Caller runs relinkDevices() after.
+ */
+export function reconcileTerminalsFromCloud(rows: CloudTerminalRow[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const keep = new Set(rows.map((r) => r.externalId));
+    for (const local of db.prepare('SELECT id, external_id FROM terminals').all() as { id: number; external_id: string }[]) {
+      if (!keep.has(local.external_id)) db.prepare('DELETE FROM terminals WHERE id = ?').run(local.id);
+    }
+    const upd = db.prepare('UPDATE terminals SET name=?, host=?, port=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?');
+    const ins = db.prepare('INSERT INTO terminals (external_id, name, host, port, timeout_seconds, enabled) VALUES (?,?,?,?,?,?)');
+    for (const r of rows) {
+      if (upd.run(r.name, r.host, r.port, r.enabled ? 1 : 0, r.externalId).changes === 0) {
+        ins.run(r.externalId, r.name, r.host, r.port, 30, r.enabled ? 1 : 0);
+      }
+    }
+  });
+  tx();
+}
+
+export function reconcileLanesFromCloud(rows: CloudLaneRow[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const keep = new Set(rows.map((r) => r.externalId));
+    for (const local of db.prepare('SELECT id, external_id FROM lanes').all() as { id: number; external_id: string }[]) {
+      if (!keep.has(local.external_id)) db.prepare('DELETE FROM lanes WHERE id = ?').run(local.id);
+    }
+    // terminal_id left for relinkDevices(); direction is derived from cameras.
+    const upd = db.prepare('UPDATE lanes SET name=?, policy_id=?, gate_relay_address=?, enabled=?, terminal_external_id=? WHERE external_id=?');
+    const ins = db.prepare('INSERT INTO lanes (external_id, name, policy_id, terminal_id, gate_relay_address, enabled, terminal_external_id) VALUES (?,?,?,NULL,?,?,?)');
+    for (const r of rows) {
+      if (upd.run(r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId, r.externalId).changes === 0) {
+        ins.run(r.externalId, r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId);
+      }
+    }
+  });
+  tx();
+}
+
+export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const keep = new Set(rows.map((r) => r.externalId));
+    for (const local of db.prepare('SELECT id, external_id FROM cameras').all() as { id: number; external_id: string }[]) {
+      if (!keep.has(local.external_id)) db.prepare('DELETE FROM cameras WHERE id = ?').run(local.id);
+    }
+    // lane_id left for relinkDevices(); LAN secrets/SDK creds are not on the
+    // cloud, so surviving rows keep theirs and new rows get NULL.
+    const upd = db.prepare('UPDATE cameras SET name=?, direction=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?');
+    const ins = db.prepare('INSERT INTO cameras (external_id, name, lane_id, direction, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?)');
+    for (const r of rows) {
+      if (upd.run(r.name, r.direction, r.host, r.enabled ? 1 : 0, r.laneExternalId, r.externalId).changes === 0) {
+        ins.run(r.externalId, r.name, r.direction, r.host, r.enabled ? 1 : 0, r.laneExternalId);
+      }
+    }
+  });
+  tx();
 }
 
 // ─── sessions ──────────────────────────────────────────────────────────────

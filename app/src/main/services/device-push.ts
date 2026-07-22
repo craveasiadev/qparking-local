@@ -52,7 +52,7 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
   if (!terminal) return { ok: false, error: 'unknown_terminal' };
 
   return postToCloud('/local-terminals/upsert', {
-    external_id: `local-${terminal.id}`,
+    external_id: terminal.externalId,
     name: terminal.name,
     host: terminal.host,
     port: terminal.port,
@@ -69,11 +69,12 @@ export async function pushLane(laneId: number): Promise<PushResult> {
   const terminal = lane.terminalId ? getTerminal(lane.terminalId) : null;
 
   return postToCloud('/local-lanes/upsert', {
-    external_id: `local-${lane.id}`,
+    external_id: lane.externalId,
     name: lane.name,
     // Derived from the lane's cameras (may be 'dual', or null if none wired).
     direction: deriveLaneDirection(lane.id),
-    terminal_external_id: terminal ? `local-${terminal.id}` : null,
+    terminal_external_id: terminal ? terminal.externalId : null,
+    rate_policy_id: lane.policyId,
     gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,
   });
