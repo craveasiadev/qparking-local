@@ -69,18 +69,3 @@ export async function openFaceGate(opts: { plate?: string; reason?: string } = {
   }
 }
 
-/** Lightweight ping used by the Settings page to verify URL + token are correct
- *  before the operator commits the config. */
-export async function pingFaceGate(): Promise<OpenGateResult> {
-  const faceapp = getFaceappApi();
-  if (!faceapp) {
-    return { ok: false, error: 'face_gate_not_configured' };
-  }
-  try {
-    const response = await faceapp.get('/health');
-    const httpOk = response.status >= 200 && response.status < 300;
-    return { ok: httpOk, status: response.status, body: response.data ?? null };
-  } catch (error: any) {
-    return { ok: false, error: error?.message ?? String(error) };
-  }
-}

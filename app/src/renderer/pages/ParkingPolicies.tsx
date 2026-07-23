@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator, Search, X } from 'lucide-react';
 import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { fmtDateTime, dateInAppTz, APP_TZ } from '../lib/datetime';
 
 export function ParkingPolicies() {
   const [list, setList] = useState<RatePolicy[]>([]);
@@ -53,7 +54,7 @@ export function ParkingPolicies() {
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
               <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-gray-400" /> {list.length} plan{list.length === 1 ? '' : 's'}</span>
               <span className="inline-flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-500" /> {withRulesCount} with rules</span>
-              {lastSynced && <span className="inline-flex items-center gap-1.5"><Clock size={12} /> synced {new Date(lastSynced).toLocaleString()}</span>}
+              {lastSynced && <span className="inline-flex items-center gap-1.5"><Clock size={12} /> synced {fmtDateTime(lastSynced)}</span>}
             </div>
           )}
         </div>
@@ -188,7 +189,7 @@ export function ParkingPolicies() {
                           <td className={`px-3 py-2 text-right font-mono ${zero ? 'text-amber-700 font-bold' : ''}`}>{fmtCents(s.perBlockCents, s.currency)}</td>
                           <td className="px-3 py-2 text-right font-mono">{s.blockMinutes} min</td>
                           <td className="px-3 py-2 text-right font-mono">{(s.policyDailyCapCents ?? 0) > 0 ? fmtCents(s.policyDailyCapCents!, s.currency) : '—'}</td>
-                          <td className="px-3 py-2 text-right text-[11px] text-gray-500">{new Date(s.fetchedAt).toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right text-[11px] text-gray-500">{fmtDateTime(s.fetchedAt)}</td>
                           <td className="px-3 py-2 text-right">
                             {(s as any).isSiteDefault && (
                               <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
@@ -307,9 +308,15 @@ function fmtRuleAmounts(r: TariffRule, currency: string): string {
  *  the highlight stays consistent with the actual fee math. */
 function ruleMatchesNow(r: TariffRule): boolean {
   const now = new Date();
-  const weekday = now.getDay();
-  const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-  const date = now.toISOString().slice(0, 10);
+  // Evaluate in the app timezone (GMT+8) so this highlight matches the fee
+  // calculator, whose main process is pinned to Asia/Kuala_Lumpur. Using the
+  // host clock (getHours/getDay) or the UTC date would drift the "active now"
+  // rule by up to 8 hours.
+  const date = dateInAppTz(now); // YYYY-MM-DD in GMT+8
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const time = now.toLocaleTimeString('en-GB', {
+    timeZone: APP_TZ, hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
 
   if (r.validFrom && r.validFrom > date) return false;
   if (r.validTo && r.validTo < date) return false;

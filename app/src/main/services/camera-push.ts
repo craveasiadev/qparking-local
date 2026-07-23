@@ -4,10 +4,8 @@
  * still owned by the local server (LAN-local hardware); this is just a
  * read-only mirror on the cloud side.
  */
-import { getCamera, getLane, listCameras, isBoundToCurrentSite } from './db';
+import { getCamera, getLane, isBoundToCurrentSite } from './db';
 import { getCloudApi, describeRequestError } from './cloud-api';
-import { toEquipmentPushItem } from './device-push';
-import type { EquipmentPushItem } from './device-push';
 
 export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error?: string }> {
   // Don't mirror equipment onto a site this box isn't provisioned for (e.g.
@@ -43,16 +41,4 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
   } catch (error) {
     return { ok: false, error: describeRequestError(error) };
   }
-}
-
-/** Push every camera in one go — used on app boot and on manual "Sync now"
- *  to bring the cloud registry up-to-date. Returns a labelled per-item report
- *  so the Settings panel can show what landed and what didn't. */
-export async function pushAllCameras(): Promise<{ cameras: EquipmentPushItem[] }> {
-  const cameras: EquipmentPushItem[] = [];
-  for (const camera of listCameras()) {
-    const result = await pushCamera(camera.id).catch((error) => ({ ok: false, error: describeRequestError(error) }));
-    cameras.push(toEquipmentPushItem(camera.id, camera.name, result));
-  }
-  return { cameras };
 }

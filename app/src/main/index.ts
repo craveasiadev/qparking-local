@@ -95,25 +95,22 @@ import {
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
   listActivityLogs,
 } from './services/db';
-import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateCompletedSession, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
-  startBackgroundSync, syncRatePolicies, pushRatePolicy, syncParkingSpaces,
+  startBackgroundSync, syncRatePolicies, syncParkingSpaces,
   startGatePoll, setGateOpenHandler,
   syncAll, syncSite, fetchSiteWith,
-  handleDebug,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
-import { openFaceGate, pingFaceGate } from './services/face-gate';
+import { openFaceGate } from './services/face-gate';
 import {
   startSyncDrain, syncEvents, getSyncStatus, drainNow,
   enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete, enqueueTransaction,
   backfillAllSessions, backfillAllTransactions,
 } from './services/cloud-queue';
-import {
-  listFailedSync, retryAllFailedSync, clearFailedSync,
-} from './services/db';
+import { retryAllFailedSync } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier } from './services/camera-relay';
@@ -121,7 +118,7 @@ import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } fro
 import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
-  pingDevice as tngPing, probeHttp as tngProbeHttp, loopbackPayResult as tngLoopback,
+  loopbackPayResult as tngLoopback,
   w4gStatus, w4gEvents, newOrderId as newTngOrderId,
 } from './services/payment-tng';
 import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
@@ -588,9 +585,6 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: num
   if (gateLaneId) openBarrier({ laneId: gateLaneId, reason: 'manual-release' }).catch(() => null);
   return session;
 });
-// DEV/QA lane simulator — drives the real parking flow for a lane+plate.
-ipcMain.handle('sessions:simulate-lane', (_e, laneId: number, plate: string, direction: 'entry'|'exit') =>
-  simulateLaneEvent(laneId, plate, direction));
 // DEV/QA: record a completed session over an explicit entry→exit window.
 ipcMain.handle('sessions:simulate-session', (_e, laneId: number, plate: string, entryIso: string, exitIso: string) =>
   simulateCompletedSession(laneId, plate, entryIso, exitIso));
@@ -674,9 +668,7 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
 // Sync queue inspection + manual controls (Dashboard panel uses these).
 ipcMain.handle('sync:status', () => getSyncStatus());
 ipcMain.handle('sync:drain-now', () => drainNow());
-ipcMain.handle('sync:failed-list', (_e, limit?: number) => listFailedSync(limit ?? 50));
 ipcMain.handle('sync:retry-failed', () => ({ retried: retryAllFailedSync() }));
-ipcMain.handle('sync:clear-failed', () => ({ cleared: clearFailedSync() }));
 ipcMain.handle('sync:backfill-sessions', async () => {
   const result = backfillAllSessions();
   // Kick a drain right away so the queue starts flushing immediately.
@@ -701,10 +693,6 @@ ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('activity-logs:list', () => listActivityLogs());
-ipcMain.handle('policies:save-rate', (_e, input: {
-  firstBlockCents: number; perBlockCents: number;
-  blockMinutes: number; freeMinutes: number; dailyCapCents: number;
-}) => pushRatePolicy(input));
 // "Test price" — simulate the fee a rate plan charges for an entry→exit window.
 ipcMain.handle('policies:simulate', (_e, input: { policyId: string; entry: string; exit: string }) =>
   simulateRatePolicyFee(input.policyId, input.entry, input.exit));
@@ -821,8 +809,6 @@ ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: strin
 // Used by the Settings page panel so an operator can hit "Test PayRequest" /
 // "Test PayCancel" / "Ping" without spinning up a real parking session, and
 // see live result frames as they come back from the IO controller.
-ipcMain.handle('tng:ping', () => tngPing());
-ipcMain.handle('tng:probe-http', () => tngProbeHttp());
 ipcMain.handle('tng:loopback', (_e, opts?: any) => tngLoopback(opts ?? {}));
 ipcMain.handle('tng:status', () => w4gStatus());
 ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
@@ -887,10 +873,6 @@ ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string, target?: { hos
 });
 
 ipcMain.handle('diagnose:lpr', () => require('./services/lpr-webhook').diagnose());
-
-// Face-auth turnstile integration
-ipcMain.handle('faceGate:ping', () => pingFaceGate());
-ipcMain.handle('faceGate:open', (_e, opts?: { plate?: string; reason?: string }) => openFaceGate(opts ?? {}));
 
 // Gate simulator — opens the always-on-top red/green window.
 ipcMain.handle('gate:open', () => { openGateSimulator(isDev); });
@@ -963,5 +945,3 @@ ipcMain.handle('devices:pull-cloud', async (_e, type: DeviceType) => {
   if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); }
   return result;
 });
-
-ipcMain.handle('debug', () => handleDebug());

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { fmtDateTime, fmtTimeSeconds } from '../lib/datetime';
 
 const PAGE_SIZE = 20;
 
@@ -108,7 +109,7 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     try {
       const r = await window.bridge.simulateEntry(lid, plate.trim(), toIso(entryLocal));
       if (!r?.ok) push('warn', `✗ entry: ${r?.error ?? 'failed'}`);
-      else { push('in', `Entry stored — ${new Date(toIso(entryLocal)).toLocaleString()} (session #${r.sessionId})`); refreshRef.current?.(); }
+      else { push('in', `Entry stored — ${fmtDateTime(toIso(entryLocal))} (session #${r.sessionId})`); refreshRef.current?.(); }
     } finally { setBusy(null); }
   }
 
@@ -210,7 +211,7 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
         <div className="mt-3 rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 max-h-52 overflow-auto">
           {log.map((e, i) => (
             <div key={i} className="flex items-baseline gap-2 px-3 py-1.5 text-xs font-mono">
-              <span className="text-gray-400 tabular-nums">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className="text-gray-400 tabular-nums">{fmtTimeSeconds(new Date(e.ts).toISOString())}</span>
               <span className={toneCls[e.tone]}>{e.text}</span>
             </div>
           ))}
@@ -619,8 +620,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                         <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-xs text-gray-600">{new Date(s.entryAt).toLocaleString()}</td>
-                    <td className="px-3 py-2 text-xs text-gray-600">{s.exitAt ? new Date(s.exitAt).toLocaleString() : '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(s.entryAt)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(s.exitAt)}</td>
                     <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
                     <td className="px-3 py-2 text-right font-mono text-xs">
                       {displayFeeCents != null
@@ -681,8 +682,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                     </div>
                   </div>
                   <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                    <span><span className="text-gray-400">In:</span> {new Date(s.entryAt).toLocaleString()}</span>
-                    <span><span className="text-gray-400">Out:</span> {s.exitAt ? new Date(s.exitAt).toLocaleString() : '—'}</span>
+                    <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
+                    <span><span className="text-gray-400">Out:</span> {fmtDateTime(s.exitAt)}</span>
                     <span className="font-mono"><span className="text-gray-400">Dur:</span> {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</span>
                     <span className="font-mono">
                       <span className="text-gray-400">Fee:</span>{' '}
@@ -970,13 +971,13 @@ function ViewSessionModal({
           {/* Timeline */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <DetailRow label="Entered" icon={LogIn} iconClass="text-emerald-600">
-              <div className="font-mono text-sm font-semibold">{new Date(s.entryAt).toLocaleString()}</div>
+              <div className="font-mono text-sm font-semibold">{fmtDateTime(s.entryAt)}</div>
               <div className="text-[11px] text-gray-500 mt-0.5">Lane: {entryLaneName}</div>
             </DetailRow>
             <DetailRow label="Exited" icon={LogOut} iconClass={s.exitAt ? 'text-blue-600' : 'text-amber-500'}>
               {s.exitAt ? (
                 <>
-                  <div className="font-mono text-sm font-semibold">{new Date(s.exitAt).toLocaleString()}</div>
+                  <div className="font-mono text-sm font-semibold">{fmtDateTime(s.exitAt)}</div>
                   <div className="text-[11px] text-gray-500 mt-0.5">Lane: {exitLaneName}</div>
                 </>
               ) : (
@@ -1196,7 +1197,7 @@ function ReleaseSessionModal({
           <div className="text-sm">
             <span className="text-gray-500">Plate:</span> <span className="font-mono font-bold">{session.plate}</span>
             <span className="text-gray-400 mx-2">·</span>
-            <span className="text-gray-500">Entered:</span> <span className="font-mono text-xs">{new Date(session.entryAt).toLocaleString()}</span>
+            <span className="text-gray-500">Entered:</span> <span className="font-mono text-xs">{fmtDateTime(session.entryAt)}</span>
           </div>
           <div>
             <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1">Open barrier at gate</label>

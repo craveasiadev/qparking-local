@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud, Clock } from 'lucide-react';
 import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { fmtDateTime, todayInAppTz, dateInAppTz } from '../lib/datetime';
 
 /**
  * Season passes view — every plate the gate currently honours without
@@ -22,8 +23,8 @@ export function SeasonPasses() {
 
   useEffect(() => { void load(); }, []);
 
-  const today = new Date().toISOString().slice(0, 10);
-  const in7Days = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
+  const today = todayInAppTz();
+  const in7Days = dateInAppTz(new Date(Date.now() + 7 * 86400_000));
 
   const filtered = passes.filter((p) => {
     if (filter === 'free' && !p.isFree) return false;
@@ -59,7 +60,7 @@ export function SeasonPasses() {
           </p>
           {lastSynced && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
-              <Clock size={12} /> Last synced {new Date(lastSynced).toLocaleString()}
+              <Clock size={12} /> Last synced {fmtDateTime(lastSynced)}
             </p>
           )}
         </div>

@@ -20,6 +20,7 @@ import { Save, Check, AlertCircle, Zap, Loader2, Trash2, Download, Package, Refr
 import type { AppSettings, EquipmentPushItem } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
+import { fmtTimeSeconds, fmtDate } from '../lib/datetime';
 
 // ─── Types local to this page ────────────────────────────────────────────────
 
@@ -342,7 +343,7 @@ export function Settings() {
           </button>
           {updateCheck?.checkedAt && (
             <span className="text-[11px] text-gray-500">
-              Last checked {new Date(updateCheck.checkedAt).toLocaleTimeString()}
+              Last checked {fmtTimeSeconds(updateCheck.checkedAt)}
             </span>
           )}
         </div>
@@ -369,7 +370,7 @@ export function Settings() {
               <span className="font-mono text-[11px] text-gray-600">
                 installed: {updateCheck.currentVersion}
                 {updateCheck.releasedAt && updateCheck.isNewer && (
-                  <> · released: {new Date(updateCheck.releasedAt).toLocaleDateString()}</>
+                  <> · released: {fmtDate(updateCheck.releasedAt)}</>
                 )}
               </span>
             </div>

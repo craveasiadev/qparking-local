@@ -62,16 +62,6 @@ export function setLatestFrame(cameraId: number, frame: { base64: string; conten
   latestFrames.set(cameraId, frame);
 }
 
-/** Capture a camera's current live frame (from the RTSP feed's cache) to a
- *  JPEG under userData/plates and return its path — or null if there's no frame
- *  yet. Lets the parking flow attach a real snapshot when the plate event itself
- *  carries no image (SDK cameras / the dev simulator). */
-export async function captureFrameToFile(cameraId: number, plate: string): Promise<string | null> {
-  const frame = latestFrames.get(cameraId);
-  if (!frame?.base64) return null;
-  try { return await saveImage(plate, frame.base64); } catch { return null; }
-}
-
 /**
  * MJPEG fan-out for the Live display. A GET /live/<id> response is an
  * `multipart/x-mixed-replace` stream; the RTSP feed (camera-rtsp.ts) calls
@@ -83,12 +73,6 @@ export async function captureFrameToFile(cameraId: number, plate: string): Promi
 const MJPEG_BOUNDARY = 'qpframe';
 const MJPEG_TRAILER = Buffer.from('\r\n');
 const mjpegClients = new Map<number, Set<http.ServerResponse>>();
-
-/** How many Live-display viewers are currently streaming this camera. The
- *  grabber uses this to grab at full rate only when someone is watching. */
-export function liveClientCount(cameraId: number): number {
-  return mjpegClients.get(cameraId)?.size ?? 0;
-}
 
 /** Broadcast one JPEG frame to every open MJPEG viewer of a camera. */
 export function pushJpegFrame(cameraId: number, jpeg: Buffer): void {
@@ -191,7 +175,6 @@ export function stopLprServer() {
   }
 }
 
-export function getActivePort() { return activePort; }
 
 async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) {
   const chunks: Buffer[] = [];

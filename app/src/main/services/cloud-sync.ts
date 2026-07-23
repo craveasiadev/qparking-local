@@ -328,10 +328,6 @@ export async function syncAll(): Promise<{
   return { policies, passes, spaces, site, activity };
 }
 
-export async function handleDebug(): Promise<any> {
-  return syncSite();
-}
-
 // ─── background sync timer ───────────────────────────────────────────────────
 
 let backgroundSyncTimer: NodeJS.Timeout | null = null;
@@ -451,35 +447,6 @@ export function stopGatePoll(): void {
 }
 
 // ─── push: rate edits up to the SaaS ─────────────────────────────────────────
-
-/**
- * Push a rate edit up to the qparking SaaS (PUT /rate-policies/upsert). On success
- * we immediately re-pull the policies so the cached row reflects whatever
- * the SaaS canonicalised (and the rest of the app sees the new fee math).
- */
-export async function pushRatePolicy(rateInput: {
-  firstBlockCents: number;
-  perBlockCents: number;
-  blockMinutes: number;
-  freeMinutes: number;
-  dailyCapCents: number;
-}): Promise<SyncResult> {
-  const cloud = getCloudApi();
-  if (!cloud) return NOT_CONFIGURED;
-  try {
-    await cloud.put('/rate-policies/upsert', {
-      first_block_cents: rateInput.firstBlockCents,
-      per_block_cents: rateInput.perBlockCents,
-      block_minutes: rateInput.blockMinutes,
-      free_minutes: rateInput.freeMinutes,
-      daily_cap_cents: rateInput.dailyCapCents,
-    });
-    // Re-pull so the local cache reflects whatever the SaaS canonicalised.
-    return await syncRatePolicies();
-  } catch (error) {
-    return toFailedSyncResult(error);
-  }
-}
 
 // Map a cloud /activity-logs row (snake_case, per ActivityLogResource) to the
 // camelCase shape replaceAllActivityLogs() writes into SQLite. Accepts either

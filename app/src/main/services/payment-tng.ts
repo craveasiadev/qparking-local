@@ -23,7 +23,6 @@
  */
 import http from 'node:http';
 import os from 'node:os';
-import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import { getSettings, logTerminal } from './db';
@@ -476,32 +475,6 @@ export async function payCancel(orderId: string, device?: { host?: string; port?
   }
 }
 
-/** TCP-connect to the device's HTTP port. Doesn't send anything — just
- *  verifies the box is reachable on the LAN. */
-export function pingDevice(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
-  const setting = getSettings();
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const sock = new Socket();
-    let settled = false;
-    const done = (r: { ok: boolean; latencyMs?: number; error?: string }) => {
-      if (settled) return;
-      settled = true;
-      try { sock.destroy(); } catch { /* ignore */ }
-      resolve(r);
-    };
-    sock.setTimeout(5_000);
-    sock.once('connect', () => done({ ok: true, latencyMs: Date.now() - start }));
-    sock.once('timeout', () => done({ ok: false, error: 'connect_timeout (>5s)' }));
-    sock.once('error', (e) => done({ ok: false, error: e.message }));
-    try {
-      sock.connect(setting.tngPort, setting.tngHost);
-    } catch (e: any) {
-      done({ ok: false, error: e?.message ?? String(e) });
-    }
-  });
-}
-
 interface DeviceAck { state: number; orderId: string }
 
 /**
@@ -681,68 +654,6 @@ export function loopbackPayResult(opts: {
     });
     req.write(json);
     req.end();
-  });
-}
-
-/**
- * Diagnostic helper for the Settings "Probe HTTP" button. Sends a plain
- * GET / to the device and reports status + headers + first 400 bytes of
- * the body. Lets the operator confirm the box is speaking HTTP at all on
- * the configured IP+port, independent of whether the W4G API is reachable.
- */
-export function probeHttp(): Promise<{
-  ok: boolean;
-  status?: number;
-  statusText?: string;
-  headers?: Record<string, string | string[] | undefined>;
-  bodyPreview?: string;
-  elapsedMs?: number;
-  error?: string;
-}> {
-  const setting = getSettings();
-  return new Promise((resolve) => {
-    const start = Date.now();
-    let settled = false;
-    const done = (r: Awaited<ReturnType<typeof probeHttp>>) => {
-      if (settled) return;
-      settled = true;
-      const elapsed = Date.now() - start;
-      const final = { ...r, elapsedMs: elapsed };
-      w4gLog(
-        r.ok ? 'recv' : 'error',
-        `Probe HTTP → http://${setting.tngHost}:${setting.tngPort}/ · ${r.ok ? `${r.status} ${r.statusText ?? ''}` : `FAILED: ${r.error}`} · ${elapsed}ms`,
-        final,
-      );
-      resolve(final);
-    };
-    try {
-      const req = http.request({
-        host: setting.tngHost,
-        port: setting.tngPort,
-        method: 'GET',
-        path: '/',
-        timeout: 8_000,
-        headers: { 'Accept': '*/*', 'Connection': 'close' },
-      }, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c as Buffer));
-        res.on('end', () => {
-          const body = Buffer.concat(chunks).toString('utf-8');
-          done({
-            ok: true,
-            status: res.statusCode,
-            statusText: res.statusMessage,
-            headers: res.headers as any,
-            bodyPreview: body.slice(0, 400),
-          });
-        });
-      });
-      req.on('timeout', () => { req.destroy(new Error('connect/response timeout (>8s)')); });
-      req.on('error', (e) => done({ ok: false, error: e.message }));
-      req.end();
-    } catch (e: any) {
-      done({ ok: false, error: e?.message ?? String(e) });
-    }
   });
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { RefreshCw, CameraOff, DoorOpen, CreditCard, Loader2, ScanLine } from 'lucide-react';
 import type { LprCamera, ParkingLane } from '@shared/types';
+import { fmtTimeSeconds } from '../lib/datetime';
 
 /** A plate read pushed by a camera over the LPR webhook — overlaid live on the
  *  matching tile so the wall shows the recognition result, not just video. */
@@ -186,7 +187,7 @@ function PollTile({ cam, lane, lastPlate }: { cam: LprCamera; lane: ParkingLane 
         <LiveBadge on={!!src} />
         {fetchedAt && src && (
           <div className="absolute top-2 right-2 text-[10px] text-white/60 font-mono bg-black/60 px-2 py-1 rounded">
-            {new Date(fetchedAt).toLocaleTimeString()}
+            {fmtTimeSeconds(fetchedAt)}
           </div>
         )}
         <PlateOverlay plate={lastPlate} />
@@ -219,7 +220,7 @@ function PlateOverlay({ plate }: { plate?: PlateEvent }) {
       </span>
       <span className="flex items-center gap-2 shrink-0">
         <span className={`text-[10px] font-bold uppercase tracking-wide ${dirCls}`}>{plate.direction}</span>
-        <span className="text-[10px] text-white/60 font-mono">{new Date(plate.timestamp).toLocaleTimeString()}</span>
+        <span className="text-[10px] text-white/60 font-mono">{fmtTimeSeconds(plate.timestamp)}</span>
       </span>
     </div>
   );

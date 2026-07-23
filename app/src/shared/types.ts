@@ -21,7 +21,6 @@ import type {
   PaymentTerminal,
   RatePolicy,
   Site,
-  SyncQueueRow,
   ActivityLog,
   Transaction,
 } from './db-models';
@@ -37,19 +36,6 @@ export interface SyncStatus {
   lastDrainAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
-}
-
-// ─── wire protocol ───────────────────────────────────────────────────────────
-
-/** Wire-level message envelope used by the ECPI terminal protocol. */
-export interface EcpiEnvelope {
-  apiVersion: string;
-  message: string;
-  type: 'request' | 'ack' | 'response';
-  timestamp: string;
-  messageTraceID: string;
-  body: Record<string, unknown>;
-  signature?: string;
 }
 
 /** Per-item outcome of pushing one local equipment row up to the cloud
@@ -159,10 +145,6 @@ export interface BridgeApi {
    *  `laneId` is the exit lane the operator triggered from, so the exit runs on
    *  that gate's controller. */
   retriggerSessionPaymentByPlate(plate: string, laneId?: number | null): Promise<{ ok: boolean; error?: string }>;
-  /** DEV/QA: fire a synthetic plate event on a lane (resolving an enabled
-   *  camera on it) with a forced direction, exercising the real parking flow
-   *  end-to-end. Backs the hidden Sessions lane simulator. */
-  simulateLaneEvent(laneId: number, plate: string, direction: 'entry' | 'exit'): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
   /** DEV/QA: record a completed session over an explicit entry→exit window
    *  (local only; computes the fee from the lane's plan). Backs the Sessions
    *  simulator's "Simulate session" mode. */
@@ -253,14 +235,6 @@ export interface BridgeApi {
     [k: string]: unknown;
   }>;
 
-  debug(): Promise<any>;
-
-  /** Push a rate edit to qparking SaaS, then re-pull. The SaaS becomes the
-   *  source of truth; the local cache reflects whatever it canonicalised. */
-  saveRatePolicy(input: {
-    firstBlockCents: number; perBlockCents: number;
-    blockMinutes: number; freeMinutes: number; dailyCapCents: number;
-  }): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** "Test price" — simulate a rate plan's fee for an entry→exit window. */
   simulateRatePolicyFee(input: { policyId: string; entry: string; exit: string }): Promise<{
     ok: boolean; feeCents?: number; durationMinutes?: number;
@@ -276,9 +250,7 @@ export interface BridgeApi {
   // Outbound sync to qparking SaaS (entry/exit/update/delete with retry).
   getSyncStatus(): Promise<SyncStatus>;
   syncDrainNow(): Promise<SyncStatus>;
-  listFailedSync(limit?: number): Promise<SyncQueueRow[]>;
   retryFailedSync(): Promise<{ retried: number }>;
-  clearFailedSync(): Promise<{ cleared: number }>;
   /** Push every existing local session to qparking — one-shot recovery
    *  for sessions that pre-date the auto-sync wiring. */
   backfillSessions(): Promise<{ entries: number; exits: number }>;
@@ -301,9 +273,6 @@ export interface BridgeApi {
 
   listActivityLogs(): Promise<ActivityLog[]>;
   
-  // Face-auth turnstile bridge (faceapp_main /api/external/*)
-  pingFaceGate(): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
-  openFaceGate(opts?: { plate?: string; reason?: string }): Promise<{ ok: boolean; status?: number; error?: string; body?: unknown }>;
 
   // App self-update — checks qparking cloud /latest-built endpoint.
   /** Probe the cloud for a newer published build. Reads version from
@@ -335,21 +304,6 @@ export interface BridgeApi {
   appUpdateApply(opts: { path: string }): Promise<{ ok: boolean; error?: string }>;
 
   // Touch'n'Go W4G IO-controller bridge
-  /** Probe the W4G device: TCP-connect on the configured host:port. Doesn't
-   *  send PayRequest — just verifies reachability for the Settings page. */
-  tngPing(): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
-  /** Send GET / to the device and return status + headers + first 400 bytes
-   *  of body. Lets the operator see whether the box is speaking HTTP at all
-   *  on the configured IP+port, independent of the W4G API surface. */
-  tngProbeHttp(): Promise<{
-    ok: boolean;
-    status?: number;
-    statusText?: string;
-    headers?: Record<string, string | string[] | undefined>;
-    bodyPreview?: string;
-    elapsedMs?: number;
-    error?: string;
-  }>;
   /** POST a synthetic PayResult into our own listener to verify the receive
    *  path works end-to-end. If this passes but real device callbacks don't
    *  land, the issue is purely device-side (URL config / firewall). */

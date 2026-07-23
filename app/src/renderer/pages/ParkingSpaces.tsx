@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Grid3x3, RefreshCw, Loader2, Search, X, Clock } from 'lucide-react';
 import type { ParkingSpace } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { fmtDateTime } from '../lib/datetime';
 
 /**
  * Parking space inventory — mirrored read-only from qparking SaaS.
@@ -82,7 +83,7 @@ export function ParkingSpaces() {
           </p>
           {lastSynced && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
-              <Clock size={12} /> Last synced {new Date(lastSynced).toLocaleString()}
+              <Clock size={12} /> Last synced {fmtDateTime(lastSynced)}
             </p>
           )}
         </div>

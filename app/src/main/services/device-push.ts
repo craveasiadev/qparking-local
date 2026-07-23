@@ -9,7 +9,7 @@
  * does NOT need a rate policy assigned first. Optional links (terminal, gate
  * relay, …) are sent as null when unset.
  */
-import { getLane, getTerminal, listLanes, listTerminals, deriveLaneDirection, isBoundToCurrentSite } from './db';
+import { getLane, getTerminal, deriveLaneDirection, isBoundToCurrentSite } from './db';
 import { getCloudApi, describeRequestError } from './cloud-api';
 import type { EquipmentPushItem } from '../../shared/types';
 
@@ -78,21 +78,4 @@ export async function pushLane(laneId: number): Promise<PushResult> {
     gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,
   });
-}
-
-/** Bulk push on boot / on manual "Sync now" — keeps the cloud registry fresh
- *  after settings tweaks and after a local DB restore. Returns a labelled
- *  per-item report so the Settings panel can show what landed and what didn't. */
-export async function pushAllDevices(): Promise<{ lanes: EquipmentPushItem[]; terminals: EquipmentPushItem[] }> {
-  const lanes: EquipmentPushItem[] = [];
-  for (const lane of listLanes()) {
-    const result = await pushLane(lane.id).catch((error) => ({ ok: false, error: describeRequestError(error) }));
-    lanes.push(toEquipmentPushItem(lane.id, lane.name, result));
-  }
-  const terminals: EquipmentPushItem[] = [];
-  for (const terminal of listTerminals()) {
-    const result = await pushTerminal(terminal.id).catch((error) => ({ ok: false, error: describeRequestError(error) }));
-    terminals.push(toEquipmentPushItem(terminal.id, terminal.name, result));
-  }
-  return { lanes, terminals };
 }

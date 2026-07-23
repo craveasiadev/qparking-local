@@ -6,6 +6,7 @@ import {
 import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../hooks/useCurrentSite';
+import { fmtDateTime, fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
 
 export function Dashboard() {
   const [open, setOpen] = useState<ParkingSession[]>([]);
@@ -57,8 +58,8 @@ export function Dashboard() {
   }, []);
 
   const enabledDevices = terminals.filter((t) => t.enabled).length;
-  const today = new Date().toISOString().slice(0, 10);
-  const entriesToday = recent.filter((s) => s.entryAt.slice(0, 10) === today).length;
+  const today = todayInAppTz();
+  const entriesToday = recent.filter((s) => dateInAppTz(new Date(s.entryAt)) === today).length;
 
   // Most recent completed exits (car has left) — the durable, meaningful feed
   // that replaced the transient "live plate events" tail.
@@ -67,7 +68,11 @@ export function Dashboard() {
   // Prefer the cloud-authoritative daily revenue; fall back to summing what we
   // collected locally today so the tile is still useful while unlinked.
   const localCollectedToday = recent
-    .filter((s) => s.paymentStatus === 'paid' && (s.paymentTimestamp ?? s.exitAt ?? '').slice(0, 10) === today)
+    .filter((s) => {
+      if (s.paymentStatus !== 'paid') return false;
+      const paidTs = s.paymentTimestamp ?? s.exitAt;
+      return !!paidTs && dateInAppTz(new Date(paidTs)) === today;
+    })
     .reduce((sum, s) => sum + (s.feeCents ?? 0), 0);
   const revenueCents = site ? site.revenueToday : localCollectedToday;
 
@@ -158,7 +163,7 @@ export function Dashboard() {
                   <li key={s.id} className="px-4 py-3 flex items-center justify-between gap-3 text-sm">
                     <div className="min-w-0">
                       <div className="font-mono font-bold truncate">{s.plate}</div>
-                      <div className="text-xs text-gray-500 truncate">entered {new Date(s.entryAt).toLocaleString()}</div>
+                      <div className="text-xs text-gray-500 truncate">entered {fmtDateTime(s.entryAt)}</div>
                     </div>
                     <div className="text-right flex-shrink-0">
                       <div className="font-mono text-sm">{formatDuration(minutes)}</div>
@@ -185,7 +190,7 @@ export function Dashboard() {
                   <div className="min-w-0">
                     <div className="font-mono font-bold truncate">{s.plate}</div>
                     <div className="text-xs text-gray-500">
-                      {s.exitAt ? new Date(s.exitAt).toLocaleTimeString() : '—'}
+                      {fmtTime(s.exitAt)}
                       {s.durationMinutes != null && <span className="text-gray-400"> · {formatDuration(s.durationMinutes)}</span>}
                     </div>
                   </div>
@@ -283,8 +288,8 @@ function SyncPanel({ sync, retrying, draining, backfilling, onRetry, onDrain, on
             <div className="mt-0.5 text-[11px] text-gray-600 flex flex-wrap gap-x-3 gap-y-0.5">
               <span>Pending: <strong>{sync.pending}</strong></span>
               <span>Failed: <strong className={hasFailed ? 'text-red-700' : ''}>{sync.failed}</strong></span>
-              {sync.lastSuccessAt && <span>Last success: {new Date(sync.lastSuccessAt).toLocaleTimeString()}</span>}
-              {sync.lastDrainAt && <span>Last attempt: {new Date(sync.lastDrainAt).toLocaleTimeString()}</span>}
+              {sync.lastSuccessAt && <span>Last success: {fmtTimeSeconds(sync.lastSuccessAt)}</span>}
+              {sync.lastDrainAt && <span>Last attempt: {fmtTimeSeconds(sync.lastDrainAt)}</span>}
             </div>
             {sync.lastError && (
               <div className="mt-1.5 text-[11px] text-red-700 inline-flex items-start gap-1">

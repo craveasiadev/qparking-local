@@ -50,35 +50,6 @@ function flog(msg: string): void {
   parkingEvents.emit('debug-log', { ts: new Date().toISOString(), text: stamped });
 }
 
-/**
- * Reader-replay protection state. The V1.17C firmware caches the last
- * successful cardRead frame internally and can re-push it on the NEXT
- * initCard — same maskPan, same hashPan, no human tap involved. The
- * elapsed time between the new initCard and the replayed cardRead can
- * be anywhere from instant to several seconds, so a pure timing guard
- * (MIN_TAP_MS) isn't sufficient.
- *
- * We track the hashPan + completedAt of the most recent successfully-
- * settled tap. If a new cardRead arrives with the SAME hashPan within
- * REPLAY_WINDOW_MS of the previous settle, we treat it as a replay and
- * reject — even if MIN_TAP_MS has been satisfied. Cleared after the
- * window expires so a legitimate same-card retry later still works.
- */
-// Window during which the same hashPan as the last settled tap is treated
-// as a held-card replay. 15 seconds is the tradeoff sweet spot:
-//   - SHORT enough to allow queues (multiple cars / drivers sharing one
-//     TNG card at busy gates — typical car-to-car cycle is 20+ seconds).
-//   - LONG enough to catch held-card auto-detection cycles (the V1.17C
-//     firmware re-detects a stationary card every 1-6 seconds and
-//     generates a fresh-looking cardRead frame).
-// Combined with the post-tap deinit/reinit cleanup, this gives reliable
-// "lift card, next driver taps" behavior without false-positive queue
-// blocks.
-const REPLAY_WINDOW_MS = 15_000;
-let lastSettledHashPan = '';
-let lastSettledTxnDt = '';
-let lastSettledAt = 0;
-
 export const parkingEvents = new EventEmitter();
 
 interface ActiveExit {
@@ -192,9 +163,9 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   }
 
   // Rate is governed by where the car ENTERED (then this exit lane, then the
-  // site-default plan) — NOT by which exit gate it uses. This matches
-  // previewFee and keeps the charge deterministic no matter which exit lane
-  // the driver picks. The exit is still RECORDED against this lane below.
+  // site-default plan) — NOT by which exit gate it uses. This keeps the charge
+  // deterministic no matter which exit lane the driver picks. The exit is still
+  // RECORDED against this lane below.
   const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
   const policy =
     (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
@@ -517,8 +488,6 @@ function maybeAutoRetrigger(
   }, AUTO_RETRIGGER_DELAY_MS);
 }
 
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
-
 // ─── fee calc ──────────────────────────────────────────────────────────────
 
 /**
@@ -836,18 +805,6 @@ function priceBillingCycle(
   return { total, blockMinutesAfter: blockMinutes };
 }
 
-/** Used by the UI fee-preview panel — shows what the calculated charge WOULD be
- *  if a given plate were to exit right now. */
-export function previewFee(plate: string): { found: boolean; sessionId?: number; durationMinutes?: number; feeCents?: number; policy?: RatePolicy | null } {
-  const session = findOpenSessionByPlate(plate);
-  if (!session) return { found: false };
-  const lane = listLanes().find((l) => l.id === session.entryLaneId);
-  const policy = (lane?.policyId ? getRatePolicy(lane.policyId) : null) ?? getSiteDefaultRatePolicy();
-  const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(session.entryAt)) / 60_000));
-  const feeCents = computeFee(durationMinutes, policy, session.entryAt);
-  return { found: true, sessionId: session.id, durationMinutes, feeCents, policy };
-}
-
 /**
  * "Test price" — compute what a given rate plan (policy) would charge for an
  * explicit entry→exit window, without needing a live session. Mirrors the
@@ -963,45 +920,12 @@ export function retriggerSessionExitByPlate(plate: string, laneId?: number | nul
 }
 
 /**
- * DEV/QA helper — fire a synthetic plate event on a LANE (not a camera) with
- * a forced direction, so a developer can exercise the real parking flow
- * end-to-end from the Sessions page without touching hardware. It resolves an
- * enabled camera on the lane (the flow routes camera → lane), so it genuinely
- * tests the wiring: routing, fee calc, gate, and terminal. Gated behind
- * devMode in the UI; harmless if called otherwise.
- */
-export function simulateLaneEvent(
-  laneId: number,
-  plate: string,
-  direction: 'entry' | 'exit',
-): { ok: boolean; error?: string; cameraId?: number } {
-  const lane = getLane(laneId);
-  if (!lane) return { ok: false, error: 'lane_not_found' };
-  const norm = normalisePlate(plate);
-  if (!norm) return { ok: false, error: 'plate_required' };
-  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
-  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one on the Cameras page so the flow can route to this lane` };
-  const event: PlateEvent = {
-    cameraId: cam.id,
-    plate: norm,
-    confidence: 1.0,
-    imagePath: null,
-    timestamp: new Date().toISOString(),
-    direction,
-  };
-  flog(`DEV SIMULATE: lane="${lane.name}" plate=${norm} direction=${direction} via camera=${cam.id}`);
-  lprEvents.emit('plate', event);
-  return { ok: true, cameraId: cam.id };
-}
-
-/**
  * DEV/QA helper — record a COMPLETE (already-exited) parking session with
  * explicit entry & exit times, so pricing can be verified over a real duration
- * without waiting or tapping a card. Unlike simulateLaneEvent (which fires the
- * LIVE flow at "now" and drives the terminal), this writes a closed session
- * straight to the local DB with the fee the lane's plan computes for that exact
- * window. It stays LOCAL — no terminal, no gate, no cloud push. Gated behind
- * devMode in the UI.
+ * without waiting or tapping a card. This writes a closed session straight to
+ * the local DB with the fee the lane's plan computes for that exact window. It
+ * stays LOCAL — no terminal, no gate, no cloud push. Gated behind devMode in
+ * the UI.
  */
 export async function simulateCompletedSession(
   laneId: number,

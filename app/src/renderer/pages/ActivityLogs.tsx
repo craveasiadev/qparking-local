@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { Activity, Filter, Clock, AlertCircle, AlertTriangle, Info, ChevronDown } from 'lucide-react';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { ActivityLog } from '@shared/db-models';
+import { fmtDateTime } from '../lib/datetime';
 
 const SEVERITY_COLORS: Record<ActivityLog['severity'], string> = {
   low: 'bg-blue-50 border-blue-200',
@@ -223,7 +224,7 @@ export function ActivityLogs() {
                         Timestamp:
                       </span>
                       <p className="text-slate-700">
-                        {new Date(log.occurredAt).toLocaleString()}
+                        {fmtDateTime(log.occurredAt)}
                       </p>
                     </div>
                     <div>

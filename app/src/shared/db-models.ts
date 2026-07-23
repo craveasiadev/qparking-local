@@ -23,10 +23,6 @@
 
 // ─── terminals ───────────────────────────────────────────────────────────────
 
-export type LaneType = 'entry' | 'exit' | 'open' | 'dual';
-export type LaneMode = 'lpr' | 'kiosk';
-export type OperationMode = 'maintenance' | 'live' | 'not_in_use';
-
 /** An Alarmtech Touch'n'Go W4G payment device on the LAN. One per exit lane;
  *  a lane points at its device via `lanes.terminal_id`. On a paid exit the gate
  *  fires a PayRequest at `host:port` and settles the session from the device's
@@ -77,8 +73,6 @@ export interface LprCamera {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
-  /** Last successful snapshot fetch (ISO timestamp). null = never. Runtime only. */
-  lastSnapshotAt?: string | null;
   /** Last connection-test result (ok|err|never). Runtime only — not persisted. */
   online?: 'ok' | 'err' | 'never';
 }

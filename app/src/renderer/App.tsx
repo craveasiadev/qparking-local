@@ -19,6 +19,7 @@ import { ParkingSpaces } from './pages/ParkingSpaces';
 import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
 import { useCurrentSite } from './hooks/useCurrentSite';
+import { fmtTimeSeconds } from './lib/datetime';
 
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions' | 'transactions'
@@ -322,7 +323,7 @@ export function App() {
                       : t.includes('step') || t.includes('initcard') || t.includes('aborttxn')
                         ? 'text-amber-200'
                         : 'text-white/70';
-                  const time = new Date(entry.ts).toLocaleTimeString();
+                  const time = fmtTimeSeconds(entry.ts);
                   return (
                     <div key={i} className={`whitespace-pre-wrap break-words ${color}`}>
                       <span className="text-white/30 mr-2">{time}</span>{entry.text}

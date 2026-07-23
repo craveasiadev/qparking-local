@@ -7,6 +7,7 @@ import type { PaymentTerminal, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
+import { fmtTimeSeconds } from '../lib/datetime';
 
 /**
  * Payment terminals = Alarmtech Touch'n'Go W4G devices. One device per exit
@@ -473,13 +474,13 @@ function W4gTestPanel({ devices }: { devices: PaymentTerminal[] }) {
   useEffect(() => {
     const off = window.bridge.onEvent('log', (p: any) => {
       if (p?.source !== 'w4g') return;
-      setLog((cur) => [{ at: new Date().toLocaleTimeString(), kind: p.direction, text: p.message, payload: p.payload }, ...cur].slice(0, 100));
+      setLog((cur) => [{ at: fmtTimeSeconds(new Date().toISOString()), kind: p.direction, text: p.message, payload: p.payload }, ...cur].slice(0, 100));
     });
     return () => off();
   }, []);
 
   const append = (kind: TngLogLine['kind'], text: string, payload?: unknown) =>
-    setLog((cur) => [{ at: new Date().toLocaleTimeString(), kind, text, payload }, ...cur].slice(0, 100));
+    setLog((cur) => [{ at: fmtTimeSeconds(new Date().toISOString()), kind, text, payload }, ...cur].slice(0, 100));
   const run = async (label: string, fn: () => Promise<void>) => { setBusy(label); try { await fn(); } finally { setBusy(null); } };
 
   const ping = () => device && run('ping', async () => {
@@ -562,7 +563,7 @@ function W4gTestPanel({ devices }: { devices: PaymentTerminal[] }) {
       {full && (full.pending.length > 0 || full.lastResult || full.lastError) && (
         <div className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] font-mono space-y-0.5">
           {full.pending.length > 0 && <div>Pending: {full.pending.map((o) => `${o.orderId.slice(0, 8)}…(${o.payAmount}c)`).join(', ')}</div>}
-          {full.lastResult && <div>Last result: {full.lastResult.orderId.slice(0, 8)}… {full.lastResult.status} payType={full.lastResult.payType ?? '-'} at {new Date(full.lastResult.at).toLocaleTimeString()}</div>}
+          {full.lastResult && <div>Last result: {full.lastResult.orderId.slice(0, 8)}… {full.lastResult.status} payType={full.lastResult.payType ?? '-'} at {fmtTimeSeconds(full.lastResult.at)}</div>}
           {full.lastError && <div className="text-red-700">Last error: {full.lastError}</div>}
         </div>
       )}

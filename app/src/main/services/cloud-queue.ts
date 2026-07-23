@@ -258,10 +258,6 @@ export function startSyncDrain(): void {
   drainTimer = setInterval(() => { void drainOnce(); }, DRAIN_INTERVAL_MS);
 }
 
-export function stopSyncDrain(): void {
-  if (drainTimer) { clearInterval(drainTimer); drainTimer = null; }
-}
-
 async function drainOnce(): Promise<void> {
   if (inFlight) return;
   inFlight = true;

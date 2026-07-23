@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import type { Transaction, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { fmtDateTime } from '../lib/datetime';
 
 const PAGE_SIZE = 20;
 
@@ -33,20 +34,6 @@ function payTypeLabel(t: number | null): string {
 function rm(cents: number | null | undefined): string {
   if (cents == null) return '—';
   return `RM ${(cents / 100).toFixed(2)}`;
-}
-
-/** Format a timestamp for display in GMT+8 (project-wide convention). Stored
- *  values are UTC: `payment_timestamp` is proper ISO (…Z); SQLite's `created_at`
- *  is a bare "YYYY-MM-DD HH:MM:SS" in UTC with no zone marker — normalise it to
- *  UTC first, then always render in Asia/Kuala_Lumpur so the machine's own
- *  timezone can't shift it. */
-function fmtTs(ts: string | null | undefined): string {
-  if (!ts) return '—';
-  const iso = /[T ]/.test(ts) && !/[zZ]|[+-]\d\d:?\d\d$/.test(ts) && ts.includes(' ')
-    ? ts.replace(' ', 'T') + 'Z'
-    : ts;
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' });
 }
 
 const STATUS_OPTIONS = [
@@ -257,7 +244,7 @@ export function Transactions() {
                     <td className="px-3 py-2 text-xs">{t.terminalName ?? '—'}</td>
                     <td className="px-3 py-2 font-mono text-xs">{t.cardNumber ?? '—'}</td>
                     <td className="px-3 py-2 font-mono text-xs">{t.apprCode || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-600">{fmtTs(t.paymentTimestamp ?? t.createdAt)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(t.paymentTimestamp ?? t.createdAt)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button
                         onClick={(e) => { e.stopPropagation(); setViewing(t); }}
@@ -296,7 +283,7 @@ export function Transactions() {
                 <span className="font-mono"><span className="text-gray-400">Card:</span> {t.cardNumber ?? '—'}</span>
                 <span className="font-mono"><span className="text-gray-400">Appr:</span> {t.apprCode || '—'}</span>
                 <span className="col-span-2 font-mono truncate"><span className="text-gray-400">Order:</span> {t.orderId ?? '—'}</span>
-                <span className="col-span-2"><span className="text-gray-400">Time:</span> {fmtTs(t.paymentTimestamp ?? t.createdAt)}</span>
+                <span className="col-span-2"><span className="text-gray-400">Time:</span> {fmtDateTime(t.paymentTimestamp ?? t.createdAt)}</span>
               </div>
             </div>
           ))}
@@ -362,7 +349,7 @@ function TransactionModal({ txn, laneName, onClose }: { txn: TxnRow; laneName: (
             <Row label="Amount charged" value={rm(t.amountCents)} mono strong />
             <Row label="Status" value={t.status} />
             <Row label="Terminal" value={t.terminalName ?? '—'} />
-            <Row label="Paid at" value={fmtTs(t.paymentTimestamp)} />
+            <Row label="Paid at" value={fmtDateTime(t.paymentTimestamp)} />
           </Section>
 
           <Section title="W4G device response">
@@ -375,8 +362,8 @@ function TransactionModal({ txn, laneName, onClose }: { txn: TxnRow; laneName: (
           <Section title="Identity">
             <Row label="Order ID" value={t.orderId ?? '—'} mono wrap />
             <Row label="Local txn ID" value={t.localTransactionId} mono wrap />
-            <Row label="Created" value={fmtTs(t.createdAt)} />
-            <Row label="Updated" value={fmtTs(t.updatedAt)} />
+            <Row label="Created" value={fmtDateTime(t.createdAt)} />
+            <Row label="Updated" value={fmtDateTime(t.updatedAt)} />
           </Section>
         </div>
       </div>

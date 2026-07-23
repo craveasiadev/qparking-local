@@ -54,7 +54,6 @@ const api: BridgeApi = {
    *  needs to close a stuck session by asking the driver to tap again. */
   retriggerSessionPayment: (id: number, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-payment', id, laneId),
   retriggerSessionPaymentByPlate: (plate: string, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-by-plate', plate, laneId),
-  simulateLaneEvent: (laneId: number, plate: string, direction: 'entry'|'exit') => ipcRenderer.invoke('sessions:simulate-lane', laneId, plate, direction),
   simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
   simulateEntry: (laneId: number, plate: string, entryIso: string) => ipcRenderer.invoke('sessions:simulate-entry', laneId, plate, entryIso),
   simulateExit: (laneId: number, plate: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-exit', laneId, plate, exitIso),
@@ -88,19 +87,13 @@ const api: BridgeApi = {
   syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
   listActivityLogs: () => ipcRenderer.invoke('activity-logs:list'),
-  saveRatePolicy: (input: {
-    firstBlockCents: number; perBlockCents: number;
-    blockMinutes: number; freeMinutes: number; dailyCapCents: number;
-  }) => ipcRenderer.invoke('policies:save-rate', input),
   simulateRatePolicyFee: (input: { policyId: string; entry: string; exit: string }) =>
     ipcRenderer.invoke('policies:simulate', input),
 
   // sync queue (outbound to qparking SaaS)
   getSyncStatus: () => ipcRenderer.invoke('sync:status'),
   syncDrainNow: () => ipcRenderer.invoke('sync:drain-now'),
-  listFailedSync: (limit?: number) => ipcRenderer.invoke('sync:failed-list', limit),
   retryFailedSync: () => ipcRenderer.invoke('sync:retry-failed'),
-  clearFailedSync: () => ipcRenderer.invoke('sync:clear-failed'),
   backfillSessions: () => ipcRenderer.invoke('sync:backfill-sessions'),
   syncTransactionsNow: () => ipcRenderer.invoke('sync:backfill-transactions'),
 
@@ -123,18 +116,12 @@ const api: BridgeApi = {
   testGate: (opts?: { plate?: string; direction?: 'in'|'out'|'test'; laneName?: string }) => ipcRenderer.invoke('gate:test', opts ?? {}),
   manualOpenGate: (opts: { cameraId?: number | null; laneId?: number | null }) => ipcRenderer.invoke('gate:manual-open', opts),
 
-  // face-auth turnstile (faceapp_main)
-  pingFaceGate: () => ipcRenderer.invoke('faceGate:ping'),
-  openFaceGate: (opts?: { plate?: string; reason?: string }) => ipcRenderer.invoke('faceGate:open', opts ?? {}),
-
   // App self-update — check / download / apply against the qparking cloud.
   appUpdateCheck: () => ipcRenderer.invoke('app-update:check'),
   appUpdateDownload: (opts: { variant: 'portable' | 'installer' }) => ipcRenderer.invoke('app-update:download', opts),
   appUpdateApply: (opts: { path: string }) => ipcRenderer.invoke('app-update:apply', opts),
 
   // Touch'n'Go W4G IO-controller bridge (test triggers + live status)
-  tngPing: () => ipcRenderer.invoke('tng:ping'),
-  tngProbeHttp: () => ipcRenderer.invoke('tng:probe-http'),
   tngLoopbackPayResult: (opts?: { orderId?: string; state?: string; payType?: number; cardNo?: string; balance?: number }) => ipcRenderer.invoke('tng:loopback', opts),
   tngStatus: () => ipcRenderer.invoke('tng:status'),
   tngTestPayRequest: (opts?: {
@@ -149,8 +136,6 @@ const api: BridgeApi = {
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };
   },
-
-  debug: () => ipcRenderer.invoke('debug'),
 };
 
 contextBridge.exposeInMainWorld('bridge', api);

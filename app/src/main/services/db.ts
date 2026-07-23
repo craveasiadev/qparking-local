@@ -1201,10 +1201,6 @@ export function getTransactionById(id: number): Transaction | null {
   return row ? rowToTransaction(row) : null;
 }
 
-export function listTransactionsForSession(sessionId: number): Transaction[] {
-  return (getDb().prepare('SELECT * FROM transactions WHERE session_id = ? ORDER BY id ASC').all(sessionId) as any[]).map(rowToTransaction);
-}
-
 /** The most recent still-open (pending) attempt for a session, if any. Used to
  *  void an in-flight charge when a session is manually released. */
 export function getOpenTransactionForSession(sessionId: number): Transaction | null {
@@ -1276,9 +1272,8 @@ export function countTransactions(opts: { search?: string | null; status?: strin
 // the cloud-queue module drains the queue with exponential backoff. A
 // process restart finds these rows still pending — nothing is lost.
 
-// Row shape + op union live in shared/db-models.ts (single source of truth,
-// also used by BridgeApi.listFailedSync); re-exported so `from './db'`
-// imports keep working.
+// Row shape + op union live in shared/db-models.ts (single source of truth);
+// re-exported so `from './db'` imports keep working.
 export type { SyncOp, SyncQueueRow };
 
 function rowToSync(row: any): SyncQueueRow {
@@ -1325,20 +1320,10 @@ export function syncQueueStats(): { pending: number; failed: number; oldestPendi
   return { pending, failed, oldestPending: oldest?.created_at ?? null };
 }
 
-export function listFailedSync(limit = 50): SyncQueueRow[] {
-  return (getDb().prepare(
-    `SELECT * FROM sync_queue WHERE status = 'failed' ORDER BY id DESC LIMIT ?`
-  ).all(limit) as any[]).map(rowToSync);
-}
-
 export function retryAllFailedSync(): number {
   return getDb().prepare(
     `UPDATE sync_queue SET status = 'pending', attempts = 0, next_attempt_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE status = 'failed'`
   ).run().changes;
-}
-
-export function clearFailedSync(): number {
-  return getDb().prepare(`DELETE FROM sync_queue WHERE status = 'failed'`).run().changes;
 }
 
 /**
