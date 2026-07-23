@@ -33,7 +33,7 @@ import type { ParkingSession, Transaction, SyncIssue } from '../../shared/types'
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
 const MAX_ATTEMPTS = 6;
-const DRAIN_INTERVAL_MS = 15_000;
+const DRAIN_INTERVAL_MS = 30_000;
 
 export const syncEvents = new EventEmitter();
 /**

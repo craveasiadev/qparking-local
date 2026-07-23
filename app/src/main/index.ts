@@ -99,7 +99,6 @@ import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulate
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
   startBackgroundSync, syncRatePolicies, syncParkingSpaces,
-  startGatePoll, setGateOpenHandler,
   syncAll, syncSite, fetchSiteWith,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
@@ -149,60 +148,6 @@ app.whenReady().then(async () => {
   startParkingFlow();
   startBackgroundSync();
   startSyncDrain();
-  // Remote gate-open poll — checks cloud for pending gate commands every 20s
-  // and dispatches to the local gate simulator + face-auth turnstile.
-  //
-  // Resolution: cloud sends `camera_external_id` (formatted `local-{id}`)
-  // pointing at the specific camera whose barrier the operator wants raised.
-  // We look up the local camera, then its lane, so the simulator + audit
-  // note reference the actual barrier — not a generic "REMOTE OPEN" that
-  // an operator can't tell apart from other cameras' opens.
-  setGateOpenHandler(async (cmd) => {
-    let targetCamera: ReturnType<typeof listCameras>[number] | null = null;
-    let targetLane: ReturnType<typeof getLane> | null = null;
-    if (cmd.camera_external_id) {
-      const localIdMatch = cmd.camera_external_id.match(/^local-(\d+)$/);
-      if (localIdMatch) {
-        const localId = Number(localIdMatch[1]);
-        targetCamera = listCameras().find((c) => c.id === localId) ?? null;
-        if (targetCamera?.laneId) targetLane = getLane(targetCamera.laneId);
-      }
-    }
-    const label = targetCamera ? `${targetCamera.name} (lane: ${targetLane?.name ?? '—'})` : 'SITE-WIDE (no camera specified)';
-    console.log(`[gate-poll] dispatching remote gate-open cmd=${cmd.id} target=${label} reason="${cmd.reason ?? '-'}"`);
-
-    let simulatorFired = false;
-    let faceGateResult: any = null;
-    try {
-      sendGateEvent({
-        state: 'open',
-        laneName: targetLane?.name ?? targetCamera?.name ?? 'REMOTE OPEN',
-        direction: 'out',
-        reason: cmd.reason ?? 'remote-request',
-        holdMs: 5_000,
-      });
-      setTimeout(() => sendGateEvent({ state: 'closed' }), 5_000);
-      simulatorFired = true;
-    } catch (e: any) {
-      console.warn(`[gate-poll] simulator failed: ${e?.message ?? e}`);
-    }
-    // Face-auth turnstile — best-effort, matches how entry/paid-exit
-    // auto-opens work. The lane name goes into the reason for audit trail.
-    try {
-      faceGateResult = await openFaceGate({
-        reason: `remote-gate-open:${targetCamera?.name ?? cmd.reason ?? 'op'}`,
-      });
-    } catch (e: any) {
-      faceGateResult = { ok: false, error: e?.message ?? String(e) };
-    }
-    const note = [
-      `target=${label}`,
-      simulatorFired ? 'gate simulator fired' : 'gate simulator failed',
-      faceGateResult?.ok ? `face-gate ${faceGateResult.status ?? 'ok'}` : `face-gate ${faceGateResult?.error ?? 'skipped'}`,
-    ].join(' · ');
-    return { ok: simulatorFired || !!faceGateResult?.ok, note };
-  });
-  startGatePoll();
   // W4G PayResult callback listener — only start when the operator has
   // enabled the TNG integration. Toggling it on/off in Settings restarts
   // it via the settings:save handler below.

@@ -332,30 +332,32 @@ export async function syncAll(): Promise<{
 
 let backgroundSyncTimer: NodeJS.Timeout | null = null;
 
-/** Run every pull, swallowing errors — the timer retries next tick. */
-function runFullSyncQuietly(): void {
-  syncSite().catch(() => null);
-  syncRatePolicies().catch(() => null);
+/**
+ * The auto-pulled mirrors — only the ones that change often enough to warrant
+ * polling: season passes, parking spaces, activity logs. Runs at startup and on
+ * every recurring tick, swallowing errors (the timer retries next tick).
+ *
+ * Site profile and rate policies are deliberately NOT here: they change rarely
+ * and are pulled only on demand — manual "Sync now" (syncAll) and site rebind.
+ * The local SQLite cache persists across restarts, so the gate keeps pricing
+ * from the last-synced policies even without a startup pull.
+ */
+function runRecurringSyncQuietly(): void {
   syncSeasonPasses().catch(() => null);
   syncParkingSpaces().catch(() => null);
-  // Activity logs are a site-scoped mirror too — pull them here so a site
-  // change (or a rebind that didn't re-pull) self-heals within one cadence
-  // instead of showing the previous site's audit trail until the next manual
-  // "Sync now". replaceAllActivityLogs on an empty payload clears the cache.
   syncActivityLogs().catch(() => null);
 }
 
 /**
- * Background sync. Default cadence: every 60 seconds — operators expect a
- * rate edit in qparking SaaS to apply at the gate within ~1 minute, not the
- * ~60 minutes the legacy interval enforced. Cheap (a handful of GETs),
- * self-healing, no operator action needed.
+ * Background sync. Every 60 seconds it pulls the frequently-changing mirrors
+ * (passes/spaces/activity). Site profile + rate policies are excluded entirely
+ * from the auto-sync — they refresh only via manual "Sync now" / rebind.
  */
 export function startBackgroundSync(intervalMs = 60_000): void {
   stopBackgroundSync();
-  backgroundSyncTimer = setInterval(runFullSyncQuietly, intervalMs);
-  // Kick one off at startup, fire-and-forget.
-  runFullSyncQuietly();
+  backgroundSyncTimer = setInterval(runRecurringSyncQuietly, intervalMs);
+  // Startup kick — passes/spaces/activity only.
+  runRecurringSyncQuietly();
 }
 
 export function stopBackgroundSync(): void {
@@ -363,88 +365,10 @@ export function stopBackgroundSync(): void {
   backgroundSyncTimer = null;
 }
 
-// ─── remote gate-open command poll ───────────────────────────────────────────
-// Independent timer running at 20-second cadence. Slower than 20s would make
-// the operator wait too long between clicking "Open Barrier" in the cloud UI
-// and the physical gate moving; faster is unnecessary chatter over WAN.
-//
-// One-shot flow per command: fetch pending → dispatch to gate handler → ack.
-// Errors during dispatch are logged but the ack still fires (with a note)
-// so the same command doesn't get processed twice on the next poll.
-
-const GATE_REQUEST_TIMEOUT_MS = 8_000;
-
-let gateCommandPollTimer: NodeJS.Timeout | null = null;
-
-interface PendingGateCommand {
-  id: string;
-  site_id: string;
-  /** Cloud's own camera UUID — meaningless to local (which uses int PKs). */
-  camera_id: string | null;
-  /** The `external_id` cloud stored when local first pushed the camera up
-   *  (currently formatted `local-{localId}`). This is the value local uses
-   *  to look up which local camera → which local lane to target. */
-  camera_external_id: string | null;
-  /** Cloud-side lane UUID. Populated once lane sync (piece 2) is live. */
-  lane_id: string | null;
-  reason: string | null;
-  requested_at: string;
-}
-
-/** Callback the main process registers so gate open dispatch stays out of
- *  this file (which is otherwise purely HTTP/sync). Set via
- *  `setGateOpenHandler()` at boot. */
-let gateOpenHandler: ((command: PendingGateCommand) => Promise<{ ok: boolean; note?: string }>) | null = null;
-
-export function setGateOpenHandler(handler: typeof gateOpenHandler): void {
-  gateOpenHandler = handler;
-}
-
-async function pollGateCommands(): Promise<void> {
-  const cloud = getCloudApi();
-  if (!cloud) return;
-  try {
-    const { data: responseBody } = await cloud.get<{ data?: PendingGateCommand[] }>(
-      '/gate-commands/pending',
-      { timeout: GATE_REQUEST_TIMEOUT_MS },
-    );
-
-    for (const command of responseBody.data ?? []) {
-      const dispatchOutcome = gateOpenHandler
-        ? await gateOpenHandler(command).catch((error: any) => ({
-            ok: false,
-            note: `dispatch error: ${error?.message ?? error}`,
-          }))
-        : { ok: false, note: 'no gate handler registered' };
-
-      // Ack regardless of dispatch success — otherwise the same command
-      // gets re-run every 20s indefinitely.
-      const ackNote = dispatchOutcome.note ?? (dispatchOutcome.ok ? 'dispatched' : 'dispatch failed');
-      try {
-        await cloud.post(
-          `/gate-commands/${command.id}/ack`,
-          { note: ackNote },
-          { timeout: GATE_REQUEST_TIMEOUT_MS },
-        );
-      } catch { /* ack failure is fine — cloud will expire the row after 5m */ }
-    }
-  } catch { /* poll failure is transient — retry on next tick */ }
-}
-
-/** Start the 20s gate-open command poller. Runs alongside the main policy/pass
- *  sync but on its own timer so a slow policy pull doesn't block gate opens. */
-export function startGatePoll(intervalMs = 20_000): void {
-  stopGatePoll();
-  gateCommandPollTimer = setInterval(() => { void pollGateCommands(); }, intervalMs);
-  // Also fire once immediately so a pending command from just before boot
-  // doesn't wait a full interval.
-  void pollGateCommands();
-}
-
-export function stopGatePoll(): void {
-  if (gateCommandPollTimer) clearInterval(gateCommandPollTimer);
-  gateCommandPollTimer = null;
-}
+// Remote gate-open command poll REMOVED: the cloud can't reach a site's LAN,
+// and the poll-based dispatch only fired the gate simulator + face turnstile —
+// it never drove the real LPR barrier relay — so it did nothing useful for a
+// physical-barrier site. Gates open locally (entry / paid-exit / manual).
 
 // ─── push: rate edits up to the SaaS ─────────────────────────────────────────
 

@@ -467,7 +467,7 @@ function W4gTestPanel({ devices }: { devices: PaymentTerminal[] }) {
     let alive = true;
     const poll = () => window.bridge.tngStatus().then((s: any) => { if (alive) setFull(s); }).catch(() => null);
     poll();
-    const t = setInterval(poll, 2000);
+    const t = setInterval(poll, 3000);
     return () => { alive = false; clearInterval(t); };
   }, []);
 
