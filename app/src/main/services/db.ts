@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 import type {
   SeasonPass,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule,
-  ParkingSpace, Site, SyncOp, SyncQueueRow,
+  ParkingSpace, Site, SyncOp, SyncQueueRow, SyncIssue,
   ActivityLog, Transaction, TransactionStatus,
 } from '../../shared/types';
 import { randomUUID } from 'node:crypto';
@@ -1318,6 +1318,32 @@ export function syncQueueStats(): { pending: number; failed: number; oldestPendi
   const failed = (db.prepare(`SELECT COUNT(*) as c FROM sync_queue WHERE status = 'failed'`).get() as any).c;
   const oldest = db.prepare(`SELECT created_at FROM sync_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1`).get() as any;
   return { pending, failed, oldestPending: oldest?.created_at ?? null };
+}
+
+/**
+ * The queue rows worth showing the operator: anything that has failed at least
+ * once (a recorded last_error) or exhausted its retries. Rows that pushed
+ * cleanly are deleted, and a brand-new pending row (attempts=0, no error) is
+ * normal and omitted — so this list is exactly the "why isn't this syncing?"
+ * set. `ref` is pulled from the payload (plate / transaction id) so the row is
+ * identifiable at a glance. Failed rows sort first, then most-recently-touched.
+ */
+export function listSyncQueueIssues(limit = 20): SyncIssue[] {
+  const rows = getDb().prepare(
+    `SELECT * FROM sync_queue WHERE last_error IS NOT NULL OR status = 'failed'
+     ORDER BY (status = 'failed') DESC, updated_at DESC LIMIT ?`
+  ).all(limit) as any[];
+  return rows.map((row): SyncIssue => {
+    let ref: string | null = null;
+    try {
+      const p = JSON.parse(row.payload);
+      ref = p.plate_number ?? p.local_transaction_id ?? null;
+    } catch { /* payload not JSON — leave ref null */ }
+    return {
+      id: row.id, op: row.op, ref, status: row.status,
+      attempts: row.attempts, lastError: row.last_error, nextAttemptAt: row.next_attempt_at,
+    };
+  });
 }
 
 export function retryAllFailedSync(): number {

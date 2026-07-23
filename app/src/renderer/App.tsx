@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
-  Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, X, Receipt,
+  Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -20,6 +20,7 @@ import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
 import { useCurrentSite } from './hooks/useCurrentSite';
 import { fmtTimeSeconds } from './lib/datetime';
+import { subscribeToast } from './toast';
 
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions' | 'transactions'
@@ -174,6 +175,11 @@ export function App() {
     });
     return off;
   }, []);
+
+  // Bridge the module-level toast bus (toast()) to the on-screen stack so any
+  // component — e.g. the device Push/Pull buttons — can raise a toast.
+  useEffect(() => subscribeToast(({ tone, title, detail, ttlMs }) =>
+    pushAlert({ tone, title, detail: detail ?? '' }, ttlMs)), []);
 
   useEffect(() => {
     window.bridge.getSettings().then((s: any) => setDevMode(!!s.devMode)).catch(() => null);
@@ -353,7 +359,9 @@ export function App() {
               }`}
               role="alert"
             >
-              <AlertTriangle size={18} className="mt-0.5 flex-shrink-0" />
+              {a.tone === 'success'
+                ? <CheckCircle2 size={18} className="mt-0.5 flex-shrink-0" />
+                : <AlertTriangle size={18} className="mt-0.5 flex-shrink-0" />}
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-bold">{a.title}</div>
                 <div className="text-xs mt-0.5 leading-snug opacity-90">{a.detail}</div>

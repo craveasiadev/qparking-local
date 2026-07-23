@@ -3,10 +3,10 @@ import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Clou
 import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { fmtDateTime, dateInAppTz, APP_TZ } from '../lib/datetime';
+import { toast } from '../toast';
 
 export function ParkingPolicies() {
   const [list, setList] = useState<RatePolicy[]>([]);
-  const [result, setResult] = useState<{ ok: boolean; fetched: number; error?: string } | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState('');
   const [kindFilter, setKindFilter] = useState<'all' | 'default' | 'zero'>('all');
@@ -18,9 +18,9 @@ export function ParkingPolicies() {
 
   const [sync, syncing] = useAsyncAction(async () => {
     const r = await window.bridge.syncRatePoliciesNow();
-    setResult(r as any);
+    if (r.ok) toast({ tone: 'success', title: `Fetched ${r.fetched} policy(s)` });
+    else toast({ tone: 'error', title: 'Sync failed', detail: String(r.error) });
     await refresh();
-    setTimeout(() => setResult(null), 6000);
   });
 
   const lastSynced = useMemo(
@@ -80,12 +80,6 @@ export function ParkingPolicies() {
           </p>
         </div>
       </div>
-
-      {result && (
-        <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${result.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
-          {result.ok ? `Fetched ${result.fetched} policy(s).` : `Sync failed: ${result.error}`}
-        </div>
-      )}
 
       {list.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500 inline-flex items-center justify-center gap-2 w-full">

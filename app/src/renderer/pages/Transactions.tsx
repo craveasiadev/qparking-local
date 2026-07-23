@@ -6,6 +6,7 @@ import {
 import type { Transaction, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { fmtDateTime } from '../lib/datetime';
+import { toast } from '../toast';
 
 const PAGE_SIZE = 20;
 
@@ -104,24 +105,21 @@ export function Transactions() {
     await fetchPage();
   });
 
-  const [syncNotice, setSyncNotice] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [runSync, syncing] = useAsyncAction(async () => {
-    setSyncNotice(null);
     const r = await window.bridge.syncTransactionsNow();
     const s = r.status;
     if (r.transactions === 0) {
-      setSyncNotice({ tone: 'ok', text: 'No transactions to sync.' });
+      toast({ tone: 'success', title: 'No transactions to sync' });
     } else if (s.lastError === 'qparking_not_configured') {
-      setSyncNotice({ tone: 'err', text: `Queued ${r.transactions} transaction(s), but qparking isn't configured (set the URL + API key in Settings). They'll push once connected.` });
+      toast({ tone: 'warn', title: `Queued ${r.transactions} transaction(s)`, detail: "qparking isn't configured (set the URL + API key in Settings). They'll push once connected." });
     } else if (s.lastError === 'site_not_bound') {
-      setSyncNotice({ tone: 'err', text: `Queued ${r.transactions} transaction(s), but this server isn't bound to the current site yet. They'll push after re-provisioning.` });
+      toast({ tone: 'warn', title: `Queued ${r.transactions} transaction(s)`, detail: "This server isn't bound to the current site yet. They'll push after re-provisioning." });
     } else if (s.failed > 0 || s.pending > 0) {
-      setSyncNotice({ tone: 'err', text: `Queued ${r.transactions} transaction(s). ${s.pending} pending, ${s.failed} failed${s.lastError ? ` — ${s.lastError}` : ''}. Will retry automatically.` });
+      toast({ tone: 'warn', title: `Queued ${r.transactions} transaction(s)`, detail: `${s.pending} pending, ${s.failed} failed${s.lastError ? ` — ${s.lastError}` : ''}. Will retry automatically.` });
     } else {
-      setSyncNotice({ tone: 'ok', text: `Synced ${r.transactions} transaction(s) to qparking.` });
+      toast({ tone: 'success', title: `Synced ${r.transactions} transaction(s) to qparking` });
     }
     await fetchPage();
-    setTimeout(() => setSyncNotice(null), 8_000);
   });
 
   useEffect(() => { void fetchPage(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [page, debouncedSearch, statusFilter]);
@@ -167,16 +165,6 @@ export function Transactions() {
           </button>
         </div>
       </header>
-
-      {syncNotice && (
-        <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${
-          syncNotice.tone === 'ok'
-            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-            : 'border-amber-200 bg-amber-50 text-amber-800'
-        }`}>
-          {syncNotice.text}
-        </div>
-      )}
 
       {/* Search + status filter */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">

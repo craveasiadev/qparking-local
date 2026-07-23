@@ -24,12 +24,12 @@ import fs from 'node:fs';
 import axios from 'axios';
 import {
   enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
-  syncQueueStats, getLane, getTerminal, isBoundToCurrentSite,
+  syncQueueStats, listSyncQueueIssues, getLane, getTerminal, isBoundToCurrentSite,
   getSiteDefaultRatePolicy,
   type SyncOp,
 } from './db';
 import { getCloudApi } from './cloud-api';
-import type { ParkingSession, Transaction } from '../../shared/types';
+import type { ParkingSession, Transaction, SyncIssue } from '../../shared/types';
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
 const MAX_ATTEMPTS = 6;
@@ -44,6 +44,8 @@ export const syncEvents = new EventEmitter();
  *   lastDrainAt = ISO time of last drain completion
  *   lastSuccessAt = ISO time of the most recent successful push (any op)
  *   lastError = most recent failure message (cleared on success)
+ *   issues    = per-row detail for every push that failed at least once, so the
+ *               Dashboard can show which record + why (not just the last error)
  */
 export interface SyncStatus {
   pending: number;
@@ -53,6 +55,7 @@ export interface SyncStatus {
   lastDrainAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
+  issues: SyncIssue[];
 }
 
 let inFlight = false;
@@ -70,6 +73,7 @@ export function getSyncStatus(): SyncStatus {
     lastDrainAt,
     lastSuccessAt,
     lastError,
+    issues: listSyncQueueIssues(),
   };
 }
 

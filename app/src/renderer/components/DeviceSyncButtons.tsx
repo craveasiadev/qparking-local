@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { UploadCloud, DownloadCloud, Loader2, AlertTriangle } from 'lucide-react';
 import type { DeviceSyncType, DeviceSyncPreview } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { toast } from '../toast';
 
 /**
  * The manual "Push to cloud" / "Pull from cloud" pair shown on each device page
@@ -17,39 +18,42 @@ const NOUN: Record<DeviceSyncType, string> = {
 
 export function DeviceSyncButtons({ type, onDone }: { type: DeviceSyncType; onDone?: () => void | Promise<void> }) {
   const [dialog, setDialog] = useState<{ direction: 'push' | 'pull'; preview: DeviceSyncPreview } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
   const noun = NOUN[type];
+  const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
+
+  const failToast = (detail: string) => toast({ tone: 'error', title: `${Noun} sync failed`, detail });
 
   const [openConfirm, opening] = useAsyncAction(
     async (direction: 'push' | 'pull') => {
-      setError(null);
-      setResult(null);
       const preview = await window.bridge.previewDeviceSync(type, direction);
-      if (!preview.ok) { setError(preview.error ?? 'Could not reach the cloud'); return; }
+      if (!preview.ok) { failToast(preview.error ?? 'Could not reach the cloud'); return; }
       setDialog({ direction, preview });
     },
-    { onError: (e) => setError(String((e as any)?.message ?? e)) },
+    { onError: (e) => failToast(String((e as any)?.message ?? e)) },
   );
 
   const [runSync, syncing] = useAsyncAction(
     async () => {
       if (!dialog) return;
-      setError(null);
       if (dialog.direction === 'push') {
         const r = await window.bridge.pushDevicesToCloud(type);
-        if (!r.ok) { setError(r.error ?? 'Push failed'); setDialog(null); return; }
+        if (!r.ok) { failToast(r.error ?? 'Push failed'); setDialog(null); return; }
         const failed = (r.items ?? []).filter((i) => !i.ok && !i.skipped).length;
-        setResult(`Pushed ${(r.items ?? []).filter((i) => i.ok).length} ${noun} · removed ${r.removed ?? 0} from cloud${failed ? ` · ${failed} failed` : ''}`);
+        const pushed = (r.items ?? []).filter((i) => i.ok).length;
+        toast({
+          tone: failed ? 'warn' : 'success',
+          title: `Pushed ${pushed} ${noun} to cloud`,
+          detail: `Removed ${r.removed ?? 0} from cloud${failed ? ` · ${failed} failed` : ''}`,
+        });
       } else {
         const r = await window.bridge.pullDevicesFromCloud(type);
-        if (!r.ok) { setError(r.error ?? 'Pull failed'); setDialog(null); return; }
-        setResult(`Replaced local ${noun} with ${r.applied ?? 0} from the cloud`);
+        if (!r.ok) { failToast(r.error ?? 'Pull failed'); setDialog(null); return; }
+        toast({ tone: 'success', title: `Pulled ${r.applied ?? 0} ${noun} from cloud`, detail: `Replaced this PC's ${noun} with the cloud's.` });
       }
       setDialog(null);
       await onDone?.();
     },
-    { onError: (e) => { setError(String((e as any)?.message ?? e)); setDialog(null); } },
+    { onError: (e) => { failToast(String((e as any)?.message ?? e)); setDialog(null); } },
   );
 
   const busy = opening || syncing;
@@ -74,12 +78,6 @@ export function DeviceSyncButtons({ type, onDone }: { type: DeviceSyncType; onDo
           <DownloadCloud size={14} /> Pull from cloud
         </button>
       </div>
-
-      {(error || result) && (
-        <div className={`mt-2 w-full rounded-lg border px-3 py-2 text-[11px] ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-          {error ?? result}
-        </div>
-      )}
 
       {dialog && (
         <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4" onClick={() => !syncing && setDialog(null)}>

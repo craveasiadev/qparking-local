@@ -8,6 +8,7 @@ import {
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { fmtDateTime, fmtTimeSeconds } from '../lib/datetime';
+import { toast } from '../toast';
 
 const PAGE_SIZE = 20;
 
@@ -249,7 +250,6 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [editing, setEditing] = useState<ParkingSession | null>(null);
   const [releasing, setReleasing] = useState<{ session: SessionRow; laneId: number | null } | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  const [retriggerNotice, setRetriggerNotice] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
@@ -376,14 +376,12 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   });
 
   const [runRetrigger, retriggering] = useAsyncAction(async (id: number, plate: string, laneId: number | null) => {
-    setRetriggerNotice(null);
     const r = await window.bridge.retriggerSessionPayment(id, laneId);
     if (r.ok) {
-      setRetriggerNotice({ tone: 'ok', text: `Retrigger sent for ${plate}. If the fee is RM0 the barrier opens; otherwise the selected gate's terminal is armed for the driver to tap.` });
+      toast({ tone: 'success', title: `Retrigger sent for ${plate}`, detail: "If the fee is RM0 the barrier opens; otherwise the selected gate's terminal is armed for the driver to tap." });
     } else {
-      setRetriggerNotice({ tone: 'err', text: `Couldn't retrigger: ${r.error}` });
+      toast({ tone: 'error', title: "Couldn't retrigger", detail: String(r.error) });
     }
-    setTimeout(() => setRetriggerNotice(null), 8_000);
   });
 
   function clearAllFilters() {
@@ -552,16 +550,6 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       )}
 
       {devMode && <DevSimulator lanes={lanes} onSessionCreated={() => runRefresh()} />}
-
-      {retriggerNotice && (
-        <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${
-          retriggerNotice.tone === 'ok'
-            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-            : 'border-red-200 bg-red-50 text-red-800'
-        }`}>
-          {retriggerNotice.text}
-        </div>
-      )}
 
       {/* Results — desktop table + mobile cards share one relative wrapper so a
           single loading overlay can dim them during a fetch. */}

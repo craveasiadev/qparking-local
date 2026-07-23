@@ -27,6 +27,23 @@ import type {
 
 // ─── runtime status objects (never persisted) ────────────────────────────────
 
+/** One problem row in the outbound sync queue — a push that failed at least
+ *  once (still retrying) or exhausted its retries. Surfaced per-row on the
+ *  Dashboard so an operator/dev can see exactly WHICH record failed and WHY
+ *  instead of only the single global last-error line. */
+export interface SyncIssue {
+  id: number;
+  /** e.g. 'session.exit', 'transaction.upsert'. */
+  op: string;
+  /** A human handle for the record — plate number, or transaction id. */
+  ref: string | null;
+  status: 'pending' | 'failed';
+  attempts: number;
+  lastError: string | null;
+  /** When the next auto-retry is due (pending rows only). */
+  nextAttemptAt: string | null;
+}
+
 /** Status snapshot for the outbound sync queue (Dashboard panel). */
 export interface SyncStatus {
   pending: number;
@@ -36,6 +53,9 @@ export interface SyncStatus {
   lastDrainAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
+  /** Rows that failed at least once (pending-with-error or failed), newest and
+   *  most-severe first. Empty when everything is flowing cleanly. */
+  issues: SyncIssue[];
 }
 
 /** Per-item outcome of pushing one local equipment row up to the cloud

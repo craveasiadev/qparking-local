@@ -7,6 +7,7 @@ import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@sh
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../hooks/useCurrentSite';
 import { fmtDateTime, fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
+import { toast } from '../toast';
 
 export function Dashboard() {
   const [open, setOpen] = useState<ParkingSession[]>([]);
@@ -14,7 +15,6 @@ export function Dashboard() {
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [sync, setSync] = useState<SyncStatus | null>(null);
-  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   // Shared with the global not-connected banner — gates the sync panel below so
   // "all caught up" never shows while this server is unlinked from a site.
   const site = useCurrentSite();
@@ -42,9 +42,8 @@ export function Dashboard() {
   });
   const [backfillSessions, backfilling] = useAsyncAction(async () => {
     const r = await window.bridge.backfillSessions();
-    setBackfillMsg(`Queued ${r.entries} entry + ${r.exits} exit record(s) for sync. Watch the panel for progress.`);
+    toast({ tone: 'success', title: `Queued ${r.entries} entry + ${r.exits} exit record(s) for sync`, detail: 'Watch the sync panel for progress.' });
     setSync(await window.bridge.getSyncStatus());
-    setTimeout(() => setBackfillMsg(null), 6000);
   });
 
   useEffect(() => {
@@ -113,9 +112,6 @@ export function Dashboard() {
           "all caught up". */}
       {site && sync && <SyncPanel sync={sync} retrying={retrying} draining={draining} backfilling={backfilling}
         onRetry={() => retrySync()} onDrain={() => drainSync()} onBackfill={() => backfillSessions()} />}
-      {backfillMsg && (
-        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs px-3 py-2">{backfillMsg}</div>
-      )}
 
       <div className="mt-5 grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Tile icon={Car} label="Cars inside" value={String(open.length)}
@@ -320,9 +316,46 @@ function SyncPanel({ sync, retrying, draining, backfilling, onRetry, onDrain, on
           )}
         </div>
       </div>
+
+      {/* Per-row failure detail — exactly which record couldn't sync and why,
+          so a stuck queue is diagnosable without digging through logs. */}
+      {sync.issues.length > 0 && (
+        <ul className="mt-3 border-t border-black/5 divide-y divide-black/5 text-[11px]">
+          {sync.issues.map((issue) => (
+            <li key={issue.id} className="py-2 flex items-start gap-2">
+              <span className={`mt-0.5 inline-flex flex-shrink-0 items-center px-1.5 py-0.5 rounded font-bold uppercase tracking-wide text-[9px] ${
+                issue.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+              }`}>
+                {issue.status === 'failed' ? 'failed' : `retry ${issue.attempts}/6`}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-gray-700">
+                  {OP_LABEL[issue.op] ?? issue.op}
+                  {issue.ref && <span className="font-mono text-gray-500"> · {issue.ref}</span>}
+                  {issue.status === 'pending' && issue.nextAttemptAt && (
+                    <span className="font-normal text-gray-400"> · next try {fmtTimeSeconds(issue.nextAttemptAt)}</span>
+                  )}
+                </div>
+                {issue.lastError && (
+                  <div className="mt-0.5 font-mono text-red-600 break-all">{issue.lastError}</div>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
+
+/** Friendly labels for the queue op codes shown in the sync-issue list. */
+const OP_LABEL: Record<string, string> = {
+  'session.entry': 'Entry',
+  'session.exit': 'Exit',
+  'session.update': 'Update',
+  'session.delete': 'Delete',
+  'transaction.upsert': 'Payment',
+};
 
 function Tile({ icon: Icon, label, value, sub, tone = 'neutral' }:
   { icon: any; label: string; value: string; sub?: string; tone?: 'neutral' | 'ok' | 'warn' | 'bad' }) {

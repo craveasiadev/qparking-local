@@ -3,6 +3,7 @@ import { Grid3x3, RefreshCw, Loader2, Search, X, Clock } from 'lucide-react';
 import type { ParkingSpace } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { fmtDateTime } from '../lib/datetime';
+import { toast } from '../toast';
 
 /**
  * Parking space inventory — mirrored read-only from qparking SaaS.
@@ -12,7 +13,6 @@ import { fmtDateTime } from '../lib/datetime';
  */
 export function ParkingSpaces() {
   const [spaces, setSpaces] = useState<ParkingSpace[]>([]);
-  const [result, setResult] = useState<{ ok: boolean; fetched: number; error?: string } | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
@@ -21,9 +21,9 @@ export function ParkingSpaces() {
 
   const [sync, syncing] = useAsyncAction(async () => {
     const r = await window.bridge.syncParkingSpacesNow();
-    setResult(r as any);
+    if (r.ok) toast({ tone: 'success', title: `Fetched ${r.fetched} space(s)` });
+    else toast({ tone: 'error', title: 'Sync failed', detail: String(r.error) });
     await refresh();
-    setTimeout(() => setResult(null), 6000);
   });
 
   const stats = useMemo(() => {
@@ -93,12 +93,6 @@ export function ParkingSpaces() {
           {syncing ? 'Syncing…' : 'Sync now'}
         </button>
       </header>
-
-      {result && (
-        <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${result.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
-          {result.ok ? `Fetched ${result.fetched} space(s).` : `Sync failed: ${result.error}`}
-        </div>
-      )}
 
       {/* Status counts strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
