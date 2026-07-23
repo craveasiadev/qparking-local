@@ -21,6 +21,7 @@ import type { AppSettings, EquipmentPushItem } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { fmtTimeSeconds, fmtDate } from '../lib/datetime';
+import { toast } from '../toast';
 
 // ─── Types local to this page ────────────────────────────────────────────────
 
@@ -215,6 +216,14 @@ export function Settings() {
   });
 
   // ─── Maintenance ───────────────────────────────────────────────────────────
+  // Backfill: one-shot re-queue of every local session for cloud sync. Moved
+  // here from the Dashboard so a live operator can't fire a mass re-queue by
+  // accident — it belongs with the other maintenance actions.
+  const [runBackfill, backfilling] = useAsyncAction(async () => {
+    const r = await window.bridge.backfillSessions();
+    toast({ tone: 'success', title: `Queued ${r.entries} entry + ${r.exits} exit record(s) for sync`, detail: 'Watch the Dashboard cloud-sync panel for progress.' });
+  });
+
   const [runClearCache, clearingCache] = useAsyncAction(async () => {
     if (!(await confirm({ title: 'Clear cache & reload', message: 'Clear browser cache and reload?\n\nThis wipes Electron-side cached responses, localStorage, IndexedDB, and cookies, then reloads the window. Your parking data (sessions, terminals, settings) is NOT affected.', confirmLabel: 'Clear & reload' }))) return;
     const result = await window.bridge.clearAppCache();
@@ -461,20 +470,35 @@ export function Settings() {
         )}
       </section>
 
-      <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-3">
+      <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-5">
         <SectionHeader icon={Wrench} title="Maintenance" />
-        <p className="text-[11px] text-gray-500">
-          Wipes Electron-side browser caches (HTTP responses, localStorage,
-          IndexedDB, service workers, cookies) and reloads the window.
-          Useful after an app update when the UI shows stale data. <strong>Does NOT
-          delete parking sessions, terminals, cameras, lanes, policies, or settings</strong> —
-          those live in the SQLite database and survive a cache clear.
-        </p>
-        <button onClick={() => runClearCache()} disabled={clearingCache}
-          className="inline-flex items-center gap-2 h-10 px-4 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-          {clearingCache ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-          {clearingCache ? 'Clearing & reloading…' : 'Clear cache & reload'}
-        </button>
+
+        <div className="space-y-2">
+          <p className="text-[11px] text-gray-500">
+            <strong>Backfill all sessions</strong> — one-shot: queue every existing local session for sync to qparking.
+            Idempotent (safe to run repeatedly). Use it after first linking a site, or if the cloud is missing older sessions.
+          </p>
+          <button onClick={() => runBackfill()} disabled={backfilling}
+            className="inline-flex items-center gap-2 h-10 px-4 rounded-lg border border-gray-200 bg-white hover:border-gray-900 text-gray-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            {backfilling ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
+            {backfilling ? 'Queuing…' : 'Backfill all sessions'}
+          </button>
+        </div>
+
+        <div className="space-y-2 border-t border-gray-100 pt-4">
+          <p className="text-[11px] text-gray-500">
+            <strong>Clear cache &amp; reload</strong> — wipes Electron-side browser caches (HTTP responses, localStorage,
+            IndexedDB, service workers, cookies) and reloads the window.
+            Useful after an app update when the UI shows stale data. <strong>Does NOT
+            delete parking sessions, terminals, cameras, lanes, policies, or settings</strong> —
+            those live in the SQLite database and survive a cache clear.
+          </p>
+          <button onClick={() => runClearCache()} disabled={clearingCache}
+            className="inline-flex items-center gap-2 h-10 px-4 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            {clearingCache ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            {clearingCache ? 'Clearing & reloading…' : 'Clear cache & reload'}
+          </button>
+        </div>
       </section>
 
       {/* Sticky save bar — stays in view no matter how far down the long form

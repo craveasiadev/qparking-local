@@ -91,3 +91,26 @@ export function dateInAppTz(d: Date): string {
 export function todayInAppTz(): string {
   return dateInAppTz(new Date());
 }
+
+/**
+ * Start-of-day, in APP_TZ (GMT+8), for a "YYYY-MM-DD" calendar date, expressed
+ * as a UTC ISO instant. GMT+8 has no DST, so the offset is a constant +08:00 —
+ * safe to append literally. Used to turn a date-picker value into the UTC lower
+ * bound for a query. Returns null for empty input.
+ */
+export function appTzDayStartUtc(dateStr?: string | null): string | null {
+  if (!dateStr) return null;
+  const d = new Date(`${dateStr}T00:00:00+08:00`);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * Exclusive end of a GMT+8 calendar day (i.e. the start of the NEXT day) as a
+ * UTC ISO instant — the upper bound for an inclusive day range. Returns null
+ * for empty input.
+ */
+export function appTzDayEndUtc(dateStr?: string | null): string | null {
+  const start = appTzDayStartUtc(dateStr);
+  if (!start) return null;
+  return new Date(new Date(start).getTime() + 24 * 60 * 60 * 1000).toISOString();
+}

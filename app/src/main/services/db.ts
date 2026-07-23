@@ -1221,7 +1221,18 @@ export interface TransactionPageRow extends Transaction {
 /** Build the shared WHERE for the transactions list + count (kept in one place
  *  so the page total always matches the rows). `search` is a contains-match on
  *  orderId / plate / card number; `status` is an exact transaction-status match. */
-function transactionFilter(opts: { search?: string | null; status?: string | null }): { sql: string; params: any[] } {
+interface TransactionFilterOpts {
+  search?: string | null;
+  status?: string | null;
+  /** Inclusive lower bound — a UTC ISO instant (the renderer maps a GMT+8 day
+   *  to its UTC range). Filters on the row's effective time: payment_timestamp
+   *  when present, else created_at. */
+  dateFrom?: string | null;
+  /** Exclusive upper bound — a UTC ISO instant. */
+  dateTo?: string | null;
+}
+
+function transactionFilter(opts: TransactionFilterOpts): { sql: string; params: any[] } {
   const where: string[] = [];
   const params: any[] = [];
   if (opts.status) { where.push('t.status = ?'); params.push(opts.status); }
@@ -1230,14 +1241,23 @@ function transactionFilter(opts: { search?: string | null; status?: string | nul
     const like = `%${opts.search}%`;
     params.push(like, like, like);
   }
+  // Normalise the mixed timestamp shapes (ISO `…Z` on payment_timestamp,
+  // "YYYY-MM-DD HH:MM:SS" on created_at) via datetime() so both bound and
+  // column compare in the same UTC format.
+  if (opts.dateFrom) {
+    where.push('datetime(COALESCE(t.payment_timestamp, t.created_at)) >= datetime(?)');
+    params.push(opts.dateFrom);
+  }
+  if (opts.dateTo) {
+    where.push('datetime(COALESCE(t.payment_timestamp, t.created_at)) < datetime(?)');
+    params.push(opts.dateTo);
+  }
   return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
 }
 
-export function listTransactionsPage(opts: {
+export function listTransactionsPage(opts: TransactionFilterOpts & {
   limit: number;
   offset: number;
-  search?: string | null;
-  status?: string | null;
 }): TransactionPageRow[] {
   const { sql, params } = transactionFilter(opts);
   const rows = getDb().prepare(
@@ -1258,7 +1278,7 @@ export function listTransactionsPage(opts: {
   }));
 }
 
-export function countTransactions(opts: { search?: string | null; status?: string | null }): number {
+export function countTransactions(opts: TransactionFilterOpts): number {
   const { sql, params } = transactionFilter(opts);
   const row = getDb().prepare(
     `SELECT COUNT(*) AS n FROM transactions t LEFT JOIN sessions s ON s.id = t.session_id ${sql}`

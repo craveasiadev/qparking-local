@@ -1,11 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
   Receipt, RefreshCw, Search, X, Loader2, ChevronLeft, ChevronRight,
-  Eye, CheckCircle2, XCircle, Clock, RotateCcw, Ban, UploadCloud,
+  Eye, CheckCircle2, XCircle, Clock, RotateCcw, Ban, UploadCloud, CalendarDays,
 } from 'lucide-react';
 import type { Transaction, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
-import { fmtDateTime } from '../lib/datetime';
+import { fmtDateTime, appTzDayStartUtc, appTzDayEndUtc, todayInAppTz } from '../lib/datetime';
 import { toast } from '../toast';
 
 const PAGE_SIZE = 20;
@@ -69,6 +69,11 @@ export function Transactions() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  // GMT+8 calendar dates ('YYYY-MM-DD'); mapped to a UTC range at fetch time.
+  // Default to today's GMT+8 day so the ledger opens on the current shift;
+  // clear the dates (✕) to see the full history.
+  const [dateFrom, setDateFrom] = useState(() => todayInAppTz());
+  const [dateTo, setDateTo] = useState(() => todayInAppTz());
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [viewing, setViewing] = useState<TxnRow | null>(null);
   const [pageLoading, setPageLoading] = useState(false);
@@ -89,6 +94,8 @@ export function Transactions() {
         offset,
         search: debouncedSearch || null,
         status: statusFilter || null,
+        dateFrom: appTzDayStartUtc(dateFrom),
+        dateTo: appTzDayEndUtc(dateTo),
       });
       setRows(result.rows);
       setTotal(result.total);
@@ -122,7 +129,7 @@ export function Transactions() {
     await fetchPage();
   });
 
-  useEffect(() => { void fetchPage(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [page, debouncedSearch, statusFilter]);
+  useEffect(() => { void fetchPage(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [page, debouncedSearch, statusFilter, dateFrom, dateTo]);
   useEffect(() => { window.bridge.listLanes().then(setLanes).catch(() => null); }, []);
   // A completed/failed exit writes a transaction — refresh live off the same
   // 'session' event stream the Sessions page listens to.
@@ -166,8 +173,8 @@ export function Transactions() {
         </div>
       </header>
 
-      {/* Search + status filter */}
-      <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
+      {/* Search + status + date-range filter */}
+      <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mb-3">
         <div className="relative flex-1 sm:max-w-sm">
           <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
           <input
@@ -190,6 +197,43 @@ export function Transactions() {
         >
           {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+
+        {/* Date range — GMT+8 calendar days. Empty = all dates. */}
+        <div className="flex items-center gap-1.5">
+          <CalendarDays size={15} className="text-gray-400 flex-shrink-0" />
+          <input
+            type="date"
+            value={dateFrom}
+            max={dateTo || undefined}
+            onChange={(e) => { setPage(0); setDateFrom(e.target.value); }}
+            title="From date"
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white"
+          />
+          <span className="text-gray-400 text-xs">→</span>
+          <input
+            type="date"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(e) => { setPage(0); setDateTo(e.target.value); }}
+            title="To date"
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white"
+          />
+          <button
+            onClick={() => { setPage(0); const t = todayInAppTz(); setDateFrom(t); setDateTo(t); }}
+            className="h-9 px-2.5 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700"
+          >
+            Today
+          </button>
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setPage(0); setDateFrom(''); setDateTo(''); }}
+              title="Clear dates"
+              className="h-9 px-2 rounded-lg text-gray-400 hover:text-gray-700 inline-flex items-center"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="relative">

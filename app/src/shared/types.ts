@@ -198,6 +198,10 @@ export interface BridgeApi {
     offset: number;
     search?: string | null;
     status?: string | null;
+    /** Inclusive lower / exclusive upper UTC ISO bounds. The Transactions page
+     *  maps the operator's GMT+8 day selection to this UTC range. */
+    dateFrom?: string | null;
+    dateTo?: string | null;
   }): Promise<{
     rows: Array<Transaction & {
       plate: string | null;

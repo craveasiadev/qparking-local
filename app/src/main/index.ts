@@ -528,9 +528,9 @@ ipcMain.handle('sessions:page', (_e, opts: {
 
 // Transactions ledger — every payment attempt across all sessions, newest
 // first, with the parent session's plate/lane joined for display.
-ipcMain.handle('transactions:list-page', (_e, opts: { limit: number; offset: number; search?: string | null; status?: string | null }) => ({
+ipcMain.handle('transactions:list-page', (_e, opts: { limit: number; offset: number; search?: string | null; status?: string | null; dateFrom?: string | null; dateTo?: string | null }) => ({
   rows: listTransactionsPage(opts),
-  total: countTransactions({ search: opts.search ?? null, status: opts.status ?? null }),
+  total: countTransactions({ search: opts.search ?? null, status: opts.status ?? null, dateFrom: opts.dateFrom ?? null, dateTo: opts.dateTo ?? null }),
 }));
 
 // Manual retrigger — synthesizes an exit LPR event for a session so the

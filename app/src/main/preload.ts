@@ -74,7 +74,7 @@ const api: BridgeApi = {
   }) => ipcRenderer.invoke('sessions:update', id, patch),
 
   // transactions — payment ledger (every W4G attempt across all sessions)
-  listTransactionsPage: (opts: { limit: number; offset: number; search?: string | null; status?: string | null }) =>
+  listTransactionsPage: (opts: { limit: number; offset: number; search?: string | null; status?: string | null; dateFrom?: string | null; dateTo?: string | null }) =>
     ipcRenderer.invoke('transactions:list-page', opts),
 
   // policies

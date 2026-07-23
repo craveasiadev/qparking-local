@@ -1,33 +1,52 @@
 import { useEffect, useState } from 'react';
 import {
-  Activity, Car, CreditCard, Camera, MonitorPlay, Bolt, Cloud, CloudOff, RefreshCw,
-  Loader2, CheckCircle2, AlertTriangle, DollarSign, Layers, LogOut,
+  Activity, Car, CreditCard, Camera, Cloud, CloudOff, RefreshCw,
+  Loader2, CheckCircle2, XCircle, Clock, RotateCcw, Ban, AlertTriangle, DollarSign, Layers, LogOut, Receipt, Wifi, WifiOff,
 } from 'lucide-react';
 import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../hooks/useCurrentSite';
-import { fmtDateTime, fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
-import { toast } from '../toast';
+import { fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
+
+/** Live reachability of one device: undefined = not probed yet, 'checking' =
+ *  a probe is in flight, else the last ping result. */
+type DeviceHealth = 'checking' | { online: boolean; latencyMs?: number };
+/** Rendered status of a device row, after folding in whether it's enabled. */
+type DeviceState = 'online' | 'offline' | 'checking' | 'disabled';
+
+/** How often we re-ping every enabled device to refresh online/offline. */
+const HEALTH_PING_INTERVAL_MS = 60_000;
+
+/** How many rows the recent-activity feeds show. */
+const RECENT_LIMIT = 10;
+
+/** A ledger row as returned by the bridge — Transaction plus the parent
+ *  session's plate. Derived from the bridge signature so it stays in sync. */
+type TxnRow = Awaited<ReturnType<typeof window.bridge.listTransactionsPage>>['rows'][number];
 
 export function Dashboard() {
   const [open, setOpen] = useState<ParkingSession[]>([]);
   const [recent, setRecent] = useState<ParkingSession[]>([]);
+  const [txns, setTxns] = useState<TxnRow[]>([]);
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [sync, setSync] = useState<SyncStatus | null>(null);
+  // Per-device reachability, keyed `t{id}` (terminal) / `c{id}` (camera).
+  const [health, setHealth] = useState<Record<string, DeviceHealth>>({});
   // Shared with the global not-connected banner — gates the sync panel below so
   // "all caught up" never shows while this server is unlinked from a site.
   const site = useCurrentSite();
 
   async function refresh() {
-    const [o, r, t, c, syncStatus] = await Promise.all([
+    const [o, r, tx, t, c, syncStatus] = await Promise.all([
       window.bridge.listOpenSessions(),
       window.bridge.listRecentSessions(20),
+      window.bridge.listTransactionsPage({ limit: RECENT_LIMIT, offset: 0 }),
       window.bridge.listTerminals(),
       window.bridge.listCameras(),
       window.bridge.getSyncStatus(),
     ]);
-    setOpen(o); setRecent(r); setTerminals(t); setCameras(c); setSync(syncStatus);
+    setOpen(o); setRecent(r); setTxns(tx.rows); setTerminals(t); setCameras(c); setSync(syncStatus);
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -40,11 +59,6 @@ export function Dashboard() {
     const s = await window.bridge.syncDrainNow();
     setSync(s);
   });
-  const [backfillSessions, backfilling] = useAsyncAction(async () => {
-    const r = await window.bridge.backfillSessions();
-    toast({ tone: 'success', title: `Queued ${r.entries} entry + ${r.exits} exit record(s) for sync`, detail: 'Watch the sync panel for progress.' });
-    setSync(await window.bridge.getSyncStatus());
-  });
 
   useEffect(() => {
     const off2 = window.bridge.onEvent('session', (p: any) => {
@@ -56,13 +70,68 @@ export function Dashboard() {
     return () => { off2(); off3(); };
   }, []);
 
-  const enabledDevices = terminals.filter((t) => t.enabled).length;
+  // ─── device reachability (online/offline) ──────────────────────────────────
+  // Ping every ENABLED terminal + camera now and every 60s. Disabled devices
+  // are left alone (their "offline" would be meaningless). Each probe lands
+  // independently so one slow device doesn't hold up the rest. `deviceKey`
+  // re-arms the loop whenever the enabled set or a host/port changes.
+  const enabledTerminals = terminals.filter((t) => t.enabled);
+  const enabledCameras = cameras.filter((c) => c.enabled);
+  const deviceKey = [
+    ...enabledTerminals.map((t) => `t${t.id}@${t.host}:${t.port}`),
+    ...enabledCameras.map((c) => `c${c.id}`),
+  ].join('|');
+
+  useEffect(() => {
+    if (!deviceKey) return;
+    let cancelled = false;
+    const setOne = (key: string, v: DeviceHealth) =>
+      { if (!cancelled) setHealth((h) => ({ ...h, [key]: v })); };
+
+    function run() {
+      for (const t of enabledTerminals) {
+        setOne(`t${t.id}`, 'checking');
+        window.bridge.pingTerminalHost({ host: t.host, port: t.port })
+          .then((r) => setOne(`t${t.id}`, { online: r.ok, latencyMs: r.latencyMs }))
+          .catch(() => setOne(`t${t.id}`, { online: false }));
+      }
+      for (const c of enabledCameras) {
+        setOne(`c${c.id}`, 'checking');
+        window.bridge.pingCamera(c.id)
+          .then((r) => setOne(`c${c.id}`, { online: r.ok, latencyMs: r.latencyMs }))
+          .catch(() => setOne(`c${c.id}`, { online: false }));
+      }
+    }
+    run();
+    const id = setInterval(run, HEALTH_PING_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceKey]);
+
+  const termState = (t: PaymentTerminal): DeviceState => deviceState(t.enabled, health[`t${t.id}`]);
+  const camState = (c: LprCamera): DeviceState => deviceState(c.enabled, health[`c${c.id}`]);
+
+  const terminalRows = terminals.map((t) => ({
+    id: t.id, name: t.name, sub: `${t.host}:${t.port}`, state: termState(t),
+    latencyMs: healthLatency(health[`t${t.id}`]),
+  }));
+  const cameraRows = cameras.map((c) => ({
+    id: c.id, name: c.name, sub: `${c.host ?? 'no host'} · ${c.direction}`, state: camState(c),
+    latencyMs: healthLatency(health[`c${c.id}`]),
+  }));
+
+  // KPI roll-up across all enabled equipment.
+  const allRows = [...terminalRows, ...cameraRows];
+  const enabledRows = allRows.filter((r) => r.state !== 'disabled');
+  const onlineCount = enabledRows.filter((r) => r.state === 'online').length;
+  const offlineCount = enabledRows.filter((r) => r.state === 'offline').length;
+
   const today = todayInAppTz();
   const entriesToday = recent.filter((s) => dateInAppTz(new Date(s.entryAt)) === today).length;
 
   // Most recent completed exits (car has left) — the durable, meaningful feed
   // that replaced the transient "live plate events" tail.
-  const recentExits = recent.filter((s) => s.exitAt).slice(0, 15);
+  const recentExits = recent.filter((s) => s.exitAt).slice(0, RECENT_LIMIT);
 
   // Prefer the cloud-authoritative daily revenue; fall back to summing what we
   // collected locally today so the tile is still useful while unlinked.
@@ -81,27 +150,9 @@ export function Dashboard() {
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-gray-500 mt-1">Live state of parking sessions, terminals and cameras on this site.</p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={() => window.bridge.openGateSimulator()}
-            title="Open the gate-simulator window (red/green visual stand-in for a real gate-relay)"
-            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 bg-white text-xs font-bold uppercase tracking-wide text-gray-700"
-          >
-            <MonitorPlay size={14} /> Gate simulator
-          </button>
-          <button
-            onClick={() => window.bridge.testGate({ plate: 'TEST123', direction: 'test', laneName: 'manual test' })}
-            title="Fire a fake gate trigger — flashes the simulator green for 4 seconds"
-            className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold uppercase tracking-wide"
-          >
-            <Bolt size={14} /> Test gate
-          </button>
-        </div>
+      <header>
+        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <p className="text-sm text-gray-500 mt-1">Live state of parking sessions, terminals and cameras on this site.</p>
       </header>
 
       {/* Cloud-sync health panel — surfaces failures to qparking SaaS so the
@@ -110,8 +161,8 @@ export function Dashboard() {
           while unlinked the global NotConnectedNotice (App) covers it, so we
           just suppress the panel here rather than show a misleading
           "all caught up". */}
-      {site && sync && <SyncPanel sync={sync} retrying={retrying} draining={draining} backfilling={backfilling}
-        onRetry={() => retrySync()} onDrain={() => drainSync()} onBackfill={() => backfillSessions()} />}
+      {site && sync && <SyncPanel sync={sync} retrying={retrying} draining={draining}
+        onRetry={() => retrySync()} onDrain={() => drainSync()} />}
 
       <div className="mt-5 grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Tile icon={Car} label="Cars inside" value={String(open.length)}
@@ -119,8 +170,10 @@ export function Dashboard() {
         <Tile icon={DollarSign} label="Revenue today" value={formatCents(revenueCents)}
           sub={site ? 'from qparking SaaS' : 'collected locally'} />
         <Tile icon={Activity} label="Entries today" value={String(entriesToday)} sub="new sessions today" />
-        <Tile icon={CreditCard} label="Payment devices" value={`${enabledDevices}/${terminals.length}`} sub="enabled"
-          tone={terminals.length === 0 ? 'neutral' : enabledDevices === terminals.length ? 'ok' : 'warn'} />
+        <Tile icon={offlineCount > 0 ? WifiOff : Wifi} label="Devices online"
+          value={enabledRows.length === 0 ? '0/0' : `${onlineCount}/${enabledRows.length}`}
+          sub={enabledRows.length === 0 ? 'none enabled' : offlineCount > 0 ? `${offlineCount} offline` : 'all reachable'}
+          tone={enabledRows.length === 0 ? 'neutral' : offlineCount > 0 ? 'bad' : onlineCount === enabledRows.length ? 'ok' : 'neutral'} />
       </div>
 
       {/* Occupancy bar — only meaningful when the site profile (and its space
@@ -147,40 +200,13 @@ export function Dashboard() {
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
         <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold flex items-center gap-2"><Car size={15} className="text-gray-400" /> Cars currently inside ({open.length})</h2>
-          </header>
-          {open.length === 0 ? (
-            <div className="p-6 text-sm text-gray-500 text-center">No open sessions.</div>
-          ) : (
-            <ul className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
-              {open.map((s) => {
-                const minutes = Math.max(0, Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
-                return (
-                  <li key={s.id} className="px-4 py-3 flex items-center justify-between gap-3 text-sm">
-                    <div className="min-w-0">
-                      <div className="font-mono font-bold truncate">{s.plate}</div>
-                      <div className="text-xs text-gray-500 truncate">entered {fmtDateTime(s.entryAt)}</div>
-                    </div>
-                    <div className="text-right flex-shrink-0">
-                      <div className="font-mono text-sm">{formatDuration(minutes)}</div>
-                      <div className="text-[10px] uppercase tracking-widest text-gray-400">parked</div>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-
-        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <h2 className="text-sm font-semibold flex items-center gap-2"><LogOut size={15} className="text-gray-400" /> Recent exits</h2>
             <span className="text-[10px] uppercase tracking-widest text-gray-400">last {recentExits.length}</span>
           </header>
           {recentExits.length === 0 ? (
             <div className="p-6 text-sm text-gray-500 text-center">No completed exits yet.</div>
           ) : (
-            <ul className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
+            <ul className="divide-y divide-gray-100">
               {recentExits.map((s) => (
                 <li key={s.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
                   <div className="min-w-0">
@@ -199,70 +225,117 @@ export function Dashboard() {
             </ul>
           )}
         </section>
-      </div>
 
-      {/* Equipment health — a compact roll-up of the terminals + cameras this
-          site depends on, so the operator can spot a dead reader/camera at a
-          glance without leaving the dashboard. */}
-      <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
         <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold flex items-center gap-2"><CreditCard size={15} className="text-gray-400" /> Payment devices</h2>
-            <span className="text-[10px] uppercase tracking-widest text-gray-400">{enabledDevices}/{terminals.length} enabled</span>
+            <h2 className="text-sm font-semibold flex items-center gap-2"><Receipt size={15} className="text-gray-400" /> Recent transactions</h2>
+            <span className="text-[10px] uppercase tracking-widest text-gray-400">last {txns.length}</span>
           </header>
-          {terminals.length === 0 ? (
-            <div className="p-6 text-sm text-gray-500 text-center">No payment devices configured.</div>
+          {txns.length === 0 ? (
+            <div className="p-6 text-sm text-gray-500 text-center">No transactions yet.</div>
           ) : (
-            <ul className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
-              {terminals.map((t) => (
+            <ul className="divide-y divide-gray-100">
+              {txns.map((t) => (
                 <li key={t.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
                   <div className="min-w-0">
-                    <div className="font-semibold truncate">{t.name}</div>
-                    <div className="text-xs text-gray-500 truncate font-mono">{t.host}:{t.port}</div>
+                    <div className="font-mono font-bold truncate">{t.plate ?? '—'}</div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {fmtTime(t.paymentTimestamp ?? t.createdAt)}
+                      {(t.terminalName || t.paymentMethod) && (
+                        <span className="text-gray-400"> · {t.terminalName ?? t.paymentMethod}</span>
+                      )}
+                    </div>
                   </div>
-                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${t.enabled ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>
-                    {t.enabled ? 'enabled' : 'disabled'}
-                  </span>
+                  <div className="text-right flex-shrink-0 flex flex-col items-end gap-1">
+                    <span className="font-mono text-sm tabular-nums">{formatCents(t.amountCents)}</span>
+                    <TxnBadge status={t.status} />
+                  </div>
                 </li>
               ))}
             </ul>
           )}
         </section>
+      </div>
 
-        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold flex items-center gap-2"><Camera size={15} className="text-gray-400" /> LPR cameras</h2>
-            <span className="text-[10px] uppercase tracking-widest text-gray-400">{cameras.filter((c) => c.enabled).length}/{cameras.length} enabled</span>
-          </header>
-          {cameras.length === 0 ? (
-            <div className="p-6 text-sm text-gray-500 text-center">No cameras configured.</div>
-          ) : (
-            <ul className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
-              {cameras.map((c) => (
-                <li key={c.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
-                  <div className="min-w-0">
-                    <div className="font-semibold truncate">{c.name}</div>
-                    <div className="text-xs text-gray-500 truncate font-mono">{c.host ?? 'no host'}</div>
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <span className="text-[10px] uppercase tracking-wide text-gray-500">{c.direction}</span>
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${c.enabled ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-100 text-gray-500 border border-gray-200'}`}>
-                      {c.enabled ? 'on' : 'off'}
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+      {/* Equipment health — live reachability of the terminals + cameras this
+          site depends on. Anything OFFLINE floats to the top so a dead reader/
+          camera is the first thing the operator sees. Re-probed every 60s. */}
+      <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <HealthSection icon={CreditCard} title="Payment devices" rows={terminalRows}
+          emptyText="No payment devices configured." />
+        <HealthSection icon={Camera} title="LPR cameras" rows={cameraRows}
+          emptyText="No cameras configured." />
       </div>
     </div>
   );
 }
 
-function SyncPanel({ sync, retrying, draining, backfilling, onRetry, onDrain, onBackfill }:
-  { sync: SyncStatus; retrying: boolean; draining: boolean; backfilling: boolean;
-    onRetry: () => void; onDrain: () => void; onBackfill: () => void }) {
+/** Fold enabled-ness + a probe result into the state the UI renders. */
+function deviceState(enabled: boolean, h: DeviceHealth | undefined): DeviceState {
+  if (!enabled) return 'disabled';
+  if (h === undefined || h === 'checking') return 'checking';
+  return h.online ? 'online' : 'offline';
+}
+
+function healthLatency(h: DeviceHealth | undefined): number | undefined {
+  return h && h !== 'checking' && h.online ? h.latencyMs : undefined;
+}
+
+/** One equipment list (terminals or cameras) with live online/offline status,
+ *  offline pinned to the top, in a scroll view so the list can't push the
+ *  page. Header shows an online/offline roll-up. */
+function HealthSection({ icon: Icon, title, rows, emptyText }: {
+  icon: any; title: string; emptyText: string;
+  rows: { id: number; name: string; sub: string; state: DeviceState; latencyMs?: number }[];
+}) {
+  const online = rows.filter((r) => r.state === 'online').length;
+  const offline = rows.filter((r) => r.state === 'offline').length;
+  // offline first (the alert), then still-checking, then online, disabled last.
+  const rank: Record<DeviceState, number> = { offline: 0, checking: 1, online: 2, disabled: 3 };
+  const sorted = [...rows].sort((a, b) => rank[a.state] - rank[b.state] || a.name.localeCompare(b.name));
+
+  return (
+    <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+      <header className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+        <h2 className="text-sm font-semibold flex items-center gap-2"><Icon size={15} className="text-gray-400" /> {title}</h2>
+        {rows.length > 0 && (
+          <span className="text-[10px] uppercase tracking-widest inline-flex items-center gap-2">
+            <span className="text-emerald-600 font-semibold">{online} online</span>
+            {offline > 0 && <span className="text-red-600 font-semibold">{offline} offline</span>}
+          </span>
+        )}
+      </header>
+      {rows.length === 0 ? (
+        <div className="p-6 text-sm text-gray-500 text-center">{emptyText}</div>
+      ) : (
+        <ul className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+          {sorted.map((r) => (
+            <li key={r.id} className={`px-4 py-2.5 flex items-center justify-between gap-3 text-sm ${r.state === 'offline' ? 'bg-red-50/50' : ''}`}>
+              <div className="min-w-0">
+                <div className="font-semibold truncate">{r.name}</div>
+                <div className="text-xs text-gray-500 truncate font-mono">{r.sub}</div>
+              </div>
+              <HealthPill state={r.state} latencyMs={r.latencyMs} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Status chip: green online (+latency), red offline, grey checking/disabled. */
+function HealthPill({ state, latencyMs }: { state: DeviceState; latencyMs?: number }) {
+  const base = 'inline-flex flex-shrink-0 items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border';
+  if (state === 'disabled') return <span className={`${base} bg-gray-100 text-gray-500 border-gray-200`}>disabled</span>;
+  if (state === 'checking') return <span className={`${base} bg-gray-50 text-gray-500 border-gray-200`}><Loader2 size={11} className="animate-spin" /> checking</span>;
+  if (state === 'online') return <span className={`${base} bg-emerald-50 text-emerald-700 border-emerald-200`}><Wifi size={11} /> online{latencyMs != null ? ` · ${latencyMs}ms` : ''}</span>;
+  return <span className={`${base} bg-red-50 text-red-700 border-red-200`}><WifiOff size={11} /> offline</span>;
+}
+
+function SyncPanel({ sync, retrying, draining, onRetry, onDrain }:
+  { sync: SyncStatus; retrying: boolean; draining: boolean;
+    onRetry: () => void; onDrain: () => void }) {
   const healthy = sync.failed === 0 && sync.pending === 0 && !sync.lastError;
   const hasFailed = sync.failed > 0;
   const tone = hasFailed ? 'red' : sync.pending > 0 ? 'amber' : 'emerald';
@@ -296,19 +369,13 @@ function SyncPanel({ sync, retrying, draining, backfilling, onRetry, onDrain, on
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={onDrain} disabled={draining || retrying || backfilling}
+          <button onClick={onDrain} disabled={draining || retrying}
             className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 bg-white hover:border-gray-900 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
             {draining ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {draining ? 'Syncing…' : 'Sync now'}
           </button>
-          <button onClick={onBackfill} disabled={draining || retrying || backfilling}
-            title="One-shot: queue every existing local session for sync to qparking. Idempotent — safe to run repeatedly."
-            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 bg-white hover:border-gray-900 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-            {backfilling ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
-            {backfilling ? 'Queuing…' : 'Backfill all sessions'}
-          </button>
           {hasFailed && (
-            <button onClick={onRetry} disabled={retrying || draining || backfilling}
+            <button onClick={onRetry} disabled={retrying || draining}
               className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
               {retrying ? <Loader2 size={13} className="animate-spin" /> : <CloudOff size={13} />}
               {retrying ? 'Retrying…' : `Retry ${sync.failed} failed`}
@@ -390,6 +457,23 @@ function PaymentBadge({ status }: { status: ParkingSession['paymentStatus'] }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${styles[status]}`}>
       {label}
+    </span>
+  );
+}
+
+/** Compact transaction-status chip for the recent-transactions feed. */
+function TxnBadge({ status }: { status: string }) {
+  const map: Record<string, { cls: string; Icon: any }> = {
+    paid: { cls: 'bg-emerald-50 text-emerald-700 border-emerald-200', Icon: CheckCircle2 },
+    failed: { cls: 'bg-red-50 text-red-700 border-red-200', Icon: XCircle },
+    pending: { cls: 'bg-amber-50 text-amber-700 border-amber-200', Icon: Clock },
+    refunded: { cls: 'bg-blue-50 text-blue-700 border-blue-200', Icon: RotateCcw },
+    voided: { cls: 'bg-gray-100 text-gray-500 border-gray-200', Icon: Ban },
+  };
+  const { cls, Icon } = map[status] ?? map.pending;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wide ${cls}`}>
+      <Icon size={10} /> {status}
     </span>
   );
 }
