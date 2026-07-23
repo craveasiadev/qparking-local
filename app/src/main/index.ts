@@ -95,9 +95,8 @@ import {
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
   listActivityLogs,
 } from './services/db';
-import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateLaneEvent, simulateCompletedSession, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
-import { startParkingFlow, parkingEvents } from './services/parking-flow';
 import {
   startBackgroundSync, syncRatePolicies, pushRatePolicy, syncParkingSpaces,
   startGatePoll, setGateOpenHandler,
@@ -568,6 +567,9 @@ ipcMain.handle('sessions:delete-bulk', (_e, opts: { ids?: number[]; tab?: 'open'
   return { deleted };
 });
 ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
+  // Abort any in-flight W4G exit charge FIRST, so a PayResult that lands after
+  // this release can't flip the voided txn back to 'paid' and un-release the car.
+  cancelExitInFlight(id);
   // Void any in-flight (pending) payment attempt so the ledger doesn't leave a
   // dangling 'pending' for a session released without a completed payment.
   const openTxn = getOpenTransactionForSession(id);
@@ -750,16 +752,23 @@ ipcMain.handle('app:clear-cache', async () => {
 ipcMain.handle('settings:get', () => getSettings());
 ipcMain.handle('site:get-current', () => getCurrentSite());
 ipcMain.handle('settings:save', (_e, patch) => {
+  const prev = getSettings();
   const next = saveSettings(patch);
-  // If the LPR port changed, restart the server.
-  if (patch.lprWebhookPort !== undefined) {
+  // Restart the LPR listener ONLY when the port actually changes value. The
+  // renderer saves the whole settings object, so patch.lprWebhookPort is
+  // present on every save — restarting each time needlessly drops the listener
+  // and races the re-bind (close() doesn't free the port instantly while live
+  // /live MJPEG streams are open → EADDRINUSE → ingest silently stops).
+  if (next.lprWebhookPort !== prev.lprWebhookPort) {
     startLprServer(next.lprWebhookPort);
   }
-  // W4G TNG: stop / start / restart the callback listener as needed when
-  // the operator flips the master switch or changes the callback port.
-  const tngTouched =
-    patch.tngEnabled !== undefined || patch.tngCallbackPort !== undefined || patch.tngCallbackPorts !== undefined;
-  if (tngTouched) {
+  // W4G TNG callback listener: same rule — only touch it when the master switch
+  // or the callback port(s) actually change value.
+  const tngChanged =
+    next.tngEnabled !== prev.tngEnabled ||
+    next.tngCallbackPort !== prev.tngCallbackPort ||
+    JSON.stringify(next.tngCallbackPorts) !== JSON.stringify(prev.tngCallbackPorts);
+  if (tngChanged) {
     if (next.tngEnabled) startW4gServer();
     else stopW4gServer();
   }

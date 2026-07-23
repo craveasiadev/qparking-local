@@ -29,7 +29,7 @@ import {
   createTransaction, updateTransaction,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
-import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, type PayResultBody } from './payment-tng';
+import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, type PayResultBody } from './payment-tng';
 import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
 
 // Stamped into every parking-flow log line so the operator can verify they're
@@ -88,6 +88,12 @@ interface ActiveExit {
   feeCents: number;
   durationMinutes: number;
   startedAt: number;
+  // Set once the PayRequest is fired, so a manual release can cancel the
+  // in-flight charge at the device (abort the deduction + reject the awaiting
+  // PayRequest). Absent until startTngExitCharge reaches the device call.
+  orderId?: string;
+  deviceHost?: string;
+  devicePort?: number;
 }
 const exitsInFlight = new Map<number, ActiveExit>(); // keyed by laneId — one exit txn per lane
 
@@ -329,6 +335,10 @@ async function startTngExitCharge(
   const orderId = newTngOrderId();
   const inflight = exitsInFlight.get(lane.id);
   if (!inflight) return;
+  // Record how to reach this charge so a manual release can cancel it in-flight.
+  inflight.orderId = orderId;
+  inflight.deviceHost = device.host;
+  inflight.devicePort = device.port;
 
   // Open a payment attempt in the ledger BEFORE driving the device, so a crash
   // mid-charge still leaves a record of the attempt. It resolves to paid/failed
@@ -860,6 +870,30 @@ export function simulateRatePolicyFee(
   const durationMinutes = Math.max(0, Math.floor((exitMs - entryMs) / 60_000));
   const feeCents = computeFee(durationMinutes, policy, entryIso, exitIso);
   return { ok: true, feeCents, durationMinutes, policyName: policy.policyName, currency: policy.currency };
+}
+
+/**
+ * Abort any in-flight exit charge for this session (manual release). Clears the
+ * lane busy-guard and the auto-retrigger counter, then best-effort cancels the
+ * charge at the device. Without this, a PayResult that arrives AFTER the
+ * operator released the car would pass startTngExitCharge's post-await guard
+ * (the lane was still marked in-flight) and flip the voided transaction back to
+ * 'paid' + overwrite the session's 'manual_release' status with 'exited'.
+ * Returns true if an in-flight exit was found and cancelled.
+ */
+export function cancelExitInFlight(sessionId: number): boolean {
+  autoRetriggerCounts.delete(sessionId);
+  for (const [laneId, exit] of exitsInFlight) {
+    if (exit.sessionId !== sessionId) continue;
+    exitsInFlight.delete(laneId);
+    flog(`exit charge cancelled for session=${sessionId} lane=${laneId} (manual release)`);
+    // Reject the awaiting PayRequest + tell the device to abort the deduction.
+    if (exit.orderId) {
+      tngPayCancel(exit.orderId, { host: exit.deviceHost, port: exit.devicePort }).catch(() => null);
+    }
+    return true;
+  }
+  return false;
 }
 
 /**

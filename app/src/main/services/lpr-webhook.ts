@@ -177,6 +177,15 @@ export function startLprServer(port: number) {
 
 export function stopLprServer() {
   if (server) {
+    // Destroy any open /live MJPEG streams first. server.close() only stops
+    // accepting NEW connections — these long-lived streams would otherwise keep
+    // the socket (and the port) alive, so an immediate re-bind on the same port
+    // hits EADDRINUSE. Clients (the Live display tiles) auto-reconnect.
+    for (const set of mjpegClients.values()) {
+      for (const res of set) { try { res.destroy(); } catch { /* ignore */ } }
+      set.clear();
+    }
+    mjpegClients.clear();
     try { server.close(); } catch { /* ignore */ }
     server = null;
   }

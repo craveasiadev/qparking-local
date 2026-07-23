@@ -310,21 +310,22 @@ export async function syncParkingSpaces(): Promise<SyncResult> {
   }
 }
 
-/** Run all three pulls in parallel; one failing doesn't block the others. */
+/** Run all pulls in parallel; one failing doesn't block the others. */
 export async function syncAll(): Promise<{
   policies: SyncResult;
   passes: SyncResult;
   spaces: SyncResult;
   site: SyncResult;
+  activity: SyncResult;
 }> {
-  const [policies, passes, spaces, site] = await Promise.all([
+  const [policies, passes, spaces, site, activity] = await Promise.all([
     syncRatePolicies().catch(toFailedSyncResult),
     syncSeasonPasses().catch(toFailedSyncResult),
     syncParkingSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
     syncActivityLogs().catch(toFailedSyncResult),
   ]);
-  return { policies, passes, spaces, site };
+  return { policies, passes, spaces, site, activity };
 }
 
 export async function handleDebug(): Promise<any> {
