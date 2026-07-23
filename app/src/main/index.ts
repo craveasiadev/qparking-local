@@ -659,7 +659,7 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
         ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
         ?? getSiteDefaultRatePolicy();
     }
-    const feeCents = computeFee(durationMinutes, policy, working.entryAt);
+    const feeCents = computeFee(durationMinutes, policy, working.entryAt, working.exitAt);
 
     working = updateSessionFields(id, { durationMinutes, feeCents });
   }

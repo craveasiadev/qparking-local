@@ -25,6 +25,7 @@ import axios from 'axios';
 import {
   enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
   syncQueueStats, getLane, getTerminal, isBoundToCurrentSite,
+  getSiteDefaultRatePolicy,
   type SyncOp,
 } from './db';
 import { getCloudApi } from './cloud-api';
@@ -97,15 +98,38 @@ function readImageAsBase64(imagePath: string | null | undefined): string | null 
 }
 
 /**
+ * Resolve the cloud "site_id" (really the rate-policy scope key) for a session.
+ * The cloud correlates entry↔exit by (site_id + plate_number), so this MUST be
+ * ENTRY-lane-first and resolved identically for entry/exit/update/delete — even
+ * when the car exits through a different lane whose rate plan differs — or the
+ * exit lands under a different scope and never closes the open entry record.
+ *
+ * Falls back to the exit lane's policy, then the site-default policy, mirroring
+ * how local pricing (parking-flow.handleExit) resolves the rate. This is why a
+ * lane without its own policy still syncs instead of being silently dropped.
+ */
+function resolveScopeId(session: ParkingSession): string | null {
+  const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
+  const exitLane = session.exitLaneId ? getLane(session.exitLaneId) : null;
+  return entryLane?.policyId
+    ?? exitLane?.policyId
+    ?? getSiteDefaultRatePolicy()?.policyId
+    ?? null;
+}
+
+/**
  * Public enqueue helpers. parking-flow / IPC handlers call these instead of
  * fetching directly so retries are guaranteed.
  */
 export function enqueueEntry(session: ParkingSession): void {
-  const lane = session.entryLaneId ? getLane(session.entryLaneId) : null;
-  if (!lane?.policyId) return; // skip — lane lacks a policy, can't attribute
+  const siteId = resolveScopeId(session);
+  if (!siteId) {
+    console.warn(`[cloud-queue] no rate policy or site default for entry plate=${session.plate}; not syncing`);
+    return;
+  }
   const entryImage = readImageAsBase64(session.entryImagePath);
   enqueueSync('session.entry', {
-    site_id: lane.policyId,
+    site_id: siteId,
     plate_number: session.plate,
     entry_time: session.entryAt,
     ...(entryImage ? { entry_image_base64: entryImage } : {}),
@@ -113,15 +137,12 @@ export function enqueueEntry(session: ParkingSession): void {
   scheduleDrain();
 }
 
-// site_id must equal the ENTRY record's site_id — the cloud correlates
-// entry↔exit by (site_id + plate_number). So resolve the lane ENTRY-first here
-// (and in update/delete) even when the car exits through a different lane whose
-// rate plan (scope) differs; otherwise the exit lands under a different site and
-// never closes the open entry record.
 export function enqueueExit(session: ParkingSession): void {
-  const lane = session.entryLaneId ? getLane(session.entryLaneId)
-    : (session.exitLaneId ? getLane(session.exitLaneId) : null);
-  if (!lane?.policyId) return;
+  const siteId = resolveScopeId(session);
+  if (!siteId) {
+    console.warn(`[cloud-queue] no rate policy or site default for exit plate=${session.plate}; not syncing`);
+    return;
+  }
   // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
   // and the freshly-captured exit image. Cloud upsert is idempotent per column
   // so re-uploading the entry image is safe. Payment outcome is NOT sent here —
@@ -129,7 +150,7 @@ export function enqueueExit(session: ParkingSession): void {
   const entryImage = readImageAsBase64(session.entryImagePath);
   const exitImage  = readImageAsBase64(session.exitImagePath);
   enqueueSync('session.exit', {
-    site_id: lane.policyId,
+    site_id: siteId,
     plate_number: session.plate,
     entry_time: session.entryAt,
     exit_time: session.exitAt,
@@ -143,16 +164,18 @@ export function enqueueExit(session: ParkingSession): void {
 }
 
 export function enqueueUpdate(session: ParkingSession): void {
-  const lane = session.entryLaneId ? getLane(session.entryLaneId)
-    : (session.exitLaneId ? getLane(session.exitLaneId) : null);
-  if (!lane?.policyId) return;
+  const siteId = resolveScopeId(session);
+  if (!siteId) {
+    console.warn(`[cloud-queue] no rate policy or site default for update plate=${session.plate}; not syncing`);
+    return;
+  }
   // The same upsertParkingRecord endpoint handles updates — re-posting an
   // open entry refreshes it; posting with an exit_time closes it. So an
   // edit can re-use the entry / exit shapes depending on whether exitAt
   // is set.
   if (session.exitAt) {
     enqueueSync('session.update', {
-      site_id: lane.policyId,
+      site_id: siteId,
       plate_number: session.plate,
       entry_time: session.entryAt,
       exit_time: session.exitAt,
@@ -162,7 +185,7 @@ export function enqueueUpdate(session: ParkingSession): void {
     });
   } else {
     enqueueSync('session.update', {
-      site_id: lane.policyId,
+      site_id: siteId,
       plate_number: session.plate,
       entry_time: session.entryAt,
     });
@@ -198,11 +221,13 @@ export function enqueueTransaction(session: ParkingSession, txn: Transaction): v
 }
 
 export function enqueueDelete(session: ParkingSession): void {
-  const lane = session.entryLaneId ? getLane(session.entryLaneId)
-    : (session.exitLaneId ? getLane(session.exitLaneId) : null);
-  if (!lane?.policyId) return;
+  const siteId = resolveScopeId(session);
+  if (!siteId) {
+    console.warn(`[cloud-queue] no rate policy or site default for delete plate=${session.plate}; not syncing`);
+    return;
+  }
   enqueueSync('session.delete', {
-    site_id: lane.policyId,
+    site_id: siteId,
     plate_number: session.plate,
     entry_time: session.entryAt,
   });
