@@ -203,7 +203,7 @@ export function App() {
   }
 
   return (
-    <div className="min-h-full flex bg-gray-50">
+    <div className="h-full flex bg-gray-50">
       <aside className="w-60 flex-shrink-0 bg-gray-950 text-white flex flex-col">
         <div className="px-5 h-14 flex items-center gap-2 border-b border-white/10">
           <div className="w-7 h-7 rounded-md bg-white text-gray-900 flex items-center justify-center font-bold">Q</div>

@@ -89,9 +89,15 @@ export function Settings() {
   const [rebindPrompt, setRebindPrompt] = useState<{ boundName: string; candidateName: string } | null>(null);
   const [wipeEquipment, setWipeEquipment] = useState(false);
 
-  const [saveSettings, savingSettings] = useAsyncAction(async () => {
-    if (!settings) return null;
-    setSyncError(null);
+  // Persist the on-screen settings, guarding the credential change: if the new
+  // API key/URL resolves to a DIFFERENT site, hold the write and raise the
+  // re-provision prompt instead of silently re-pointing the box. Returns:
+  //   'saved'  — settings are now persisted and safe to use
+  //   'rebind' — a site-switch confirmation is now pending (nothing saved yet)
+  //   'error'  — verification failed (syncError is set)
+  // Shared by Save and by "Sync now" so both act on what's in the fields.
+  async function ensureSaved(): Promise<'saved' | 'rebind' | 'error'> {
+    if (!settings) return 'error';
     const prev = JSON.parse(savedSnapshot) as AppSettings;
     const credsChanged =
       settings.qparkingApiKey !== prev.qparkingApiKey || settings.qparkingBaseUrl !== prev.qparkingBaseUrl;
@@ -100,7 +106,7 @@ export function Settings() {
         baseUrl: settings.qparkingBaseUrl,
         apiKey: settings.qparkingApiKey,
       });
-      if (!preview.ok) { setSyncError(preview.error ?? 'Could not verify the site for this API key'); return; }
+      if (!preview.ok) { setSyncError(preview.error ?? 'Could not verify the site for this API key'); return 'error'; }
       if (preview.changed) {
         // Different site — hold the save and require explicit confirmation.
         setWipeEquipment(false);
@@ -108,12 +114,19 @@ export function Settings() {
           boundName: preview.boundSite?.name ?? '—',
           candidateName: preview.candidateSite?.name ?? '—',
         });
-        return;
+        return 'rebind';
       }
     }
     await persistSettings();
-    setJustSaved(true);
-    setTimeout(() => setJustSaved(false), 2000);
+    return 'saved';
+  }
+
+  const [saveSettings, savingSettings] = useAsyncAction(async () => {
+    setSyncError(null);
+    if (await ensureSaved() === 'saved') {
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
+    }
   });
 
   const [confirmRebind, rebinding] = useAsyncAction(
@@ -147,8 +160,9 @@ export function Settings() {
   const dirty = !!settings && JSON.stringify(settings) !== savedSnapshot;
 
   // ─── qparking cloud sync ───────────────────────────────────────────────────
-  // "Sync now" saves the URL/key currently on screen, pulls every cloud-owned
-  // model (site, policies, passes, spaces) and shows the per-model outcome.
+  // "Sync now" persists the URL/key currently on screen, then pulls every
+  // cloud-owned model (site, policies, passes, spaces) and shows the per-model
+  // outcome — so a just-edited key takes effect without a separate Save.
   const [cloudSyncReport, setCloudSyncReport] = useState<CloudSyncReport | null>(null);
 
   const [runCloudSyncNow, cloudSyncing] = useAsyncAction(
@@ -156,15 +170,11 @@ export function Settings() {
       setSyncError(null);
       if (!settings) return;
       if (!settings.qparkingApiKey) { setSyncError('Set an API key before syncing'); return; }
-      // "Sync now" runs against the SAVED credentials. If the operator edited
-      // the URL/key but hasn't saved, route them through Save first — that path
-      // detects a site switch and prompts for a re-provision instead of syncing
-      // against the wrong (old) key.
-      const prev = JSON.parse(savedSnapshot) as AppSettings;
-      if (settings.qparkingApiKey !== prev.qparkingApiKey || settings.qparkingBaseUrl !== prev.qparkingBaseUrl) {
-        setSyncError('You changed the API key or base URL — click Save first (it will confirm if this switches sites).');
-        return;
-      }
+      // Sync against what's in the fields: persist first, then pull. If the
+      // edited key belongs to a DIFFERENT site, ensureSaved() raises the
+      // re-provision prompt (which does its own pull) instead of syncing the
+      // old site's data against the new key — so we stop here in that case.
+      if (await ensureSaved() !== 'saved') return;
       setCloudSyncReport(await window.bridge.syncAllNow());
     },
     { onError: (error) => setSyncError(String((error as any)?.message ?? error)) },
@@ -317,7 +327,10 @@ export function Settings() {
             )}
           </div>
         )}
-        <p className="text-[11px] text-gray-500 flex items-start gap-1.5"><AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code> and re-pulled every 60 seconds. Equipment (cameras, lanes, terminals) syncs manually from each device page's <strong>Push / Pull to cloud</strong> buttons — not here.</p>
+        <div className="text-[11px] text-gray-500 flex items-start gap-1.5">
+          <AlertCircle size={13} className="flex-shrink-0 mt-0.5" />
+          <p>Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code> and re-pulled every 60 seconds. Equipment (cameras, lanes, terminals) syncs manually from each device page's <strong>Push / Pull to cloud</strong> buttons — not here.</p>
+        </div>
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
