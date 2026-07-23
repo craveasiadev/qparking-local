@@ -205,7 +205,12 @@ function applySchema(db: Database.Database) {
         CHECK (status IN ('pending','paid','failed','refunded','voided')),
       amount_cents INTEGER NOT NULL DEFAULT 0,
       payment_method TEXT,
-      terminal_txn_id TEXT,
+      card_number TEXT,
+      -- Which payment device rang up the charge. terminal_id is the local FK;
+      -- terminal_name is a snapshot kept for display even if the device is
+      -- later renamed/deleted (and to show as the cloud "source").
+      terminal_id INTEGER,
+      terminal_name TEXT,
       order_id TEXT,
       payment_timestamp TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -499,6 +504,32 @@ function applySchema(db: Database.Database) {
   // operators can see which rules are dimmed and the exit flow can skip
   // inactive rules even if they technically match the moment.
   try { db.exec(`ALTER TABLE tariff_rules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`); } catch { /* already there */ }
+
+  // 2026-07-22: persist the W4G PayResult fields that appear in the exit log —
+  // the approval code and the raw pay-type — alongside the settlement summary.
+  for (const col of [
+    'appr_code TEXT',
+    'pay_type INTEGER',
+    // Payment device that rang up the charge (FK + display snapshot).
+    'terminal_id INTEGER',
+    'terminal_name TEXT',
+  ]) {
+    try { db.exec(`ALTER TABLE transactions ADD COLUMN ${col}`); } catch { /* already there */ }
+  }
+  // 2026-07-22: terminal_txn_id actually holds the W4G CardNo, so rename it to
+  // card_number; and drop the STAN / balance / device-state columns we never
+  // populate from the summary PayResult. All guarded (DROP/RENAME COLUMN need
+  // SQLite ≥ 3.35) so fresh + already-migrated installs both no-op.
+  try { db.exec('ALTER TABLE transactions RENAME COLUMN terminal_txn_id TO card_number'); } catch { /* already renamed / fresh */ }
+  try { db.exec('ALTER TABLE transactions DROP COLUMN stan'); } catch { /* absent */ }
+  try { db.exec('ALTER TABLE transactions DROP COLUMN balance_cents'); } catch { /* absent */ }
+  try { db.exec('ALTER TABLE transactions DROP COLUMN device_state'); } catch { /* absent */ }
+  // OrderId is the business key operators identify a charge by (one per
+  // PayRequest attempt). Enforce uniqueness — SQLite lets multiple NULLs
+  // coexist, so non-W4G rows (free / simulated exits with no orderId) are
+  // unaffected. The autoincrement `id` stays the internal PK (sessions +
+  // cloud sync reference it); this index just makes orderId a reliable key.
+  try { db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_order ON transactions(order_id)`); } catch { /* ignore */ }
 
   // 2026-07-22: stable, reinstall-proof device identity for the equipment
   // Push/Pull-to-cloud sync. Every camera/lane/terminal carries a durable
@@ -1103,9 +1134,13 @@ function rowToTransaction(row: any): Transaction {
     status: row.status,
     amountCents: row.amount_cents,
     paymentMethod: row.payment_method ?? null,
-    terminalTxnId: row.terminal_txn_id ?? null,
+    cardNumber: row.card_number ?? null,
+    terminalId: row.terminal_id ?? null,
+    terminalName: row.terminal_name ?? null,
     orderId: row.order_id ?? null,
     paymentTimestamp: row.payment_timestamp ?? null,
+    apprCode: row.appr_code ?? null,
+    payType: row.pay_type ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1117,17 +1152,20 @@ export function createTransaction(patch: {
   status?: TransactionStatus;
   amountCents: number;
   paymentMethod?: string | null;
-  terminalTxnId?: string | null;
+  cardNumber?: string | null;
+  terminalId?: number | null;
+  terminalName?: string | null;
   orderId?: string | null;
   paymentTimestamp?: string | null;
 }): Transaction {
   const localTransactionId = randomUUID();
   const info = getDb().prepare(
-    `INSERT INTO transactions (local_transaction_id, session_id, status, amount_cents, payment_method, terminal_txn_id, order_id, payment_timestamp)
-     VALUES (?,?,?,?,?,?,?,?)`
+    `INSERT INTO transactions (local_transaction_id, session_id, status, amount_cents, payment_method, card_number, terminal_id, terminal_name, order_id, payment_timestamp)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
   ).run(
     localTransactionId, patch.sessionId, patch.status ?? 'pending', patch.amountCents,
-    patch.paymentMethod ?? null, patch.terminalTxnId ?? null, patch.orderId ?? null, patch.paymentTimestamp ?? null,
+    patch.paymentMethod ?? null, patch.cardNumber ?? null, patch.terminalId ?? null, patch.terminalName ?? null,
+    patch.orderId ?? null, patch.paymentTimestamp ?? null,
   );
   return getTransactionById(Number(info.lastInsertRowid))!;
 }
@@ -1137,16 +1175,20 @@ export function updateTransaction(id: number, patch: {
   status?: TransactionStatus;
   amountCents?: number;
   paymentMethod?: string | null;
-  terminalTxnId?: string | null;
+  cardNumber?: string | null;
   paymentTimestamp?: string | null;
+  apprCode?: string | null;
+  payType?: number | null;
 }): Transaction | null {
   const sets: string[] = [];
   const vals: any[] = [];
   if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
   if (patch.amountCents !== undefined) { sets.push('amount_cents = ?'); vals.push(patch.amountCents); }
   if (patch.paymentMethod !== undefined) { sets.push('payment_method = ?'); vals.push(patch.paymentMethod); }
-  if (patch.terminalTxnId !== undefined) { sets.push('terminal_txn_id = ?'); vals.push(patch.terminalTxnId); }
+  if (patch.cardNumber !== undefined) { sets.push('card_number = ?'); vals.push(patch.cardNumber); }
   if (patch.paymentTimestamp !== undefined) { sets.push('payment_timestamp = ?'); vals.push(patch.paymentTimestamp); }
+  if (patch.apprCode !== undefined) { sets.push('appr_code = ?'); vals.push(patch.apprCode); }
+  if (patch.payType !== undefined) { sets.push('pay_type = ?'); vals.push(patch.payType); }
   if (sets.length === 0) return getTransactionById(id);
   sets.push('updated_at = CURRENT_TIMESTAMP');
   vals.push(id);
@@ -1168,6 +1210,64 @@ export function listTransactionsForSession(sessionId: number): Transaction[] {
 export function getOpenTransactionForSession(sessionId: number): Transaction | null {
   const row = getDb().prepare(`SELECT * FROM transactions WHERE session_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`).get(sessionId) as any;
   return row ? rowToTransaction(row) : null;
+}
+
+/** A transaction row enriched with the parent session's plate + lane, for the
+ *  operator-facing Transactions page (which lists EVERY payment attempt across
+ *  all sessions, newest first). */
+export interface TransactionPageRow extends Transaction {
+  plate: string | null;
+  sessionStatus: string | null;
+  entryLaneId: number | null;
+  exitLaneId: number | null;
+}
+
+/** Build the shared WHERE for the transactions list + count (kept in one place
+ *  so the page total always matches the rows). `search` is a contains-match on
+ *  orderId / plate / card number; `status` is an exact transaction-status match. */
+function transactionFilter(opts: { search?: string | null; status?: string | null }): { sql: string; params: any[] } {
+  const where: string[] = [];
+  const params: any[] = [];
+  if (opts.status) { where.push('t.status = ?'); params.push(opts.status); }
+  if (opts.search) {
+    where.push('(t.order_id LIKE ? OR s.plate LIKE ? OR t.card_number LIKE ?)');
+    const like = `%${opts.search}%`;
+    params.push(like, like, like);
+  }
+  return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+}
+
+export function listTransactionsPage(opts: {
+  limit: number;
+  offset: number;
+  search?: string | null;
+  status?: string | null;
+}): TransactionPageRow[] {
+  const { sql, params } = transactionFilter(opts);
+  const rows = getDb().prepare(
+    `SELECT t.*, s.plate AS s_plate, s.status AS s_status,
+            s.entry_lane_id AS s_entry_lane, s.exit_lane_id AS s_exit_lane
+       FROM transactions t
+       LEFT JOIN sessions s ON s.id = t.session_id
+       ${sql}
+       ORDER BY t.id DESC
+       LIMIT ? OFFSET ?`
+  ).all(...params, opts.limit, opts.offset) as any[];
+  return rows.map((r) => ({
+    ...rowToTransaction(r),
+    plate: r.s_plate ?? null,
+    sessionStatus: r.s_status ?? null,
+    entryLaneId: r.s_entry_lane ?? null,
+    exitLaneId: r.s_exit_lane ?? null,
+  }));
+}
+
+export function countTransactions(opts: { search?: string | null; status?: string | null }): number {
+  const { sql, params } = transactionFilter(opts);
+  const row = getDb().prepare(
+    `SELECT COUNT(*) AS n FROM transactions t LEFT JOIN sessions s ON s.id = t.session_id ${sql}`
+  ).get(...params) as { n: number };
+  return row.n;
 }
 
 // ─── sync queue ────────────────────────────────────────────────────────────

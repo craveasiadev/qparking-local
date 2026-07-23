@@ -74,6 +74,10 @@ const api: BridgeApi = {
     policyIdOverride?: string | null;
   }) => ipcRenderer.invoke('sessions:update', id, patch),
 
+  // transactions — payment ledger (every W4G attempt across all sessions)
+  listTransactionsPage: (opts: { limit: number; offset: number; search?: string | null; status?: string | null }) =>
+    ipcRenderer.invoke('transactions:list-page', opts),
+
   // policies
   listRatePolicies: () => ipcRenderer.invoke('policies:list'),
   syncRatePoliciesNow: () => ipcRenderer.invoke('policies:sync'),
@@ -98,6 +102,7 @@ const api: BridgeApi = {
   retryFailedSync: () => ipcRenderer.invoke('sync:retry-failed'),
   clearFailedSync: () => ipcRenderer.invoke('sync:clear-failed'),
   backfillSessions: () => ipcRenderer.invoke('sync:backfill-sessions'),
+  syncTransactionsNow: () => ipcRenderer.invoke('sync:backfill-transactions'),
 
   // app metadata — used by the sidebar to surface the running build version
   getAppVersion: () => ipcRenderer.invoke('app:version'),

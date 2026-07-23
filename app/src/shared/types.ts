@@ -23,6 +23,7 @@ import type {
   Site,
   SyncQueueRow,
   ActivityLog,
+  Transaction,
 } from './db-models';
 
 // ─── runtime status objects (never persisted) ────────────────────────────────
@@ -188,6 +189,23 @@ export interface BridgeApi {
     policyIdOverride?: string | null;
   }): Promise<ParkingSession>;
 
+  // Transactions — every payment attempt (W4G PayRequest → PayResult) across
+  // all sessions, newest first. `search` matches orderId / plate / card number.
+  listTransactionsPage(opts: {
+    limit: number;
+    offset: number;
+    search?: string | null;
+    status?: string | null;
+  }): Promise<{
+    rows: Array<Transaction & {
+      plate: string | null;
+      sessionStatus: string | null;
+      entryLaneId: number | null;
+      exitLaneId: number | null;
+    }>;
+    total: number;
+  }>;
+
   // Mirrored config from qparking SaaS (read-only locally)
   listParkingSpaces(): Promise<ParkingSpace[]>;
   syncParkingSpacesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
@@ -264,6 +282,9 @@ export interface BridgeApi {
   /** Push every existing local session to qparking — one-shot recovery
    *  for sessions that pre-date the auto-sync wiring. */
   backfillSessions(): Promise<{ entries: number; exits: number }>;
+  /** Push every local transaction to the cloud ledger — the Transactions
+   *  page "Sync now" button. Idempotent on local_transaction_id. */
+  syncTransactionsNow(): Promise<{ transactions: number; status: SyncStatus }>;
 
   // Settings + diagnostics
   getSettings(): Promise<AppSettings>;

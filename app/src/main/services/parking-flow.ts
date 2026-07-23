@@ -29,7 +29,7 @@ import {
   createTransaction, updateTransaction,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
-import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog } from './payment-tng';
+import { payRequest as tngPayRequest, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, type PayResultBody } from './payment-tng';
 import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
 
 // Stamped into every parking-flow log line so the operator can verify they're
@@ -338,6 +338,8 @@ async function startTngExitCharge(
     status: 'pending',
     amountCents: feeCents,
     orderId,
+    terminalId: device.id,
+    terminalName: device.name,
   });
   const attemptNo = (autoRetriggerCounts.get(inflight.sessionId) ?? 0) + 1;
   flog(`W4G exit: PayRequest → ${device.name} @ ${device.host}:${device.port} orderId=${orderId} plate=${plate} fare=${feeCents}c txn=${txn.id}`);
@@ -345,7 +347,7 @@ async function startTngExitCharge(
   // only carries orderId) can be traced back to this plate / session / lane.
   w4gLog('info', `EXIT CHARGE start · attempt ${attemptNo}/${MAX_AUTO_RETRIGGERS + 1} · plate=${plate} session=${inflight.sessionId} lane=${lane.id} device="${device.name}" (${device.host}:${device.port}) fare=RM ${(feeCents / 100).toFixed(2)} orderId=${orderId} txn=${txn.id}`, { plate, sessionId: inflight.sessionId, laneId: lane.id, device: device.name, host: device.host, port: device.port, feeCents, orderId, txnId: txn.id, attemptNo });
 
-  let body: { state: string; payType: number; cardNo: string; apprCode: string; payTime: number } | null = null;
+  let body: PayResultBody | null = null;
   try {
     body = await tngPayRequest({
       orderId,
@@ -356,7 +358,7 @@ async function startTngExitCharge(
       timeoutMs: Math.max(15_000, (device.timeoutSeconds ?? 30) * 1000),
       host: device.host,
       port: device.port,
-    }) as any;
+    });
   } catch (e: any) {
     flog(`W4G PayRequest failed/timeout: ${e?.message ?? e}`);
   }
@@ -387,9 +389,11 @@ async function startTngExitCharge(
     autoRetriggerCounts.delete(inflight.sessionId);
     updateTransaction(txn.id, {
       status: 'paid',
-      terminalTxnId: body.cardNo || null,
+      cardNumber: body.cardNo || null,
       paymentMethod: cardScheme,
       paymentTimestamp,
+      apprCode: body.apprCode || null,
+      payType: body.payType,
     });
     // Payment went through → the car may leave: advance the journey to 'exited'.
     recordExit(inflight.sessionId, {
@@ -413,9 +417,11 @@ async function startTngExitCharge(
     // staff can manually release.
     updateTransaction(txn.id, {
       status: 'failed',
-      terminalTxnId: body.cardNo || null,
+      cardNumber: body.cardNo || null,
       paymentMethod: cardScheme,
       paymentTimestamp,
+      apprCode: body.apprCode || null,
+      payType: body.payType,
     });
     w4gLog('error', `EXIT CHARGE result=DECLINED · plate=${plate} session=${inflight.sessionId} orderId=${orderId} txn=${txn.id} state=${body.state} card=${body.cardNo || '-'} — no money taken, gate stays CLOSED.`, { plate, sessionId: inflight.sessionId, orderId, txnId: txn.id, state: body.state });
     parkingEvents.emit('exit-declined', { sessionId: inflight.sessionId, transactionId: txn.id });

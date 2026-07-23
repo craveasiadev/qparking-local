@@ -24,7 +24,7 @@ import fs from 'node:fs';
 import axios from 'axios';
 import {
   enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
-  syncQueueStats, getLane, isBoundToCurrentSite,
+  syncQueueStats, getLane, getTerminal, isBoundToCurrentSite,
   type SyncOp,
 } from './db';
 import { getCloudApi } from './cloud-api';
@@ -176,15 +176,23 @@ export function enqueueUpdate(session: ParkingSession): void {
  * updates the cloud row. The cloud correlates it to the parking record by plate.
  */
 export function enqueueTransaction(session: ParkingSession, txn: Transaction): void {
+  // Resolve the durable device identity so the cloud can attribute the charge
+  // to a specific terminal even after a local id renumber / device delete.
+  const terminal = txn.terminalId ? getTerminal(txn.terminalId) : null;
   enqueueSync('transaction.upsert', {
     local_transaction_id: txn.localTransactionId,
     plate_number: session.plate,
     status: txn.status,
     amount: (txn.amountCents / 100).toFixed(2),
     payment_method: txn.paymentMethod ?? null,
-    terminal_txn_id: txn.terminalTxnId ?? null,
+    card_number: txn.cardNumber ?? null,
     order_id: txn.orderId ?? null,
     payment_timestamp: txn.paymentTimestamp ?? null,
+    appr_code: txn.apprCode ?? null,
+    pay_type: txn.payType ?? null,
+    // Which payment device rang up the charge — the cloud "source" column.
+    terminal_name: txn.terminalName ?? null,
+    terminal_external_id: terminal?.externalId ?? null,
   });
   scheduleDrain();
 }
@@ -345,4 +353,27 @@ export function backfillAllSessions(): { entries: number; exits: number } {
   }
   scheduleDrain();
   return { entries, exits };
+}
+
+/**
+ * Backfill: enqueue every local transaction into the sync queue so the cloud
+ * ledger catches up on rows that never got pushed (pre-dating the auto-sync
+ * wiring, imported/manual rows, or attempts made while the cloud was down).
+ * Idempotent on the SaaS side (upsert keyed on local_transaction_id), so
+ * re-running is safe — a "paid" row just updates its cloud twin. Transactions
+ * whose session is gone are skipped (the cloud correlates by the session's
+ * plate). Returns the count enqueued.
+ */
+export function backfillAllTransactions(): { transactions: number } {
+  const db = require('./db') as typeof import('./db');
+  const rows = db.listTransactionsPage({ limit: 100_000, offset: 0 });
+  let transactions = 0;
+  for (const txn of rows) {
+    const session = db.getSessionById(txn.sessionId);
+    if (!session) continue; // no session → can't correlate by plate
+    enqueueTransaction(session, txn);
+    transactions++;
+  }
+  scheduleDrain();
+  return { transactions };
 }

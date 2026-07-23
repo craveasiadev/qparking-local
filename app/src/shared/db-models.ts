@@ -165,10 +165,19 @@ export interface Transaction {
   amountCents: number;
   /** Card scheme from the W4G reader (VISA_W4G | TNG_CARD | ...). */
   paymentMethod: string | null;
-  terminalTxnId: string | null;
+  /** W4G CardNo — the card's manufacturing number from the PayResult. */
+  cardNumber: string | null;
+  /** Payment device that rang up the charge — local FK id + name snapshot. */
+  terminalId: number | null;
+  terminalName: string | null;
   /** W4G order id assigned to the PayRequest. */
   orderId: string | null;
   paymentTimestamp: string | null;
+  // ── W4G PayResult extras (2026-07-22) ──────────────────────────────────
+  /** Bank approval code (APPR_CODE) — blank for TNG-wallet taps. */
+  apprCode: string | null;
+  /** Raw W4G pay type: 0 TNG card, 1 Visa, 2 Mastercard, 3 MCCS, 4 TNG e-wallet. */
+  payType: number | null;
   createdAt: string;
   updatedAt: string;
 }

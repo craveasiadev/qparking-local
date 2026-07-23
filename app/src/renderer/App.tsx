@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
-  Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, X,
+  Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, X, Receipt,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -10,6 +10,7 @@ import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
 import { ParkingPolicies } from './pages/ParkingPolicies';
 import { Sessions } from './pages/Sessions';
+import { Transactions } from './pages/Transactions';
 import { Sites } from './pages/Sites';
 import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
@@ -20,7 +21,7 @@ import { NotConnectedNotice } from './components/NotConnectedNotice';
 import { useCurrentSite } from './hooks/useCurrentSite';
 
 type Page =
-  | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions'
+  | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions' | 'transactions'
   // Parking Management
   | 'parking-spaces' | 'season-passes'
   // Pricing & Tariffs
@@ -48,6 +49,7 @@ const SECTIONS: NavSection[] = [
       { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
       { id: 'live', label: 'Live display', icon: MonitorPlay },
       { id: 'sessions', label: 'Sessions', icon: ListOrdered },
+      { id: 'transactions', label: 'Transactions', icon: Receipt },
       { id: 'cameras', label: 'LPR cameras', icon: Camera },
       { id: 'terminals', label: 'Payment terminals', icon: CreditCard },
       { id: 'lanes', label: 'Lanes', icon: Map },
@@ -279,6 +281,7 @@ export function App() {
           {page === 'terminals' && <Terminals devMode={devMode} />}
           {page === 'lanes' && <Lanes />}
           {page === 'sessions' && <Sessions devMode={devMode} />}
+          {page === 'transactions' && <Transactions />}
           {page === 'parking-spaces' && <ParkingSpaces />}
           {page === 'season-passes' && <SeasonPasses />}
           {page === 'policies' && <ParkingPolicies />}

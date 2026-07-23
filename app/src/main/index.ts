@@ -89,6 +89,7 @@ import {
   countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
   updateSessionFields,
   getTransactionById, getOpenTransactionForSession, updateTransaction,
+  listTransactionsPage, countTransactions,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
@@ -109,7 +110,7 @@ import { openFaceGate, pingFaceGate } from './services/face-gate';
 import {
   startSyncDrain, syncEvents, getSyncStatus, drainNow,
   enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete, enqueueTransaction,
-  backfillAllSessions,
+  backfillAllSessions, backfillAllTransactions,
 } from './services/cloud-queue';
 import {
   listFailedSync, retryAllFailedSync, clearFailedSync,
@@ -529,6 +530,13 @@ ipcMain.handle('sessions:page', (_e, opts: {
   }),
 }));
 
+// Transactions ledger — every payment attempt across all sessions, newest
+// first, with the parent session's plate/lane joined for display.
+ipcMain.handle('transactions:list-page', (_e, opts: { limit: number; offset: number; search?: string | null; status?: string | null }) => ({
+  rows: listTransactionsPage(opts),
+  total: countTransactions({ search: opts.search ?? null, status: opts.status ?? null }),
+}));
+
 // Manual retrigger — synthesizes an exit LPR event for a session so the
 // normal parking-flow can drive the terminal for a stuck / mis-read exit.
 ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number, laneId?: number | null) => retriggerSessionExit(sessionId, laneId));
@@ -672,6 +680,13 @@ ipcMain.handle('sync:backfill-sessions', async () => {
   // Kick a drain right away so the queue starts flushing immediately.
   await drainNow();
   return result;
+});
+// Push every local transaction to the cloud ledger (Transactions page "Sync
+// now"). Enqueues then drains, returning the count queued + resulting status.
+ipcMain.handle('sync:backfill-transactions', async () => {
+  const result = backfillAllTransactions();
+  const status = await drainNow();
+  return { ...result, status };
 });
 
 ipcMain.handle('policies:list', () => listRatePolicies());
