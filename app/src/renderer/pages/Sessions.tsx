@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
-  Trash2, Loader2, ChevronLeft, ChevronRight, CheckSquare, Square,
-  Image as ImageIcon, Zap, ArrowDown, ArrowUp, Eye, Filter,
+  Trash2, Loader2, ChevronLeft, ChevronRight,
+  Image as ImageIcon, Zap, ArrowDown, ArrowUp, MapPin,
   LogIn, LogOut, Clock, Banknote,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
@@ -17,14 +17,32 @@ const PAGE_SIZE = 20;
  *  the tariff_rules schedule), so the page response attaches the real number. */
 type SessionRow = ParkingSession & { livePreviewFeeCents?: number | null };
 
-interface DateRangeFilters {
-  entryFrom: string;
-  entryTo: string;
-  exitFrom: string;
-  exitTo: string;
+/** Local YYYY-MM-DD for today (avoids the UTC off-by-one from toISOString). */
+function todayStr(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+/** A YYYY-MM-DD calendar day -> the ISO instant at its 00:00:00 local start. */
+function dayStartIso(d: string): string | null {
+  return d ? new Date(`${d}T00:00:00`).toISOString() : null;
+}
+/** A YYYY-MM-DD calendar day -> the ISO instant at its 23:59:59.999 local end. */
+function dayEndIso(d: string): string | null {
+  return d ? new Date(`${d}T23:59:59.999`).toISOString() : null;
 }
 
-const EMPTY_RANGE: DateRangeFilters = { entryFrom: '', entryTo: '', exitFrom: '', exitTo: '' };
+/** Payment-status dropdown options — mirrors the operator Parking Activity page
+ *  (All Status + the six payment outcomes). */
+const STATUS_OPTIONS: { key: string; label: string }[] = [
+  { key: 'all', label: 'All Status' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'paid', label: 'Paid' },
+  { key: 'free', label: 'Free' },
+  { key: 'declined', label: 'Declined' },
+  { key: 'manual_release', label: 'Manual Release' },
+  { key: 'cancelled', label: 'Cancelled' },
+];
 
 // ─── Esc-to-close, stacked ───────────────────────────────────────────────────
 // A module-level stack so that when modals nest (e.g. the delete-confirm over
@@ -232,25 +250,20 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [page, setPage] = useState(0);
   const [plateSearch, setPlateSearch] = useState('');
   const [debouncedPlateSearch, setDebouncedPlateSearch] = useState('');
-  const [range, setRange] = useState<DateRangeFilters>(EMPTY_RANGE);
-  const [debouncedRange, setDebouncedRange] = useState<DateRangeFilters>(EMPTY_RANGE);
+  // Single entry-date range + one payment-status dropdown. Dates default to
+  // empty (no range = all time); status defaults to "pending" so unpaid /
+  // still-inside cars surface first, which is what an operator usually needs.
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState('pending');
-  const [sessionStatusFilter, setSessionStatusFilter] = useState('');
-  const [filtersOpen, setFiltersOpen] = useState(false);
   useEffect(() => {
     const h = setTimeout(() => setDebouncedPlateSearch(plateSearch.trim()), 300);
     return () => clearTimeout(h);
   }, [plateSearch]);
-  useEffect(() => {
-    const h = setTimeout(() => setDebouncedRange(range), 300);
-    return () => clearTimeout(h);
-  }, [range]);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [viewing, setViewing] = useState<SessionRow | null>(null);
   const [editing, setEditing] = useState<ParkingSession | null>(null);
   const [releasing, setReleasing] = useState<{ session: SessionRow; laneId: number | null } | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
@@ -262,11 +275,6 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const pageCount = Math.max(1, Math.ceil(totalForTab / PAGE_SIZE));
   const offset = page * PAGE_SIZE;
 
-  const activeFilterCount = useMemo(() => {
-    return (['entryFrom', 'entryTo', 'exitFrom', 'exitTo'] as const)
-      .filter((k) => debouncedRange[k]).length;
-  }, [debouncedRange]);
-
   async function fetchPage() {
     setPageLoading(true);
     try {
@@ -275,14 +283,14 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         limit: PAGE_SIZE,
         offset,
         plateSearch: debouncedPlateSearch || null,
-        entryFrom: debouncedRange.entryFrom ? toIso(debouncedRange.entryFrom) : null,
-        entryTo: debouncedRange.entryTo ? toIso(debouncedRange.entryTo) : null,
-        exitFrom: debouncedRange.exitFrom ? toIso(debouncedRange.exitFrom) : null,
-        exitTo: debouncedRange.exitTo ? toIso(debouncedRange.exitTo) : null,
-        // A plate search always spans EVERY status — you're hunting a specific
-        // car, so scoping to "pending" would hide it if it already paid/left.
-        status: debouncedPlateSearch ? null : (sessionStatusFilter || null),
-        paymentStatus: debouncedPlateSearch ? null : (statusFilter || null),
+        // The date range filters on ENTRY day (whole-day bounds), matching the
+        // operator page's start_date / end_date.
+        entryFrom: dayStartIso(startDate),
+        entryTo: dayEndIso(endDate),
+        exitFrom: null,
+        exitTo: null,
+        status: null,
+        paymentStatus: statusFilter === 'all' ? null : statusFilter,
       });
       setRows(result.rows);
       setCounts(result.counts);
@@ -320,13 +328,12 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     await Promise.all([fetchPage(), fetchAux()]);
   });
 
-  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter, sessionStatusFilter]);
+  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, startDate, endDate, statusFilter]);
   useEffect(() => {
     const off = window.bridge.onEvent('session', () => { void fetchPage(); });
     return off;
-  }, [tab, page, debouncedPlateSearch, debouncedRange, statusFilter, sessionStatusFilter]);
-  useEffect(() => { setPage(0); }, [debouncedPlateSearch, debouncedRange, statusFilter, sessionStatusFilter]);
-  useEffect(() => { setSelected(new Set()); }, [tab, page]);
+  }, [tab, page, debouncedPlateSearch, startDate, endDate, statusFilter]);
+  useEffect(() => { setPage(0); }, [debouncedPlateSearch, startDate, endDate, statusFilter]);
 
   function policyForSession(s: ParkingSession): RatePolicy | null {
     const laneId = s.exitLaneId ?? s.entryLaneId;
@@ -341,37 +348,9 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     return lanes.find((l) => l.id === id)?.name ?? `Lane #${id}`;
   }
 
-  const allOnPageSelected = useMemo(
-    () => rows.length > 0 && rows.every((r) => selected.has(r.id)),
-    [rows, selected]
-  );
-  function togglePageSelection() {
-    if (allOnPageSelected) {
-      const next = new Set(selected);
-      rows.forEach((r) => next.delete(r.id));
-      setSelected(next);
-    } else {
-      const next = new Set(selected);
-      rows.forEach((r) => next.add(r.id));
-      setSelected(next);
-    }
-  }
-  function toggleRow(id: number) {
-    const next = new Set(selected);
-    next.has(id) ? next.delete(id) : next.add(id);
-    setSelected(next);
-  }
-
   const [runDeleteOne, deletingOne] = useAsyncAction(async (id: number) => {
     await window.bridge.deleteSession(id);
     setViewing(null);
-    await fetchPage();
-  });
-
-  const [runBulkDelete, bulkDeleting] = useAsyncAction(async () => {
-    await window.bridge.deleteSessionsBulk({ ids: [...selected] });
-    setSelected(new Set());
-    setConfirmDelete(false);
     await fetchPage();
   });
 
@@ -384,25 +363,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     }
   });
 
-  function clearAllFilters() {
-    setPlateSearch('');
-    setRange(EMPTY_RANGE);
-    setStatusFilter('');
-    setSessionStatusFilter('');
-  }
-
-  // Set the entry-date range to a common preset (local wall-clock → the
-  // datetime-local strings RangeInput expects).
-  function applyEntryPreset(kind: 'today' | '7d' | '30d') {
-    const now = new Date();
-    const from = new Date(now);
-    if (kind === 'today') from.setHours(0, 0, 0, 0);
-    else if (kind === '7d') from.setDate(now.getDate() - 7);
-    else from.setDate(now.getDate() - 30);
-    setRange((r) => ({ ...r, entryFrom: toLocalInput(from.toISOString()), entryTo: toLocalInput(now.toISOString()) }));
-  }
-
-  const hasAnyFilter = !!debouncedPlateSearch || activeFilterCount > 0 || !!statusFilter || !!sessionStatusFilter;
+  const statusLabel = STATUS_OPTIONS.find((o) => o.key === statusFilter)?.label ?? 'All Status';
+  const hasAnyFilter = !!debouncedPlateSearch || statusFilter !== 'all' || !!startDate || !!endDate;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
@@ -421,133 +383,72 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         </button>
       </header>
 
-      {/* Search + status + date filters + bulk-action bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
-        <div className="flex flex-1 items-center gap-2 min-w-0">
-          <div className="relative flex-1 sm:max-w-sm">
-            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+      {/* Filters — one row: plate search + entry-date range + payment-status
+          dropdown, with a result count + active-filter chips underneath. Mirrors
+          the operator Parking Activity page. */}
+      <div className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4 mb-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          {/* Plate search */}
+          <div className="relative flex-1 min-w-0">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input
               type="text"
               value={plateSearch}
               onChange={(e) => setPlateSearch(e.target.value)}
-              placeholder="Search plate… (all statuses)"
-              className="w-full h-9 pl-8 pr-8 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
+              placeholder='Search plate — "AB" matches ABC + ABX'
+              className="w-full h-9 pl-9 pr-9 border border-gray-200 rounded-lg text-sm focus:border-gray-900 outline-none"
             />
             {plateSearch && (
               <button
                 onClick={() => setPlateSearch('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
               >
                 <X size={13} />
               </button>
             )}
           </div>
-          <select
-            value={sessionStatusFilter}
-            onChange={(e) => setSessionStatusFilter(e.target.value)}
-            disabled={!!plateSearch.trim()}
-            title={plateSearch.trim() ? 'Plate search covers every status' : 'Filter by session status'}
-            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <option value="">All status</option>
-            <option value="entered">Entered</option>
-            <option value="exited">Exited</option>
-            <option value="manual_release">Manual release</option>
-          </select>
+
+          {/* Entry-date range */}
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+              From
+              <input type="date" value={startDate} max={endDate} onChange={(e) => setStartDate(e.target.value)}
+                className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white" />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+              To
+              <input type="date" value={endDate} min={startDate} onChange={(e) => setEndDate(e.target.value)}
+                className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white" />
+            </label>
+            <button
+              type="button"
+              onClick={() => { const t = todayStr(); setStartDate(t); setEndDate(t); }}
+              className="h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-semibold text-gray-700"
+            >
+              Today
+            </button>
+          </div>
+
+          {/* Payment-status dropdown */}
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            disabled={!!plateSearch.trim()}
-            title={plateSearch.trim() ? 'Plate search covers every payment status' : 'Filter by payment status'}
-            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Filter by payment status"
+            className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white shrink-0"
           >
-            <option value="">All payment</option>
-            <option value="paid">Paid</option>
-            <option value="pending">Pending</option>
-            <option value="declined">Declined</option>
-            <option value="free">Free</option>
-            <option value="cancelled">Cancelled</option>
-            <option value="manual_release">Manual release</option>
+            {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
           </select>
-          <button
-            onClick={() => setFiltersOpen((o) => !o)}
-            className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border text-xs font-bold uppercase tracking-wide ${
-              filtersOpen || activeFilterCount > 0
-                ? 'border-gray-900 bg-gray-900 text-white'
-                : 'border-gray-200 hover:border-gray-900'
-            }`}
-            title="Filter by entry/exit date range — use when the LPR mis-read at a known time"
-          >
-            <Filter size={13} />
-            Filters
-            {activeFilterCount > 0 && (
-              <span className="ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-gray-900 text-[10px] font-bold">
-                {activeFilterCount}
-              </span>
-            )}
-          </button>
         </div>
 
-        {selected.size > 0 && (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-bold text-gray-700">{selected.size} selected</span>
-            <button
-              onClick={() => setConfirmDelete(true)}
-              disabled={bulkDeleting}
-              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
-            >
-              {bulkDeleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-              Delete selected
-            </button>
-            <button onClick={() => setSelected(new Set())} className="text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-gray-800 px-2">
-              Clear
-            </button>
-          </div>
-        )}
+        {/* Result count + active filter chips */}
+        <div className="mt-2.5 flex items-center gap-2 flex-wrap text-[11px]">
+          <span className="text-gray-500">Showing</span>
+          <span className="font-bold text-gray-900">{counts.total}</span>
+          <span className="text-gray-500">session{counts.total === 1 ? '' : 's'}</span>
+          {debouncedPlateSearch && <ActiveChip label={`"${debouncedPlateSearch}"`} onClear={() => setPlateSearch('')} />}
+          {statusFilter !== 'all' && <ActiveChip label={statusLabel} onClear={() => setStatusFilter('all')} />}
+        </div>
       </div>
-
-      {/* Expandable date/time filter panel — for tracing LPR misreads by
-          narrowing the search to the exact time window when the driver came
-          in or out, even when the plate text is corrupted. */}
-      {filtersOpen && (
-        <div className="mb-3 rounded-xl border border-gray-200 bg-gray-50 p-4">
-          <div className="flex items-center gap-2 mb-3 flex-wrap">
-            <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Quick entry range</span>
-            {([['today', 'Today'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']] as const).map(([k, label]) => (
-              <button key={k} onClick={() => applyEntryPreset(k)}
-                className="h-7 px-2.5 rounded-md border border-gray-200 bg-white hover:border-gray-900 text-[11px] font-bold uppercase tracking-wide text-gray-600">
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <RangeInput
-              label="Entry time"
-              hint="e.g. driver entered ~14:30 today — set a ±5 min window"
-              from={range.entryFrom}
-              to={range.entryTo}
-              onChange={(from, to) => setRange((r) => ({ ...r, entryFrom: from, entryTo: to }))}
-            />
-            <RangeInput
-              label="Exit time"
-              hint="e.g. exit LPR triggered at 15:07 — narrow to that minute"
-              from={range.exitFrom}
-              to={range.exitTo}
-              onChange={(from, to) => setRange((r) => ({ ...r, exitFrom: from, exitTo: to }))}
-            />
-          </div>
-          {hasAnyFilter && (
-            <div className="mt-3 flex items-center justify-end">
-              <button
-                onClick={clearAllFilters}
-                className="text-[11px] font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900"
-              >
-                Clear all filters
-              </button>
-            </div>
-          )}
-        </div>
-      )}
 
       {devMode && <DevSimulator lanes={lanes} onSessionCreated={() => runRefresh()} />}
 
@@ -565,43 +466,25 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       {/* DESKTOP/TABLET TABLE */}
       <div className={`hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[820px]">
+          <table className="w-full text-sm min-w-[900px]">
             <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
               <tr>
-                <th className="w-10 px-3 py-2">
-                  <button onClick={togglePageSelection} className="inline-flex items-center text-gray-500 hover:text-gray-900" title={allOnPageSelected ? 'Deselect page' : 'Select page'}>
-                    {allOnPageSelected ? <CheckSquare size={15} /> : <Square size={15} />}
-                  </button>
-                </th>
-                <th className="text-left px-3 py-2 font-bold">Plate</th>
-                <th className="text-left px-3 py-2 font-bold">Captures</th>
-                <th className="text-left px-3 py-2 font-bold">Entered</th>
-                <th className="text-left px-3 py-2 font-bold">Exited</th>
-                <th className="text-right px-3 py-2 font-bold">Duration</th>
-                <th className="text-right px-3 py-2 font-bold">Fee</th>
-                <th className="text-left px-3 py-2 font-bold">Status</th>
-                <th className="text-left px-3 py-2 font-bold">Payment</th>
-                <th className="px-3 py-2"></th>
+                <th className="text-left px-3 py-2.5 font-bold">Plate</th>
+                <th className="text-left px-3 py-2.5 font-bold">Captures</th>
+                <th className="text-left px-3 py-2.5 font-bold">Entered</th>
+                <th className="text-left px-3 py-2.5 font-bold">Exited</th>
+                <th className="text-right px-3 py-2.5 font-bold">Duration</th>
+                <th className="text-left px-3 py-2.5 font-bold">Payment</th>
+                <th className="text-left px-3 py-2.5 font-bold">Space</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((s) => {
                 const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
-                let displayFeeCents: number | null = s.feeCents ?? null;
-                let isLivePreview = false;
-                if (displayFeeCents == null && !s.exitAt && s.livePreviewFeeCents != null) {
-                  displayFeeCents = s.livePreviewFeeCents; isLivePreview = true;
-                }
-                const isSelected = selected.has(s.id);
                 return (
                   <tr key={s.id} onClick={() => setViewing(s)}
-                    className={`border-t border-gray-100 cursor-pointer hover:bg-gray-50 ${isSelected ? 'bg-blue-50/40 hover:bg-blue-50/60' : ''}`}>
-                    <td className="px-3 py-2">
-                      <button onClick={(e) => { e.stopPropagation(); toggleRow(s.id); }} className="inline-flex items-center text-gray-500 hover:text-gray-900">
-                        {isSelected ? <CheckSquare size={15} /> : <Square size={15} />}
-                      </button>
-                    </td>
-                    <td className="px-3 py-2 font-mono font-bold">{s.plate}</td>
+                    className="border-t border-gray-100 cursor-pointer hover:bg-gray-50">
+                    <td className="px-3 py-2 font-mono font-bold tracking-wider">{s.plate}</td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1">
                         <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
@@ -609,30 +492,17 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                       </div>
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(s.entryAt)}</td>
-                    <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(s.exitAt)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-600">
+                      {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}
+                    </td>
                     <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
-                    <td className="px-3 py-2 text-right font-mono text-xs">
-                      {displayFeeCents != null
-                        ? <span className={isLivePreview ? 'text-amber-700' : ''} title={isLivePreview ? 'Live preview — final fee charged at exit' : undefined}>
-                            RM {(displayFeeCents / 100).toFixed(2)}{isLivePreview && '*'}
-                          </span>
-                        : '—'}
-                    </td>
-                    <td className="px-3 py-2"><SessionStatusBadge status={s.status} /></td>
-                    <td className="px-3 py-2"><StatusBadge status={s.paymentStatus} /></td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap">
-                      <button
-                        onClick={() => setViewing(s)}
-                        className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900 border border-gray-200 hover:border-gray-900 rounded-md px-2 py-1"
-                      >
-                        <Eye size={12} /> View
-                      </button>
-                    </td>
+                    <td className="px-3 py-2"><PaymentCell status={s.paymentStatus} method={s.cardScheme} /></td>
+                    <td className="px-3 py-2 text-xs text-gray-600"><span className="text-gray-400">—</span></td>
                   </tr>
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={10} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
+                <tr><td colSpan={7} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
               )}
             </tbody>
           </table>
@@ -648,54 +518,25 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         )}
         {rows.map((s) => {
           const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
-          let displayFeeCents: number | null = s.feeCents ?? null;
-          let isLivePreview = false;
-          if (displayFeeCents == null && !s.exitAt && s.livePreviewFeeCents != null) {
-            displayFeeCents = s.livePreviewFeeCents; isLivePreview = true;
-          }
-          const isSelected = selected.has(s.id);
           return (
             <div key={s.id} onClick={() => setViewing(s)}
-              className={`rounded-xl border bg-white p-3 cursor-pointer active:bg-gray-50 ${isSelected ? 'border-blue-300 bg-blue-50/30' : 'border-gray-200'}`}>
-              <div className="flex items-start gap-3">
-                <button onClick={(e) => { e.stopPropagation(); toggleRow(s.id); }} className="mt-0.5 text-gray-500">
-                  {isSelected ? <CheckSquare size={17} /> : <Square size={17} />}
-                </button>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono font-bold text-base">{s.plate}</span>
-                    <div className="flex items-center gap-1">
-                      <SessionStatusBadge status={s.status} />
-                      <StatusBadge status={s.paymentStatus} />
-                    </div>
-                  </div>
-                  <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                    <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
-                    <span><span className="text-gray-400">Out:</span> {fmtDateTime(s.exitAt)}</span>
-                    <span className="font-mono"><span className="text-gray-400">Dur:</span> {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</span>
-                    <span className="font-mono">
-                      <span className="text-gray-400">Fee:</span>{' '}
-                      {displayFeeCents != null
-                        ? <span className={isLivePreview ? 'text-amber-700' : ''}>RM {(displayFeeCents / 100).toFixed(2)}{isLivePreview && '*'}</span>
-                        : '—'}
-                    </span>
-                  </div>
-                  {(s.entryImagePath || s.exitImagePath) && (
-                    <div className="mt-2 flex items-center gap-1">
-                      <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
-                      <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
-                    </div>
-                  )}
-                  <div className="mt-2">
-                    <button
-                      onClick={() => setViewing(s)}
-                      className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide font-bold text-gray-700 hover:text-gray-900 border border-gray-200 hover:border-gray-900 rounded-md px-2 py-1"
-                    >
-                      <Eye size={12} /> View details
-                    </button>
-                  </div>
-                </div>
+              className="rounded-xl border border-gray-200 bg-white p-3 cursor-pointer active:bg-gray-50">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono font-bold text-base tracking-wider">{s.plate}</span>
+                <PaymentCell status={s.paymentStatus} method={s.cardScheme} />
               </div>
+              <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
+                <span><span className="text-gray-400">Out:</span> {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}</span>
+                <span className="font-mono"><span className="text-gray-400">Dur:</span> {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</span>
+                <span><span className="text-gray-400">Space:</span> —</span>
+              </div>
+              {(s.entryImagePath || s.exitImagePath) && (
+                <div className="mt-2 flex items-center gap-1">
+                  <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
+                  <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
+                </div>
+              )}
             </div>
           );
         })}
@@ -729,12 +570,6 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           </div>
         )}
       </div>
-
-      {rows.some((s) => !s.exitAt && s.feeCents == null) && (
-        <p className="mt-3 text-[11px] text-gray-500">
-          <span className="text-amber-700 font-bold">RM 0.00*</span> = live preview using the entry lane's current rate. Final fee is locked in at exit.
-        </p>
-      )}
 
       {viewing && (
         <ViewSessionModal
@@ -777,70 +612,39 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       {previewImage && (
         <ImagePreviewModal src={previewImage} onClose={() => setPreviewImage(null)} />
       )}
-
-      {confirmDelete && (
-        <ConfirmModal
-          title={`Delete ${selected.size} session${selected.size === 1 ? '' : 's'}?`}
-          body={`The selected session${selected.size === 1 ? '' : 's'} will be permanently removed from the local database. This cannot be undone.`}
-          confirmLabel="Delete"
-          confirmTone="red"
-          busy={bulkDeleting}
-          onClose={() => setConfirmDelete(false)}
-          onConfirm={() => runBulkDelete()}
-        />
-      )}
     </div>
   );
 }
 
-/**
- * Entry + exit datetime range pair. Uses <input type="datetime-local"> so the
- * operator picks a wall-clock instant; we translate to ISO before shipping
- * the query. Both bounds are optional — leaving one blank makes it half-open.
- */
-function RangeInput({
-  label, hint, from, to, onChange,
-}: {
-  label: string;
-  hint: string;
-  from: string;
-  to: string;
-  onChange: (from: string, to: string) => void;
-}) {
+/** A removable "active filter" pill for the filter bar — mirrors the operator
+ *  Parking Activity page's ActiveChip. */
+function ActiveChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-700">{label}</label>
-        {(from || to) && (
-          <button
-            onClick={() => onChange('', '')}
-            className="text-[10px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900"
-          >
-            Clear
-          </button>
-        )}
-      </div>
-      <p className="text-[10px] text-gray-500 mb-1.5">{hint}</p>
-      <div className="grid grid-cols-2 gap-2">
-        <div>
-          <label className="block text-[9px] uppercase tracking-wide text-gray-500 mb-0.5">From</label>
-          <input
-            type="datetime-local"
-            className="w-full h-9 px-2 border border-gray-300 rounded-md text-xs focus:border-gray-900 outline-none bg-white"
-            value={from}
-            onChange={(e) => onChange(e.target.value, to)}
-          />
-        </div>
-        <div>
-          <label className="block text-[9px] uppercase tracking-wide text-gray-500 mb-0.5">To</label>
-          <input
-            type="datetime-local"
-            className="w-full h-9 px-2 border border-gray-300 rounded-md text-xs focus:border-gray-900 outline-none bg-white"
-            value={to}
-            onChange={(e) => onChange(from, e.target.value)}
-          />
-        </div>
-      </div>
+    <span className="inline-flex items-center gap-1 rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-semibold text-white">
+      {label}
+      <button onClick={onClear} className="rounded-full p-0.5 hover:bg-white/20">
+        <X size={10} />
+      </button>
+    </span>
+  );
+}
+
+/** The "on site" pill shown in the Exited column while a session is still open. */
+function OnSiteBadge() {
+  return (
+    <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold uppercase px-2 py-0.5">
+      On site
+    </span>
+  );
+}
+
+/** Payment status pill + (optional) card scheme underneath — mirrors the
+ *  operator Parking Activity page's Payment cell. */
+function PaymentCell({ status, method }: { status: ParkingSession['paymentStatus']; method?: string | null }) {
+  return (
+    <div className="inline-flex flex-col items-start gap-0.5">
+      <StatusBadge status={status} />
+      {method && <span className="text-[10px] text-gray-500">{method}</span>}
     </div>
   );
 }
