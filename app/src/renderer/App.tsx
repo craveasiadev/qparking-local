@@ -110,7 +110,10 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
     case 'exit-terminal-offline':
       return { title: 'Payment terminal offline', detail: 'The terminal isn\'t reachable. Check its power and network connection.' };
     case 'exit-tng-not-configured':
-      return { title: 'Payment device not configured', detail: 'Set the W4G device host / port for this lane\'s terminal, then retrigger.' };
+      return {
+        title: 'Charge refused — payment callbacks are not running',
+        detail: `${d?.reason ? `${String(d.reason).charAt(0).toUpperCase()}${String(d.reason).slice(1)}. ` : ''}Nothing was charged and the barrier stays closed: a tap would have deducted money this app could not record. Fix it in Settings, then retrigger the exit — or release the car manually from Sessions.`,
+      };
     case 'exit-charge-crashed':
       return { title: 'Payment failed unexpectedly', detail: d?.message ? String(d.message) : 'The charge crashed mid-way. Retrigger the exit.' };
     case 'exit-busy':

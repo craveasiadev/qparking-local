@@ -26,10 +26,10 @@ import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRu
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
-  createTransaction, updateTransaction, findBlockedPlate,
+  createTransaction, updateTransaction, findBlockedPlate, findLastClosedSessionByPlate,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
-import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, type PayResultBody } from './payment-tng';
+import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, payResultListenerReady, type PayResultBody } from './payment-tng';
 import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
 
 // Stamped into every parking-flow log line so the operator can verify they're
@@ -80,6 +80,33 @@ const AUTO_RETRIGGER_DELAY_MS = 2_000;
 const MAX_AUTO_RETRIGGERS = 3;
 // attempts counted per sessionId; cleared on success / exit / cap reached.
 const autoRetriggerCounts = new Map<number, number>();
+// Scheduled re-arm timers, keyed by sessionId, so a manual release can cancel a
+// pending retrigger outright instead of letting it wake up and abort itself.
+const autoRetriggerTimers = new Map<number, NodeJS.Timeout>();
+
+/**
+ * Can this session still be charged? Only while the car is genuinely still
+ * inside: journey status 'entered', no exit recorded, and no settled payment.
+ *
+ * Testing `status === 'exited' || paymentStatus === 'paid'` — as the retrigger
+ * guards used to — MISSED a manual release, which lands as status AND
+ * payment_status 'manual_release'. A scheduled retrigger sailed past both tests
+ * and re-armed the terminal for a car the operator had already let out; if the
+ * next driver tapped, they paid the previous car's fare and recordExit()
+ * overwrote the release with 'exited'/'paid'.
+ */
+function isStillChargeable(session: ParkingSession | null): boolean {
+  return !!session
+    && session.status === 'entered'
+    && !session.exitAt
+    && session.paymentStatus !== 'paid';
+}
+
+/** Why a session isn't chargeable, for the abort log line. */
+function describeChargeability(session: ParkingSession | null): string {
+  if (!session) return 'gone';
+  return `status=${session.status} payment=${session.paymentStatus}${session.exitAt ? ' exitAt=set' : ''}`;
+}
 
 export function startParkingFlow() {
   lprEvents.on('plate', handlePlateEvent);
@@ -134,6 +161,38 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
       entryAt: existing.entryAt,
     });
     return;
+  }
+
+  // ─── Exit re-scan grace ──────────────────────────────────────────────
+  // ANPR cameras routinely report the same plate two or three times per pass. On
+  // a 'dual' camera — or an entry camera with entryCameraHandlesExit on — the
+  // FIRST of those events closes the session, and without this guard the next one
+  // a second later opens a BRAND-NEW entry: a phantom "car inside" for a car that
+  // has just driven out, which then blocks its real next visit with ALREADY
+  // INSIDE and inflates occupancy.
+  //
+  // This is what settings.exitGracePeriodSeconds (default 90) was always meant to
+  // govern; it existed but was wired to nothing. 0 disables the guard. A window
+  // this long is safe because re-entering within it is physically implausible at a
+  // barrier — and it's operator-tunable for sites where it isn't.
+  const graceSeconds = getSettings().exitGracePeriodSeconds ?? 0;
+  if (graceSeconds > 0) {
+    const lastClosed = findLastClosedSessionByPlate(event.plate);
+    const exitedAtMs = lastClosed?.exitAt ? Date.parse(lastClosed.exitAt) : NaN;
+    const sinceExitMs = Number.isNaN(exitedAtMs) ? null : Date.now() - exitedAtMs;
+    // Guard against a future-dated exit (simulator / hand-edited session) reading
+    // as a huge negative age and silently swallowing every entry.
+    if (sinceExitMs !== null && sinceExitMs >= 0 && sinceExitMs < graceSeconds * 1000) {
+      flog(`entry ignored: plate=${event.plate} exited ${Math.round(sinceExitMs / 1000)}s ago (session=${lastClosed!.id}), within exitGracePeriodSeconds=${graceSeconds} → treating as a duplicate camera read, no new session`);
+      parkingEvents.emit('entry-ignored-recent-exit', {
+        plate: event.plate,
+        sessionId: lastClosed!.id,
+        exitAt: lastClosed!.exitAt,
+        secondsSinceExit: Math.round(sinceExitMs / 1000),
+        graceSeconds,
+      });
+      return;
+    }
   }
 
   // ─── Blacklist at entry ──────────────────────────────────────────────
@@ -229,7 +288,7 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // events leave it undefined, so this stays "now".
   const exitMs = event.exitAtOverride ? Date.parse(event.exitAtOverride) : Date.now();
   const exitIso = new Date(exitMs).toISOString();
-  const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
+  const durationMinutes = stayDurationMinutes(entryMs, exitMs);
   let feeCents = computeFee(durationMinutes, policy, session.entryAt, exitIso);
 
   // ─── Active-pass shortcut ────────────────────────────────────────────
@@ -347,6 +406,24 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   }
   if (!device.enabled) {
     parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: device.id });
+    return;
+  }
+  // The device takes the money the moment the driver taps, but the charge only
+  // becomes a recorded transaction when its PayResult callback reaches us. With
+  // no listener bound, a tap is a real deduction we can never record — and the
+  // resulting "timeout" would then auto-retrigger, asking for the same fare up
+  // to MAX_AUTO_RETRIGGERS more times. Refuse BEFORE any money can move: the car
+  // waits at the barrier for a manual release, exactly like a declined card.
+  const listener = payResultListenerReady();
+  if (!listener.ok) {
+    flog(`EXIT REFUSED plate=${event.plate} session=${session.id} fee=${feeCents}c — ${listener.reason}. No PayRequest sent (a tap would deduct money this app could never record).`);
+    w4gLog('error', `EXIT CHARGE refused before send · plate=${event.plate} session=${session.id} lane=${lane.id} device="${device.name}" fare=RM ${(feeCents / 100).toFixed(2)} — ${listener.reason}. Gate stays CLOSED; no money was taken.`, { plate: event.plate, sessionId: session.id, laneId: lane.id, feeCents, reason: listener.reason });
+    parkingEvents.emit('warning', {
+      kind: 'exit-tng-not-configured',
+      sessionId: session.id,
+      laneId: lane.id,
+      reason: listener.reason ?? null,
+    });
     return;
   }
   markInFlight();
@@ -509,25 +586,35 @@ function maybeAutoRetrigger(
     return;
   }
 
-  // Stop if the car is no longer chargeable (already paid/exited, or the session
-  // was voided by a manual release).
+  // Stop if the car is no longer inside — paid, exited, or manually released.
   const session = getSessionById(prev.sessionId);
-  if (!session || session.status === 'exited' || session.paymentStatus === 'paid') {
-    w4gLog('info', `AUTO-RETRIGGER skipped · ${tag} — session no longer chargeable (${!session ? 'gone' : `status=${session.status} payment=${session.paymentStatus}`}).`, { sessionId: prev.sessionId });
+  if (!isStillChargeable(session)) {
+    w4gLog('info', `AUTO-RETRIGGER skipped · ${tag} — session no longer chargeable (${describeChargeability(session)}).`, { sessionId: prev.sessionId });
     autoRetriggerCounts.delete(prev.sessionId);
     return;
   }
 
   autoRetriggerCounts.set(prev.sessionId, attempts + 1);
+  // One armed timer per session, ever. A manual retrigger can race the delay
+  // window: its failed attempt lands here while the previous timer is still
+  // pending, and a bare set() would orphan that timer — still armed, but no
+  // longer in the map, so a manual release could never cancel it (and when it
+  // fired, its own delete() would remove the NEW timer's entry instead).
+  const stale = autoRetriggerTimers.get(prev.sessionId);
+  if (stale) {
+    clearTimeout(stale);
+    autoRetriggerTimers.delete(prev.sessionId);
+  }
   w4gLog('send', `AUTO-RETRIGGER scheduled #${attempts + 1}/${MAX_AUTO_RETRIGGERS} · ${tag} — re-arming "${device.name}" in ${AUTO_RETRIGGER_DELAY_MS}ms.`, { sessionId: prev.sessionId, attempt: attempts + 1, max: MAX_AUTO_RETRIGGERS, delayMs: AUTO_RETRIGGER_DELAY_MS });
   parkingEvents.emit('warning', { kind: 'exit-auto-retrigger', sessionId: prev.sessionId, laneId: lane.id, attempt: attempts + 1, max: MAX_AUTO_RETRIGGERS });
 
-  setTimeout(() => {
+  const timer = setTimeout(() => {
+    autoRetriggerTimers.delete(prev.sessionId);
     // Re-check at fire time — in the delay window the car may have been released
     // or another exit may have grabbed the lane.
     const s = getSessionById(prev.sessionId);
-    if (!s || s.status === 'exited' || s.paymentStatus === 'paid') {
-      w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — session no longer chargeable (${!s ? 'gone' : `status=${s.status} payment=${s.paymentStatus}`}).`, { sessionId: prev.sessionId });
+    if (!isStillChargeable(s)) {
+      w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — session no longer chargeable (${describeChargeability(s)}).`, { sessionId: prev.sessionId });
       autoRetriggerCounts.delete(prev.sessionId);
       return;
     }
@@ -537,6 +624,15 @@ function maybeAutoRetrigger(
     }
     if (!device.enabled) {
       w4gLog('error', `AUTO-RETRIGGER aborted at fire · ${tag} — terminal "${device.name}" is disabled.`, { sessionId: prev.sessionId });
+      autoRetriggerCounts.delete(prev.sessionId);
+      return;
+    }
+    // The listener can go down between attempts (operator flips TNG off while a
+    // car is stuck at the barrier). Re-check here too — a retry with no callback
+    // path is a real deduction we could never record.
+    const ready = payResultListenerReady();
+    if (!ready.ok) {
+      w4gLog('error', `AUTO-RETRIGGER aborted at fire · ${tag} — ${ready.reason}. No PayRequest sent.`, { sessionId: prev.sessionId, reason: ready.reason });
       autoRetriggerCounts.delete(prev.sessionId);
       return;
     }
@@ -551,9 +647,32 @@ function maybeAutoRetrigger(
       exitsInFlight.delete(lane.id);
     });
   }, AUTO_RETRIGGER_DELAY_MS);
+  autoRetriggerTimers.set(prev.sessionId, timer);
 }
 
 // ─── fee calc ──────────────────────────────────────────────────────────────
+
+/**
+ * Whole minutes between two instants, TRUNCATED — the ONE duration rule for the
+ * whole app. Matches the cloud TariffCalculator's `(int) diffInMinutes` and
+ * computeFee's own internal schedule math (diffFloorMinutes), so the gate charge,
+ * the "Test price" simulator, the live open-session preview, the admin session
+ * editor and the duration_minutes shipped to the cloud can no longer disagree.
+ *
+ * The gate and the session editor used Math.ceil while the simulator used floor,
+ * so a stay 30s past a grace or block boundary was charged at the barrier but
+ * quoted free by Test price — the exact parity confusion the simulator exists to
+ * prevent. Floor is the correct direction: it's what the cloud invoices from.
+ *
+ * Only affects policies with an empty rules[] (the legacy block model) plus the
+ * recorded/displayed duration; the schedule path recomputes internally either way.
+ */
+export function stayDurationMinutes(entryAt: string | number, exitAt: string | number): number {
+  const entryMs = typeof entryAt === 'number' ? entryAt : Date.parse(entryAt);
+  const exitMs = typeof exitAt === 'number' ? exitAt : Date.parse(exitAt);
+  if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return 0;
+  return Math.max(0, diffFloorMinutes(entryMs, exitMs));
+}
 
 /**
  * Time-aware fee calculator.
@@ -765,6 +884,44 @@ function nextBoundaryMsV2(cursorMs: number, cycleEndMs: number, rule: TariffRule
   return earliest ?? cycleEndMs;
 }
 
+/**
+ * When NO rule covers `cursorMs`, find the earliest moment in (cursor, cycleEnd]
+ * where coverage could begin: any active rule's window start, or midnight (which
+ * is when day-of-week / valid-from-to membership can change).
+ *
+ * Why not just jump to midnight: that's what this used to do, and it skipped every
+ * COVERED hour of the following day too, not merely the gap. A policy whose only
+ * rule is 08:00–22:00, entered 23:00 and exited noon the next day, walked
+ * 23:00 → midnight (uncovered) → midnight → next midnight (jumping clean over the
+ * exit) and charged RM 0 for four billable morning hours. Advancing to the next
+ * window start bills the covered portion and treats only the true gap as free.
+ *
+ * The cloud TariffCalculator throws on an uncovered moment (it treats coverage
+ * gaps as misconfiguration), so there is no cloud answer to match here — the gate
+ * must never crash mid-exit, and undercharging by a whole day is the worse of the
+ * two available local behaviours.
+ */
+function nextCoverageStartMs(cursorMs: number, cycleEndMs: number, rules: TariffRule[]): number {
+  // Midnight covers day-of-week / validity rollovers; cycleEnd bounds the walk.
+  const candidates: number[] = [startOfNextDayMs(cursorMs), cycleEndMs];
+  for (const r of rules) {
+    if (r.isActive === false) continue;
+    const from = normTime(r.timeFrom);
+    if (from === '24:00:00') continue; // degenerate window, never starts
+    const [h, m, s] = from.split(':').map((n) => Number(n));
+    let start = setTimeOnMs(cursorMs, h || 0, m || 0, s || 0);
+    if (start <= cursorMs) start = addOneDayMs(start); // already passed today
+    candidates.push(start);
+  }
+  let earliest: number | null = null;
+  for (const c of candidates) {
+    if (c > cursorMs && (earliest === null || c < earliest)) earliest = c;
+  }
+  // Always strictly advances (every candidate is > cursor), so the caller's walk
+  // terminates even for a policy that covers nothing at all.
+  return Math.min(earliest ?? cycleEndMs, cycleEndMs);
+}
+
 /** Cost of a block-hourly segment. `prior` = block-minutes already billed in
  *  the stay (so the first-block premium is charged at most once when carried). */
 function priceBlockHourlyCents(minutes: number, rule: TariffRule, prior = 0): number {
@@ -814,9 +971,10 @@ function priceBillingCycle(
   while (cursor < cycleEndMs && guard++ < 100_000) {
     const rule = pickRuleAtMoment(cursor, rules, preferOvernight);
     if (!rule) {
-      // The cloud THROWS on an uncovered moment (misconfiguration). The gate
-      // must never crash mid-exit, so we skip the uncovered span as free time.
-      cursor = Math.min(startOfNextDayMs(cursor), cycleEndMs);
+      // Uncovered moment: skip ONLY the gap (to the next rule-window start or
+      // midnight, whichever comes first) as free time — not the rest of the day.
+      // See nextCoverageStartMs.
+      cursor = nextCoverageStartMs(cursor, cycleEndMs, rules);
       continue;
     }
     const boundary = nextBoundaryMsV2(cursor, cycleEndMs, rule);
@@ -887,24 +1045,36 @@ export function simulateRatePolicyFee(
   const exitMs = Date.parse(exitIso);
   if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return { ok: false, error: 'invalid_dates' };
   if (exitMs < entryMs) return { ok: false, error: 'exit_before_entry' };
-  // Floor to whole minutes — matches the cloud TariffCalculator's integer
-  // duration so the two produce identical block math.
-  const durationMinutes = Math.max(0, Math.floor((exitMs - entryMs) / 60_000));
+  const durationMinutes = stayDurationMinutes(entryMs, exitMs);
   const feeCents = computeFee(durationMinutes, policy, entryIso, exitIso);
   return { ok: true, feeCents, durationMinutes, policyName: policy.policyName, currency: policy.currency };
 }
 
 /**
  * Abort any in-flight exit charge for this session (manual release). Clears the
- * lane busy-guard and the auto-retrigger counter, then best-effort cancels the
- * charge at the device. Without this, a PayResult that arrives AFTER the
- * operator released the car would pass startTngExitCharge's post-await guard
- * (the lane was still marked in-flight) and flip the voided transaction back to
- * 'paid' + overwrite the session's 'manual_release' status with 'exited'.
- * Returns true if an in-flight exit was found and cancelled.
+ * lane busy-guard and the auto-retrigger counter, cancels a scheduled re-arm, then
+ * best-effort cancels the charge at the device. Without this, a PayResult that
+ * arrives AFTER the operator released the car would pass startTngExitCharge's
+ * post-await guard (the lane was still marked in-flight) and flip the voided
+ * transaction back to 'paid' + overwrite the session's 'manual_release' status
+ * with 'exited'.
+ *
+ * Returns true if anything was actually cancelled — an in-flight charge OR a
+ * pending retrigger. Note a release can land in the gap BETWEEN attempts, where
+ * there is no in-flight charge but a timer is armed; isStillChargeable() would
+ * catch that at fire time anyway, so clearing the timer here is about not waking
+ * up to log a confusing abort 2s after the operator already let the car out.
  */
 export function cancelExitInFlight(sessionId: number): boolean {
   autoRetriggerCounts.delete(sessionId);
+  let cancelled = false;
+  const pendingTimer = autoRetriggerTimers.get(sessionId);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    autoRetriggerTimers.delete(sessionId);
+    cancelled = true;
+    flog(`pending auto-retrigger cancelled for session=${sessionId} (manual release)`);
+  }
   for (const [laneId, exit] of exitsInFlight) {
     if (exit.sessionId !== sessionId) continue;
     exitsInFlight.delete(laneId);
@@ -915,7 +1085,7 @@ export function cancelExitInFlight(sessionId: number): boolean {
     }
     return true;
   }
-  return false;
+  return cancelled;
 }
 
 /**

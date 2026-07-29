@@ -657,6 +657,32 @@ export function loopbackPayResult(opts: {
   });
 }
 
+/**
+ * Is it safe to fire a PayRequest right now?
+ *
+ * The device deducts the fare the instant the driver taps; that deduction only
+ * becomes a recorded transaction when the device's PayResult callback reaches
+ * THIS process. Two ways that path can be dead while the device is perfectly
+ * happy to take money:
+ *   - the operator never switched TNG on, so startW4gServer() was never called
+ *   - every configured callback port failed to bind (port 80 is routinely held
+ *     by IIS / Apache / Skype on a Windows gate PC — startW4gServer logs the
+ *     EADDRINUSE and deliberately carries on so one bad port doesn't kill the app)
+ *
+ * In both cases a tap takes real money we can never record, and the caller's
+ * timeout path would then retry — asking for the SAME fare again. Callers must
+ * refuse the charge BEFORE sending PayRequest, not discover this afterwards.
+ */
+export function payResultListenerReady(): { ok: boolean; reason?: string } {
+  if (!getSettings().tngEnabled) {
+    return { ok: false, reason: 'TNG payments are switched off in Settings, so no PayResult listener is running' };
+  }
+  if (activePorts.length === 0) {
+    return { ok: false, reason: 'the PayResult callback listener bound no ports — another service may be holding port 80 (check Settings → callback ports)' };
+  }
+  return { ok: true };
+}
+
 // ─── status snapshot for Settings UI ────────────────────────────────────
 
 export function w4gStatus(): {

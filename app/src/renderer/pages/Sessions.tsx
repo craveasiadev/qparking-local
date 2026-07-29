@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
-import { fmtDateTime, fmtTimeSeconds } from '../lib/datetime';
+import { fmtDateTime, fmtTimeSeconds, elapsedMinutesSince } from '../lib/datetime';
 import { toast } from '../toast';
 
 const PAGE_SIZE = 20;
@@ -109,6 +109,7 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
       const kind = p?.kind; const d = p?.payload ?? {};
       if (kind === 'entry') push('in', `Entry recorded — barrier OPEN (${d?.session?.plate ?? '?'})`);
       else if (kind === 'rescan-ignored') push('info', 'Re-scan ignored — plate already inside');
+      else if (kind === 'entry-ignored-recent-exit') push('info', `Duplicate read ignored — ${d?.plate ?? '?'} exited ${d?.secondsSinceExit ?? '?'}s ago (exit grace ${d?.graceSeconds ?? '?'}s)`);
       else if (kind === 'exit-pending') push('pay', `Payment pending — RM ${((d?.feeCents ?? 0) / 100).toFixed(2)} · ${d?.durationMinutes ?? '?'} min`);
       else if (kind === 'exit-completed') {
         const opened = ['paid','free','manual_release'].includes(d?.outcome);
@@ -464,7 +465,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
             </thead>
             <tbody>
               {rows.map((s) => {
-                const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
+                const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
                 return (
                   <tr key={s.id} onClick={() => setViewing(s)}
                     className="border-t border-gray-100 cursor-pointer hover:bg-gray-50">
@@ -501,7 +502,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           </div>
         )}
         {rows.map((s) => {
-          const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
+          const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
           return (
             <div key={s.id} onClick={() => setViewing(s)}
               className="rounded-xl border border-gray-200 bg-white p-3 cursor-pointer active:bg-gray-50">
@@ -735,7 +736,7 @@ function ViewSessionModal({
   const [actionLaneId, setActionLaneId] = useState<number | null>(
     s.exitLaneId ?? lanes.find((l) => l.terminalId != null)?.id ?? s.entryLaneId ?? lanes[0]?.id ?? null,
   );
-  const mins = s.durationMinutes ?? (s.exitAt ? null : Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
+  const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
   let displayFeeCents: number | null = s.feeCents ?? null;
   let isLivePreview = false;
   if (displayFeeCents == null && !s.exitAt && s.livePreviewFeeCents != null) {
@@ -1050,7 +1051,10 @@ function EditSessionModal({
     const e = Date.parse(toIso(entryAt));
     const x = Date.parse(toIso(exitAt));
     if (isNaN(e) || isNaN(x)) return null;
-    return Math.max(0, Math.ceil((x - e) / 60_000));
+    // Truncated, matching the main process's stayDurationMinutes — the save
+    // handler recomputes with that rule, so ceil here would preview a duration
+    // one minute higher than what actually lands on the session.
+    return Math.max(0, Math.floor((x - e) / 60_000));
   })();
   const previewPolicy = policyOverride ? policies.find((s) => s.policyId === policyOverride) ?? null : defaultPolicy;
 

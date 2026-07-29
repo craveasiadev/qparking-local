@@ -163,6 +163,24 @@ function nextBoundaryMsV2(cursorMs, cycleEndMs, rule) {
   return earliest ?? cycleEndMs;
 }
 
+function nextCoverageStartMs(cursorMs, cycleEndMs, rules) {
+  const candidates = [startOfNextDayMs(cursorMs), cycleEndMs];
+  for (const r of rules) {
+    if (r.isActive === false) continue;
+    const from = normTime(r.timeFrom);
+    if (from === '24:00:00') continue;
+    const [h, m, s] = from.split(':').map((n) => Number(n));
+    let start = setTimeOnMs(cursorMs, h || 0, m || 0, s || 0);
+    if (start <= cursorMs) start = addOneDayMs(start);
+    candidates.push(start);
+  }
+  let earliest = null;
+  for (const c of candidates) {
+    if (c > cursorMs && (earliest === null || c < earliest)) earliest = c;
+  }
+  return Math.min(earliest ?? cycleEndMs, cycleEndMs);
+}
+
 function priceBlockHourlyCents(minutes, rule, prior = 0) {
   if (minutes <= 0) return 0;
   const firstAmt = rule.firstBlockAmountCents || 0;
@@ -204,7 +222,7 @@ function priceBillingCycle(cycleStartMs, cycleEndMs, rules, preferOvernight, pol
   while (cursor < cycleEndMs && guard++ < 100_000) {
     const rule = pickRuleAtMoment(cursor, rules, preferOvernight);
     if (!rule) {
-      cursor = Math.min(startOfNextDayMs(cursor), cycleEndMs);
+      cursor = nextCoverageStartMs(cursor, cycleEndMs, rules);
       continue;
     }
     const boundary = nextBoundaryMsV2(cursor, cycleEndMs, rule);

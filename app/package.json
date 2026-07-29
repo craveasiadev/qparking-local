@@ -19,7 +19,11 @@
     "package:portable": "npm run build && electron-builder --win portable",
     "publish:cloud": "node scripts/publish.mjs",
     "ship": "npm run package && node scripts/publish.mjs",
-    "lint": "tsc -p src/main/tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.json --noEmit"
+    "lint": "tsc -p src/main/tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.json --noEmit",
+    "test:migration": "npm run build:main && node tools/migration-check/run.mjs",
+    "test:fees": "npm run build:main && node tools/fee-gap-check/run.mjs",
+    "test": "npm run test:migration && npm run test:fees && npm run test:gate",
+    "test:gate": "npm run build:main && node tools/gate-guard-check/run.mjs"
   },
   "dependencies": {
     "axios": "^1.18.1",

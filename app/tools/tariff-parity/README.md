@@ -48,3 +48,9 @@ If a policy has a **coverage gap** (a moment no active rule covers), the cloud
 `TariffCalculator` throws (treats it as misconfiguration) while local safely
 charges the covered portion and treats the gap as free — the gate must never
 crash mid-exit. The fuzz reports these as `cloud-throw(skipped)`, not mismatches.
+
+Because the cloud throws, this harness **cannot test the gap behaviour at all** —
+there is no cloud number to compare against, and `gen_fuzz.mjs` gives every
+scenario an always-on 24h fallback rule specifically so gaps never arise (hence
+`0 cloud-throw(skipped)` on a clean run). That local-only path is covered
+separately by `tools/fee-gap-check`, which asserts hand-computed fees instead.

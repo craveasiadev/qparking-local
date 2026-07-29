@@ -77,6 +77,20 @@ export function fmtTimeSeconds(ts?: string | null): string {
   return d.toLocaleTimeString('en-MY', { timeZone: APP_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 
+/**
+ * Minutes a still-open session has been parked, TRUNCATED. Mirrors the main
+ * process's `stayDurationMinutes` (and the cloud's `(int) diffInMinutes`), so the
+ * elapsed time on screen can never read a minute higher than the duration the exit
+ * actually charges for. Returns null when the session is already closed — use its
+ * stored `durationMinutes` then. Was hand-rolled with Math.ceil in three separate
+ * places in Sessions.tsx before this.
+ */
+export function elapsedMinutesSince(entryAt?: string | null): number | null {
+  const d = toDate(entryAt);
+  if (!d) return null;
+  return Math.max(0, Math.floor((Date.now() - d.getTime()) / 60_000));
+}
+
 /** A given instant's calendar date in APP_TZ as "YYYY-MM-DD" (en-CA → ISO order). */
 export function dateInAppTz(d: Date): string {
   return d.toLocaleDateString('en-CA', { timeZone: APP_TZ });

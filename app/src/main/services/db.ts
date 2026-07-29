@@ -651,6 +651,12 @@ function applySchema(db: Database.Database) {
           CHECK (status IN ('entered','exited','manual_release')),
         payment_status TEXT NOT NULL DEFAULT 'pending'
           CHECK (${CANONICAL_PAY_CHECK}),
+        -- Must mirror EVERY column applySchema/the ALTERs above create. A column
+        -- missing here is dropped for good on rebuild AND breaks recordExit for
+        -- the rest of the boot (it UPDATEs pass_id/free_reason, which would no
+        -- longer exist), so no exit could be recorded until the next restart.
+        pass_id TEXT,
+        free_reason TEXT,
         terminal_txn_id TEXT,
         card_scheme TEXT,
         payment_timestamp TEXT,
@@ -661,7 +667,7 @@ function applySchema(db: Database.Database) {
       db.exec(`INSERT INTO sessions_rebuild
         (id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
          exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
-         status, payment_status, terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at)
+         status, payment_status, pass_id, free_reason, terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at)
         SELECT
          id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
          exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
@@ -673,6 +679,7 @@ function applySchema(db: Database.Database) {
            WHEN payment_status='release' THEN 'manual_release'
            ELSE 'pending'
          END,
+         pass_id, free_reason,
          terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at
         FROM sessions`);
       db.exec('DROP TABLE sessions');
@@ -1027,6 +1034,19 @@ export function findOpenSessionByPlate(plate: string): ParkingSession | null {
   return row ? rowToSession(row) : null;
 }
 
+/**
+ * The most recently CLOSED session for a plate (latest exit_at). Backs the
+ * exit-grace guard in parking-flow: it distinguishes an ANPR camera firing the
+ * same plate two or three times on one pass — where the extra events arrive
+ * seconds after the exit was recorded — from a genuine new arrival.
+ */
+export function findLastClosedSessionByPlate(plate: string): ParkingSession | null {
+  const row = getDb().prepare(
+    'SELECT * FROM sessions WHERE plate = ? AND exit_at IS NOT NULL ORDER BY exit_at DESC LIMIT 1',
+  ).get(plate) as any;
+  return row ? rowToSession(row) : null;
+}
+
 export function createEntrySession(plate: string, laneId: number | null, cameraId: number | null, imagePath: string | null): ParkingSession {
   const db = getDb();
   // Store entry_at as an explicit UTC ISO string (…Z), NOT SQLite's
@@ -1076,11 +1096,21 @@ export function recordExit(sessionId: number, patch: {
   return getSessionById(sessionId);
 }
 
-export function manualReleaseSession(sessionId: number, reason: string): ParkingSession | null {
+/**
+ * Close an OPEN session without a payment, at the operator's discretion.
+ *
+ * The `exit_at IS NULL` guard is load-bearing: a release can land moments after a
+ * successful payment already closed the session (the driver taps just as staff
+ * press the button), and without it a genuinely PAID record was rewritten to
+ * manual_release — real revenue then read as waived. An already-closed session is
+ * left exactly as it is; the caller still opens the barrier, which is what the
+ * operator actually wanted. `changed` reports which happened.
+ */
+export function manualReleaseSession(sessionId: number, reason: string): { session: ParkingSession | null; changed: boolean } {
   const now = new Date().toISOString();
-  getDb().prepare(`UPDATE sessions SET exit_at=?, status='manual_release', payment_status='manual_release', notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+  const info = getDb().prepare(`UPDATE sessions SET exit_at=?, status='manual_release', payment_status='manual_release', notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND exit_at IS NULL`)
     .run(now, reason, sessionId);
-  return getSessionById(sessionId);
+  return { session: getSessionById(sessionId), changed: info.changes > 0 };
 }
 
 /**
@@ -1840,6 +1870,14 @@ export function findSeasonPassByPlate(
   // NULLIF guards against a cloud row carrying '' instead of NULL for an
   // open-ended pass (resident / complimentary) — '' would fail every date
   // comparison and silently deny a forever-pass.
+  //
+  // ORDER BY: free/waived first, then the BROADEST coverage. SQLite sorts NULL
+  // below every value, so a plain `end_date DESC` ranked an open-ended pass (NULL
+  // end_date = never expires, e.g. a resident or complimentary entitlement) LAST —
+  // the exact opposite of "longest coverage". The explicit IS NULL key fixes that.
+  // Every candidate row is already valid at this moment thanks to the WHERE clause,
+  // so this only decides WHICH pass_id / pass-<type> reason lands in the audit
+  // trail, not whether the exit is free.
   const row = getDb().prepare(`
     SELECT * FROM season_passes
     WHERE plate_number = @plate AND status = 'active'
@@ -1854,7 +1892,8 @@ export function findSeasonPassByPlate(
           AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
         )
       )
-    ORDER BY is_free DESC, end_date DESC
+    -- free first, then open-ended (never-expiring), then latest end date.
+    ORDER BY is_free DESC, (NULLIF(end_date, '') IS NULL) DESC, end_date DESC
     LIMIT 1
   `).get({ plate: normalisedPlate, entryDay, exitDay }) as any;
   return row ? rowToSeasonPass(row) : null;

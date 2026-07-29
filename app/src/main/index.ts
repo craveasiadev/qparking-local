@@ -92,10 +92,12 @@ import {
   listTransactionsPage, countTransactions,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses, listBlockedPlates, listCloudCustomers, listCloudVehicles,
+  findSeasonPassByPlate,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
   listActivityLogs,
 } from './services/db';
-import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
+import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
+import { canonicalPlate } from '../shared/plate';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
   startBackgroundSync, syncRatePolicies, syncParkingSpaces, syncSeasonPasses, syncBlockedPlates,
@@ -227,9 +229,21 @@ function createTray() {
 
 function wireRendererEvents() {
   lprEvents.on('plate', (event) => sendToRenderer('plate-detected', event));
-  for (const ev of ['entry','exit-pending','exit-completed','exit-declined','warning','rescan-ignored'] as const) {
+  for (const ev of ['entry','exit-pending','exit-completed','exit-declined','warning','rescan-ignored','entry-ignored-recent-exit'] as const) {
     parkingEvents.on(ev, (payload) => sendToRenderer('session', { kind: ev, payload }));
   }
+
+  // A duplicate camera read moments after an exit. Deliberately paints NOTHING on
+  // the gate screen: the exit's own COME AGAIN is still up and is exactly what the
+  // departing driver should be looking at. Operator-facing log only.
+  parkingEvents.on('entry-ignored-recent-exit', (p: any) => {
+    sendToRenderer('log', {
+      terminalId: 0,
+      direction: 'info',
+      message: `Duplicate read ignored — ${p?.plate} exited ${p?.secondsSinceExit}s ago (within the ${p?.graceSeconds}s exit grace); no new entry created`,
+      payload: p,
+    });
+  });
 
   // Drive the gate-simulator window. Entry events open the gate inbound; a
   // successful exit (paid / free / manual_release) opens it outbound. Failed
@@ -461,14 +475,19 @@ ipcMain.handle('sessions:recent', (_e, limit: number) => listRecentSessions(limi
 // calc shows RM0 for schedule-based policies.
 function previewFeeForOpenSession(s: ReturnType<typeof listSessionsPage>[number]): number | null {
   if (s.exitAt) return null;
+  const nowIso = new Date().toISOString();
+  // A pass holder will exit free, so previewing a running fee for them is simply
+  // wrong — it's what prompts "why is this VIP being charged?". Mirror the exit
+  // flow's own pass shortcut (handleExit checks this BEFORE pricing) using the
+  // same entry-or-exit-instant validity window.
+  if (findSeasonPassByPlate(s.plate, { entryAt: s.entryAt, exitAt: nowIso })) return 0;
   const entryLane = s.entryLaneId ? getLane(s.entryLaneId) : null;
   const exitLane = s.exitLaneId ? getLane(s.exitLaneId) : null;
   const policy = (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
     ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
     ?? getSiteDefaultRatePolicy();
   if (!policy) return 0;
-  const nowIso = new Date().toISOString();
-  const durationMinutes = Math.max(0, Math.ceil((Date.now() - Date.parse(s.entryAt)) / 60_000));
+  const durationMinutes = stayDurationMinutes(s.entryAt, nowIso);
   let fee = computeFee(durationMinutes, policy, s.entryAt, nowIso);
   const minCharge = getSettings().minimumChargeCents ?? 0;
   if (minCharge > 0 && fee < minCharge) fee = minCharge;
@@ -543,13 +562,24 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: num
   // Void any in-flight (pending) payment attempt so the ledger doesn't leave a
   // dangling 'pending' for a session released without a completed payment.
   const openTxn = getOpenTransactionForSession(id);
-  const session = manualReleaseSession(id, reason);
-  if (session) {
+  const { session, changed } = manualReleaseSession(id, reason);
+  if (session && changed) {
     if (openTxn) {
       const voided = updateTransaction(openTxn.id, { status: 'voided' });
       if (voided) enqueueTransaction(session, voided);
     }
     enqueueUpdate(session);
+  } else if (session) {
+    // Already closed — the payment beat the operator to it. Nothing was rewritten
+    // (see manualReleaseSession) and no pending txn is voided, because the charge
+    // that closed this session is exactly the one we must not undo. Still opens the
+    // barrier below: the car is at the gate either way.
+    sendToRenderer('log', {
+      terminalId: 0,
+      direction: 'info',
+      message: `Manual release skipped for session #${id} (${session.plate}) — it was already closed as ${session.status}/${session.paymentStatus}. Record left intact; opening the barrier anyway.`,
+      payload: { sessionId: id, status: session.status, paymentStatus: session.paymentStatus },
+    });
   }
   // Let the car out — open the barrier at the operator-chosen lane (falling
   // back to the session's own exit/entry lane). Fire-and-forget so the release
@@ -597,9 +627,19 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   const session = getSessionById(id);
   if (!session) throw new Error('not_found');
 
+  // Canonicalise the plate exactly as the LPR ingest and the pass/blacklist
+  // lookups do (shared/plate.ts). Without this, an operator typing "ABC 1234"
+  // stored the space verbatim and the next camera read of ABC1234 no longer
+  // matched the session — the car exited as 'exit-without-entry'.
+  let plate: string | undefined;
+  if (patch.plate !== undefined) {
+    plate = canonicalPlate(patch.plate);
+    if (!plate) throw new Error('plate_required — a plate must contain at least one letter or digit');
+  }
+
   // Apply the easy text/state fields first.
   let working = updateSessionFields(id, {
-    plate: patch.plate,
+    plate,
     entryAt: patch.entryAt,
     exitAt: patch.exitAt,
     paymentStatus: patch.paymentStatus,
@@ -607,14 +647,24 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   });
   if (!working) throw new Error('update_failed');
 
+  // Keep the journey status consistent with exit_at. The editor can set or clear
+  // an exit time, but never touched `status`, so a session closed by hand stayed
+  // 'entered' (showing as still inside, and re-openable by a stray plate read)
+  // and one re-opened by clearing exitAt stayed 'exited'. A manual_release keeps
+  // its status while it still has an exit — that's a legitimate closed state.
+  const desiredStatus = working.exitAt
+    ? (working.status === 'entered' ? 'exited' : working.status)
+    : 'entered';
+  if (desiredStatus !== working.status) {
+    working = updateSessionFields(id, { status: desiredStatus }) ?? working;
+  }
+
   // Recompute duration + fee if BOTH ends are set. Rate resolution mirrors the
   // live exit flow (parking-flow.handleExit): the ENTRY lane governs the rate,
   // then the exit lane, then the site-default plan. A caller override wins for
   // admin "what would this cost under plan X" exploration.
   if (working.exitAt) {
-    const entryMs = Date.parse(working.entryAt);
-    const exitMs  = Date.parse(working.exitAt);
-    const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
+    const durationMinutes = stayDurationMinutes(working.entryAt, working.exitAt);
 
     let policy = patch.policyIdOverride ? getRatePolicy(patch.policyIdOverride) : null;
     if (!policy) {
