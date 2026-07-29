@@ -135,6 +135,13 @@ export interface ParkingSession {
   cardScheme: string | null;
   /** txnDt from the reader — the exact moment the card tapped. Differs from exitAt (gate-rise time). */
   paymentTimestamp: string | null;
+  /** The season pass that waived the charge, when this exit was free because the
+   *  plate is on the cloud pass roster. Null for every other outcome. */
+  passId: string | null;
+  /** Why a zero-fee exit was zero-fee: 'pass-<type>' | 'within-grace' |
+   *  'rate-zero' | 'no-policy'. Null when money was actually due. Without this a
+   *  pass exit and a misconfigured RM0 rate plan are indistinguishable. */
+  freeReason: string | null;
   /** Optional notes (manual release reason, etc). */
   notes: string | null;
   createdAt: string;
@@ -276,6 +283,61 @@ export interface SeasonPass {
   endDate: string | null;
   isFree: boolean;
   spaceNumber: string | null;
+  fetchedAt: string;
+}
+
+// ─── cloud_customers / cloud_vehicles (read-only directories) ────────────────
+// Mirrored purely so site staff can answer "who owns this plate?" at the gate
+// without opening the cloud portal in a browser. qparking-local never writes
+// these back — the cloud is the only place they're edited.
+
+/** A customer mirrored from qparking SaaS, for local lookup. */
+export interface CloudCustomer {
+  id: string;
+  fullName: string | null;
+  email: string | null;
+  phone: string | null;
+  /** 'resident' | 'visitor' */
+  type: string | null;
+  isEnabled: boolean;
+  vehiclesCount: number;
+  /** Active passes AT THIS SITE only. */
+  activePassesCount: number;
+  lastSignIn: string | null;
+  createdAt: string | null;
+  fetchedAt: string;
+}
+
+/** A registered vehicle mirrored from qparking SaaS, with its owner and its
+ *  entitlement at this site. Also the operator-facing view of the blacklist. */
+export interface CloudVehicle {
+  id: string;
+  plateNumber: string;
+  vehicleType: string | null;
+  color: string | null;
+  model: string | null;
+  ownerName: string | null;
+  /** 'customer' | 'corporate' | null */
+  ownerKind: string | null;
+  isBlacklisted: boolean;
+  blacklistReason: string | null;
+  passType: string | null;
+  passStatus: string | null;
+  passEndDate: string | null;
+  createdAt: string | null;
+  fetchedAt: string;
+}
+
+// ─── blocked_plates ──────────────────────────────────────────────────────────
+
+/** A blacklisted plate mirrored from qparking SaaS (`vehicles.is_blacklisted`).
+ *  The gate refuses both entry and exit for these — no charge, no gate pulse —
+ *  so the operator deals with the owner in person. */
+export interface BlockedPlate {
+  plateNumber: string;
+  vehicleId: string | null;
+  /** Operator-entered `blacklist_reason`, shown so staff know why on the spot. */
+  reason: string | null;
   fetchedAt: string;
 }
 

@@ -23,8 +23,11 @@ export interface GateEvent {
    *   'please-pay'      → big "PLEASE PAY RM X.XX" with terminal-driving spinner
    *   'duplicate-scan'  → amber "ALREADY INSIDE — use exit lane"
    *   'no-terminal'     → red "TERMINAL NOT CONFIGURED" (operator action needed)
-   *   'no-lane'         → red "CAMERA HAS NO LANE" (operator action needed) */
+   *   'no-lane'         → red "CAMERA HAS NO LANE" (operator action needed)
+   *   'blacklisted'     → black "VEHICLE BLOCKED — SEE ATTENDANT" (staff action) */
   reason?: string;
+  /** Extra line under the headline — currently the blacklist reason. */
+  detail?: string | null;
   /** Fee amount in cents — used by the 'please-pay' layout. */
   feeCents?: number;
   /** Auto-close after this many ms (driven by the renderer). */

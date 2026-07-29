@@ -1,0 +1,224 @@
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Users, RefreshCw, CloudDownload, Cloud, Clock, Car, Ticket, Mail, Phone, UserX,
+} from 'lucide-react';
+import type { CloudCustomer } from '@shared/types';
+import { useAsyncAction } from '../hooks/useAsyncAction';
+import { toast } from '../toast';
+import { fmtDateTime } from '../lib/datetime';
+
+/**
+ * Customer directory — read-only mirror of the cloud's customers, so site staff
+ * can look up a contact number or check someone's pass count without logging
+ * into the qparking cloud portal in a browser.
+ *
+ * Scope comes from the cloud endpoint: this site's company, PLUS anyone holding
+ * a pass at this site (self-registered visitors can have no company).
+ */
+type Filter = 'all' | 'resident' | 'visitor' | 'disabled';
+
+export function CustomerManagement() {
+  const [customers, setCustomers] = useState<CloudCustomer[]>([]);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [search, setSearch] = useState('');
+
+  const [load, loading] = useAsyncAction(async () => {
+    setCustomers(await window.bridge.listCloudCustomers());
+  });
+
+  const [syncFromCloud, syncing] = useAsyncAction(async () => {
+    const result = await window.bridge.syncCloudCustomersNow();
+    if (result.ok) toast({ tone: 'success', title: `Fetched ${result.fetched} customer(s) from cloud` });
+    else toast({ tone: 'error', title: 'Sync failed', detail: String(result.error) });
+    await load();
+  });
+
+  useEffect(() => { void load(); }, []);
+
+  const counts = useMemo(() => ({
+    all: customers.length,
+    resident: customers.filter((c) => c.type === 'resident').length,
+    visitor: customers.filter((c) => c.type === 'visitor').length,
+    disabled: customers.filter((c) => !c.isEnabled).length,
+  }), [customers]);
+
+  const filtered = customers.filter((c) => {
+    if (filter === 'resident' && c.type !== 'resident') return false;
+    if (filter === 'visitor' && c.type !== 'visitor') return false;
+    if (filter === 'disabled' && c.isEnabled) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      const haystack = [c.fullName, c.email, c.phone].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const lastSynced = customers.reduce((m, c) => (c.fetchedAt && c.fetchedAt > m ? c.fetchedAt : m), '');
+
+  return (
+    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+            <Users size={22} /> Customer Management
+          </h1>
+          <p className="text-xs sm:text-sm text-gray-500 mt-1">
+            Who parks here, how to reach them, and how many vehicles and passes they hold.
+          </p>
+          {lastSynced && (
+            <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
+              <Clock size={12} /> Last synced {fmtDateTime(lastSynced)}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => load()} disabled={loading}
+            className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+          <button onClick={() => syncFromCloud()} disabled={syncing}
+            className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 text-white hover:bg-gray-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            <CloudDownload size={13} className={syncing ? 'animate-pulse' : ''} /> Sync from cloud
+          </button>
+        </div>
+      </header>
+
+      <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-2.5">
+        <Cloud size={16} className="text-blue-600 mt-0.5 flex-shrink-0" />
+        <div className="text-xs text-blue-900 leading-relaxed">
+          <p className="font-bold uppercase tracking-wide text-[10px]">View only — managed in cloud</p>
+          <p className="mt-1">
+            Customers are created and edited in the qparking cloud portal
+            (Parking Management → Customers). This page is a local copy for
+            on-site lookups. Pass counts are for THIS site only.
+          </p>
+        </div>
+      </div>
+
+      <div className="mb-4 flex flex-wrap gap-2">
+        {([
+          { key: 'all', label: 'All', icon: Users },
+          { key: 'resident', label: 'Residents', icon: Users },
+          { key: 'visitor', label: 'Visitors', icon: Users },
+          { key: 'disabled', label: 'Disabled', icon: UserX },
+        ] as const).map((f) => {
+          const active = filter === f.key;
+          const Icon = f.icon;
+          return (
+            <button key={f.key} onClick={() => setFilter(f.key)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${
+                active ? 'bg-gray-900 text-white border-transparent' : 'border-gray-200 text-gray-700 hover:border-gray-900'
+              }`}>
+              <Icon size={12} /> {f.label}
+              <span className={`ml-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${
+                active ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-700'
+              }`}>{counts[f.key]}</span>
+            </button>
+          );
+        })}
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search name, email, phone…"
+          className="flex-1 min-w-[200px] h-9 px-3 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none"
+        />
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
+          {customers.length === 0
+            ? 'No customers cached yet. Press "Sync from cloud" (these directories aren\'t auto-synced).'
+            : 'No customers match the current filter.'}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          {/* DESKTOP TABLE */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
+                <tr>
+                  <th className="text-left px-3 py-2 font-bold">Name</th>
+                  <th className="text-left px-3 py-2 font-bold">Contact</th>
+                  <th className="text-left px-3 py-2 font-bold">Type</th>
+                  <th className="text-right px-3 py-2 font-bold">Vehicles</th>
+                  <th className="text-right px-3 py-2 font-bold">Passes here</th>
+                  <th className="text-right px-3 py-2 font-bold">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((c) => (
+                  <tr key={c.id} className={`border-t border-gray-100 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
+                    <td className="px-3 py-2 font-semibold">{c.fullName || '—'}</td>
+                    <td className="px-3 py-2 text-[12px] text-gray-600">
+                      <ContactCell email={c.email} phone={c.phone} />
+                    </td>
+                    <td className="px-3 py-2"><TypeBadge type={c.type} /></td>
+                    <td className="px-3 py-2 text-right font-mono text-[12px]">
+                      <CountChip icon={Car} n={c.vehiclesCount} />
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-[12px]">
+                      <CountChip icon={Ticket} n={c.activePassesCount} />
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {c.isEnabled
+                        ? <span className="text-[10px] uppercase font-bold text-emerald-700">Active</span>
+                        : <span className="text-[10px] uppercase font-bold text-gray-500">Disabled</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* MOBILE CARDS */}
+          <ul className="md:hidden divide-y divide-gray-100">
+            {filtered.map((c) => (
+              <li key={c.id} className={`p-3 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold">{c.fullName || '—'}</span>
+                  <TypeBadge type={c.type} />
+                </div>
+                <div className="mt-1.5 text-[11px] text-gray-600">
+                  <ContactCell email={c.email} phone={c.phone} />
+                </div>
+                <div className="mt-1.5 flex items-center gap-3 text-[11px] text-gray-600">
+                  <CountChip icon={Car} n={c.vehiclesCount} label="vehicles" />
+                  <CountChip icon={Ticket} n={c.activePassesCount} label="passes here" />
+                  {!c.isEnabled && <span className="uppercase font-bold text-gray-500">Disabled</span>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContactCell({ email, phone }: { email: string | null; phone: string | null }) {
+  if (!email && !phone) return <span className="text-gray-400">No contact details</span>;
+  return (
+    <span className="inline-flex flex-col gap-0.5">
+      {email && <span className="inline-flex items-center gap-1"><Mail size={10} className="text-gray-400" /> {email}</span>}
+      {phone && <span className="inline-flex items-center gap-1 font-mono"><Phone size={10} className="text-gray-400" /> {phone}</span>}
+    </span>
+  );
+}
+
+function TypeBadge({ type }: { type: string | null }) {
+  if (!type) return <span className="text-[11px] text-gray-400">—</span>;
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+      type === 'resident' ? 'bg-indigo-100 text-indigo-800' : 'bg-amber-100 text-amber-800'
+    }`}>{type}</span>
+  );
+}
+
+function CountChip({ icon: Icon, n, label }: { icon: any; n: number; label?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 ${n === 0 ? 'text-gray-400' : 'text-gray-700'}`}>
+      <Icon size={11} /> {n}{label ? ` ${label}` : ''}
+    </span>
+  );
+}

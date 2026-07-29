@@ -27,6 +27,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
 import { getCamera, listCameras } from './db';
+import { canonicalPlate } from '../../shared/plate';
 import type { LprCamera } from '../../shared/types';
 
 export interface PlateEvent {
@@ -344,10 +345,12 @@ function loosenJson(rawJson: string): string {
   return repaired;
 }
 
-/** Strip spaces, uppercase. Cameras have wildly inconsistent formatting and
- *  the same physical plate can come in as "vmm 1234" or "VMM-1234". */
+/** Strip separators, uppercase. Cameras have wildly inconsistent formatting and
+ *  the same physical plate can come in as "vmm 1234" or "VMM-1234".
+ *  Delegates to the shared canonical rule so the gate, the cloud-pass cache and
+ *  the pass lookup can never drift apart again (see shared/plate.ts). */
 export function normalisePlate(plate: string): string {
-  return plate.replace(/[\s\-_]+/g, '').toUpperCase();
+  return canonicalPlate(plate);
 }
 
 /** True when the ANPR camera reported no readable plate. Compared against the

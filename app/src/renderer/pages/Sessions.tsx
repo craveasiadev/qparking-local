@@ -74,10 +74,15 @@ function useEscapeToClose(onClose: () => void) {
  *   - Entry → opens a session stamped with the chosen entry time.
  *   - Exit  → runs the real exit at the chosen exit time: prices the stay,
  *             prompts a wired terminal to tap, records + opens the gate.
- *   - Simulate session → one-shot completed stay (entry→exit) with the computed
- *             fee, no terminal/gate — for pure pricing checks.
  * Actions route through an enabled camera on the lane, exercising the actual
  * routing → fee → gate → terminal chain, not a mock.
+ *
+ * A one-shot "Simulate session" button was removed (2026-07-29): it wrote a
+ * fabricated already-completed stay straight to the DB, skipping the pass
+ * check, the blacklist and the terminal — so it could assert an outcome the
+ * real flow would never produce. Stepping through Entry → Exit manually
+ * exercises the actual decisions instead. Use "Test price" on the Parking
+ * Rates page for pure pricing checks, which needs no session at all.
  */
 function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSessionCreated?: () => void }) {
   const [plate, setPlate] = useState('');
@@ -144,23 +149,6 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     } finally { setBusy(null); }
   }
 
-  // One-shot: record a completed session over the entry→exit window — computes
-  // the fee from the lane's plan (no terminal/gate; local only).
-  async function fireSession() {
-    const lid = baseGuard(); if (lid === null) return;
-    const entryIso = toIso(entryLocal);
-    const exitIso = toIso(exitLocal);
-    if (Date.parse(exitIso) < Date.parse(entryIso)) { push('warn', '✗ Exit time is before entry time'); return; }
-    setBusy('session');
-    try {
-      const r = await window.bridge.simulateSession(lid, plate.trim(), entryIso, exitIso);
-      if (!r?.ok) { push('warn', `✗ session: ${r?.error ?? 'failed'}`); return; }
-      const rm = ((r.feeCents ?? 0) / 100).toFixed(2);
-      push('out', `Session #${r.sessionId} recorded — ${r.durationMinutes} min · ${r.scopeName ?? 'no plan'} · RM ${rm} · ${String(r.paymentStatus ?? '').toUpperCase()}`);
-      refreshRef.current?.();
-    } finally { setBusy(null); }
-  }
-
   const toneCls: Record<string, string> = {
     in: 'text-emerald-700', pay: 'text-blue-700', out: 'text-emerald-700',
     warn: 'text-red-700', info: 'text-gray-500',
@@ -175,8 +163,8 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
       </div>
       <p className="text-[11px] text-gray-500 mb-3">
         Drives the <strong>real</strong> flow with times you control. <strong>Entry</strong> opens a session at the entry time;
-        <strong> Exit</strong> prices the stay and prompts a wired terminal to tap. <strong>Simulate session</strong> writes a completed
-        stay in one shot (no terminal). Pick the lane that has the plan + terminal you're testing.
+        <strong> Exit</strong> prices the stay and prompts a wired terminal to tap. Pick the lane that has the
+        plan + terminal you're testing. For pricing alone, use <strong>Test price</strong> on the Parking Rates page.
       </p>
       <div className="flex flex-wrap items-end gap-2 mb-2">
         <div>
@@ -219,10 +207,6 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
         <button onClick={() => fireExit()} disabled={!!busy}
           className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
           {busy === 'exit' ? <Loader2 size={13} className="animate-spin" /> : <ArrowUp size={13} />} Exit
-        </button>
-        <button onClick={() => fireSession()} disabled={!!busy}
-          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-          {busy === 'session' ? <Loader2 size={13} className="animate-spin" /> : <Car size={13} />} Simulate session
         </button>
       </div>
 
@@ -496,7 +480,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                       {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
-                    <td className="px-3 py-2"><PaymentCell status={s.paymentStatus} method={s.cardScheme} /></td>
+                    <td className="px-3 py-2"><PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} /></td>
                     <td className="px-3 py-2 text-xs text-gray-600"><span className="text-gray-400">—</span></td>
                   </tr>
                 );
@@ -523,7 +507,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
               className="rounded-xl border border-gray-200 bg-white p-3 cursor-pointer active:bg-gray-50">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono font-bold text-base tracking-wider">{s.plate}</span>
-                <PaymentCell status={s.paymentStatus} method={s.cardScheme} />
+                <PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} />
               </div>
               <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
                 <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
@@ -640,11 +624,31 @@ function OnSiteBadge() {
 
 /** Payment status pill + (optional) card scheme underneath — mirrors the
  *  operator Parking Activity page's Payment cell. */
-function PaymentCell({ status, method }: { status: ParkingSession['paymentStatus']; method?: string | null }) {
+/** Human label for sessions.free_reason — a bare 'free' badge can't distinguish
+ *  a legitimate pass exit from a rate plan that's accidentally charging RM 0,
+ *  which is the difference between normal operation and revenue leaking. */
+function freeReasonLabel(reason: string): string {
+  if (reason.startsWith('pass-')) return `season pass · ${reason.slice(5)}`;
+  if (reason === 'within-grace') return 'within grace period';
+  if (reason === 'rate-zero') return 'rate plan charges RM 0';
+  if (reason === 'no-policy') return 'no rate plan on lane';
+  return reason;
+}
+
+function PaymentCell({
+  status, method, freeReason,
+}: { status: ParkingSession['paymentStatus']; method?: string | null; freeReason?: string | null }) {
+  // Flag the two zero-fee reasons that mean "misconfigured", not "entitled".
+  const misconfigured = freeReason === 'rate-zero' || freeReason === 'no-policy';
   return (
     <div className="inline-flex flex-col items-start gap-0.5">
       <StatusBadge status={status} />
       {method && <span className="text-[10px] text-gray-500">{method}</span>}
+      {status === 'free' && freeReason && (
+        <span className={`text-[10px] ${misconfigured ? 'text-amber-700 font-semibold' : 'text-gray-500'}`}>
+          {freeReasonLabel(freeReason)}
+        </span>
+      )}
     </div>
   );
 }

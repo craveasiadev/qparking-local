@@ -19,6 +19,9 @@ import {
   upsertRatePolicy,
   upsertSite,
   replaceAllSeasonPasses,
+  replaceAllBlockedPlates,
+  replaceAllCloudCustomers,
+  replaceAllCloudVehicles,
   replaceParkingSpaces,
   pruneStaleRatePolicies,
   replaceAllActivityLogs,
@@ -28,7 +31,9 @@ import {
   bindSiteApiKey,
 } from './db';
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from './cloud-api';
-import type { RatePolicy, TariffRule, SeasonPass, ParkingSpace, Site } from '../../shared/types';
+import type {
+  RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site,
+} from '../../shared/types';
 
 
 export interface SyncResult { ok: boolean; fetched: number; error?: string; }
@@ -197,6 +202,112 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
   }
 }
 
+/**
+ * Pull the blacklist. Its own endpoint rather than a flag on the pass roster,
+ * because a banned vehicle usually holds no pass at all — and the gate has to
+ * stop it either way.
+ *
+ * An empty list is a completely normal state (most sites ban nobody), so it
+ * still replaces the cache: that's how a LIFTED ban reaches the barrier. Note a
+ * failed pull deliberately leaves the previous list in place — going offline
+ * must not silently un-ban everyone.
+ */
+export async function syncBlockedPlates(): Promise<SyncResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return NOT_CONFIGURED;
+  try {
+    const { data: responseBody } = await cloud.get<CloudListBody>('/blocked-plates');
+    const rows = responseBody.data ?? [];
+    const fetchedAt = new Date().toISOString();
+    const blockedPlates: BlockedPlate[] = rows
+      .filter((row: any) => row.plate_number)
+      .map((row: any) => ({
+        plateNumber: String(row.plate_number),
+        vehicleId: row.vehicle_id ?? null,
+        reason: row.reason ?? null,
+        fetchedAt,
+      }));
+    replaceAllBlockedPlates(blockedPlates);
+    return { ok: true, fetched: blockedPlates.length };
+  } catch (error) {
+    // 404 = an older qparking SaaS without the endpoint. Treat as a no-op and
+    // KEEP the existing list rather than clearing it.
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+    return toFailedSyncResult(error);
+  }
+}
+
+/**
+ * Pull the read-only customer directory. Exists so site staff can look up an
+ * owner at the gate without opening the cloud portal in a browser — the on-prem
+ * app never writes these back.
+ */
+export async function syncCloudCustomers(): Promise<SyncResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return NOT_CONFIGURED;
+  try {
+    const { data: responseBody } = await cloud.get<CloudListBody>('/customers');
+    const rows = responseBody.data ?? [];
+    const fetchedAt = new Date().toISOString();
+    const customers: CloudCustomer[] = rows.filter((row: any) => row.id).map((row: any) => ({
+      id: String(row.id),
+      fullName: row.full_name ?? null,
+      email: row.email ?? null,
+      phone: row.phone ?? null,
+      type: row.type ?? null,
+      isEnabled: row.is_enabled == null ? true : !!row.is_enabled,
+      vehiclesCount: Number(row.vehicles_count ?? 0),
+      activePassesCount: Number(row.active_passes_count ?? 0),
+      lastSignIn: row.last_sign_in ?? null,
+      createdAt: row.created_at ?? null,
+      fetchedAt,
+    }));
+    replaceAllCloudCustomers(customers);
+    return { ok: true, fetched: customers.length };
+  } catch (error) {
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+    return toFailedSyncResult(error);
+  }
+}
+
+/**
+ * Pull the read-only vehicle registry — the "who owns this plate?" lookup, and
+ * the operator-facing view of the blacklist (enforcement itself runs off the
+ * leaner /blocked-plates list, which refreshes on the same tick).
+ */
+export async function syncCloudVehicles(): Promise<SyncResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return NOT_CONFIGURED;
+  try {
+    const { data: responseBody } = await cloud.get<CloudListBody>('/vehicles');
+    const rows = responseBody.data ?? [];
+    const fetchedAt = new Date().toISOString();
+    const vehicles: CloudVehicle[] = rows
+      .filter((row: any) => row.id && row.plate_number)
+      .map((row: any) => ({
+        id: String(row.id),
+        plateNumber: String(row.plate_number),
+        vehicleType: row.vehicle_type ?? null,
+        color: row.color ?? null,
+        model: row.model ?? null,
+        ownerName: row.owner_name ?? null,
+        ownerKind: row.owner_kind ?? null,
+        isBlacklisted: !!row.is_blacklisted,
+        blacklistReason: row.blacklist_reason ?? null,
+        passType: row.pass_type ?? null,
+        passStatus: row.pass_status ?? null,
+        passEndDate: row.pass_end_date ?? null,
+        createdAt: row.created_at ?? null,
+        fetchedAt,
+      }));
+    replaceAllCloudVehicles(vehicles);
+    return { ok: true, fetched: vehicles.length };
+  } catch (error) {
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+    return toFailedSyncResult(error);
+  }
+}
+
 /** Map the GET /site payload (snake_case SiteResource) to the local Site. */
 function mapApiRowToSite(siteRow: any): Site {
   return {
@@ -314,18 +425,24 @@ export async function syncParkingSpaces(): Promise<SyncResult> {
 export async function syncAll(): Promise<{
   policies: SyncResult;
   passes: SyncResult;
+  blockedPlates: SyncResult;
+  customers: SyncResult;
+  vehicles: SyncResult;
   spaces: SyncResult;
   site: SyncResult;
   activity: SyncResult;
 }> {
-  const [policies, passes, spaces, site, activity] = await Promise.all([
+  const [policies, passes, blockedPlates, customers, vehicles, spaces, site, activity] = await Promise.all([
     syncRatePolicies().catch(toFailedSyncResult),
     syncSeasonPasses().catch(toFailedSyncResult),
+    syncBlockedPlates().catch(toFailedSyncResult),
+    syncCloudCustomers().catch(toFailedSyncResult),
+    syncCloudVehicles().catch(toFailedSyncResult),
     syncParkingSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
     syncActivityLogs().catch(toFailedSyncResult),
   ]);
-  return { policies, passes, spaces, site, activity };
+  return { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity };
 }
 
 // ─── background sync timer ───────────────────────────────────────────────────
@@ -344,6 +461,9 @@ let backgroundSyncTimer: NodeJS.Timeout | null = null;
  */
 function runRecurringSyncQuietly(): void {
   syncSeasonPasses().catch(() => null);
+  // Rides the same tick as passes: a ban issued in the cloud has to reach the
+  // barrier on the same timescale as a pass being granted.
+  syncBlockedPlates().catch(() => null);
   syncParkingSpaces().catch(() => null);
   syncActivityLogs().catch(() => null);
 }

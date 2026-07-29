@@ -54,7 +54,6 @@ const api: BridgeApi = {
    *  needs to close a stuck session by asking the driver to tap again. */
   retriggerSessionPayment: (id: number, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-payment', id, laneId),
   retriggerSessionPaymentByPlate: (plate: string, laneId?: number | null) => ipcRenderer.invoke('sessions:retrigger-by-plate', plate, laneId),
-  simulateSession: (laneId: number, plate: string, entryIso: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-session', laneId, plate, entryIso, exitIso),
   simulateEntry: (laneId: number, plate: string, entryIso: string) => ipcRenderer.invoke('sessions:simulate-entry', laneId, plate, entryIso),
   simulateExit: (laneId: number, plate: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-exit', laneId, plate, exitIso),
   readSessionImage: (filePath: string) => ipcRenderer.invoke('sessions:image', filePath),
@@ -86,6 +85,13 @@ const api: BridgeApi = {
   listParkingSpaces: () => ipcRenderer.invoke('parking-spaces:list'),
   syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
+  syncSeasonPassesNow: () => ipcRenderer.invoke('season-passes:sync'),
+  listBlockedPlates: () => ipcRenderer.invoke('blocked-plates:list'),
+  syncBlockedPlatesNow: () => ipcRenderer.invoke('blocked-plates:sync'),
+  listCloudCustomers: () => ipcRenderer.invoke('cloud-customers:list'),
+  syncCloudCustomersNow: () => ipcRenderer.invoke('cloud-customers:sync'),
+  listCloudVehicles: () => ipcRenderer.invoke('cloud-vehicles:list'),
+  syncCloudVehiclesNow: () => ipcRenderer.invoke('cloud-vehicles:sync'),
   listActivityLogs: () => ipcRenderer.invoke('activity-logs:list'),
   simulateRatePolicyFee: (input: { policyId: string; entry: string; exit: string }) =>
     ipcRenderer.invoke('policies:simulate', input),

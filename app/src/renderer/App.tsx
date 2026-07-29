@@ -3,6 +3,7 @@ import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
   Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
+  Users, Car,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -16,6 +17,8 @@ import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
 import { SeasonPasses } from './pages/SeasonPasses';
 import { ParkingSpaces } from './pages/ParkingSpaces';
+import { CustomerManagement } from './pages/CustomerManagement';
+import { VehicleManagement } from './pages/VehicleManagement';
 import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
 import { useCurrentSite } from './hooks/useCurrentSite';
@@ -25,7 +28,7 @@ import { subscribeToast } from './toast';
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions' | 'transactions'
   // Parking Management
-  | 'parking-spaces' | 'season-passes'
+  | 'parking-spaces' | 'season-passes' | 'customers' | 'vehicles'
   // Pricing & Tariffs
   | 'policies'
   // System
@@ -60,8 +63,13 @@ const SECTIONS: NavSection[] = [
   {
     key: 'mgmt', label: 'Parking management',
     items: [
-      { id: 'parking-spaces', label: 'Parking Spaces', icon: Grid3x3 },
+      // Labels track the cloud operator menu so staff switching between the two
+      // surfaces read the same words. The cloud calls a physical slot a "bay"
+      // (code/routes/DB still say `space`), hence "Bay Management" here.
+      { id: 'parking-spaces', label: 'Bay Management', icon: Grid3x3 },
       { id: 'season-passes', label: 'Season Passes', icon: Ticket },
+      { id: 'customers', label: 'Customer Management', icon: Users },
+      { id: 'vehicles', label: 'Vehicle Management', icon: Car },
     ],
   },
   {
@@ -111,6 +119,16 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
       return { title: 'Exit with no entry record', detail: `No open session for ${d?.plate ?? 'this plate'}. Check the plate reading or create an entry.` };
     case 'exit-no-lane':
       return { title: 'Exit on an unconfigured lane', detail: 'The exit camera isn\'t mapped to a lane. Assign it under Cameras / Lanes.' };
+    case 'exit-blacklisted':
+      return {
+        title: `Blocked vehicle at the exit — ${d?.plate ?? 'unknown plate'}`,
+        detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}The barrier stays closed and nothing was charged — the car is held. Speak to the driver, then either lift the ban in the cloud or release the session manually from Sessions.`,
+      };
+    case 'entry-blacklisted':
+      return {
+        title: `Blocked vehicle at the entry — ${d?.plate ?? 'unknown plate'}`,
+        detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}Entry refused — no session was opened and the turnstile stayed down. If the vehicle barrier let it through anyway it will still be refused at the exit. Lift the ban in the cloud to admit it.`,
+      };
     default:
       return { title: 'Parking-flow warning', detail: kind || 'Unknown warning' };
   }
@@ -291,6 +309,8 @@ export function App() {
           {page === 'transactions' && <Transactions />}
           {page === 'parking-spaces' && <ParkingSpaces />}
           {page === 'season-passes' && <SeasonPasses />}
+          {page === 'customers' && <CustomerManagement />}
+          {page === 'vehicles' && <VehicleManagement />}
           {page === 'policies' && <ParkingPolicies />}
           {page === 'activity_logs' && <ActivityLogs />}
           {page === 'sites' && <Sites />}

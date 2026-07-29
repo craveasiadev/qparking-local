@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud, Clock } from 'lucide-react';
+import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud, Clock, CloudDownload } from 'lucide-react';
 import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { toast } from '../toast';
 import { fmtDateTime, todayInAppTz, dateInAppTz } from '../lib/datetime';
 
 /**
@@ -19,6 +20,22 @@ export function SeasonPasses() {
 
   const [load, loading] = useAsyncAction(async () => {
     setPasses(await window.bridge.listSeasonPasses());
+  });
+
+  // "Refresh" only re-reads the local cache — it can never surface a pass the
+  // box hasn't pulled yet. This pulls from qparking SaaS first, THEN re-reads,
+  // so an operator who just issued a pass in the cloud can bring it down on
+  // demand instead of waiting out the 60s background tick.
+  const [syncFromCloud, syncing] = useAsyncAction(async () => {
+    const result = await window.bridge.syncSeasonPassesNow();
+    if (result.ok) {
+      toast({ tone: 'success', title: `Fetched ${result.fetched} pass(es) from cloud` });
+    } else {
+      toast({ tone: 'error', title: 'Sync failed', detail: String(result.error) });
+    }
+    // Re-read regardless: a failed pull leaves the previous cache intact, and
+    // the operator should still see what the gate is currently honouring.
+    await load();
   });
 
   useEffect(() => { void load(); }, []);
@@ -64,10 +81,16 @@ export function SeasonPasses() {
             </p>
           )}
         </div>
-        <button onClick={() => load()} disabled={loading}
-          className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
-          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => load()} disabled={loading}
+            className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+          <button onClick={() => syncFromCloud()} disabled={syncing}
+            className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 text-white hover:bg-gray-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
+            <CloudDownload size={13} className={syncing ? 'animate-pulse' : ''} /> Sync from cloud
+          </button>
+        </div>
       </header>
 
       {/* Source-of-truth callout — passes are owned by qparking cloud (a

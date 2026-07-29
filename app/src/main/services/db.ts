@@ -9,11 +9,12 @@ import path from 'node:path';
 import { app } from 'electron';
 import Database from 'better-sqlite3';
 import type {
-  SeasonPass,
+  SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle,
   AppSettings, LprCamera, ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule,
   ParkingSpace, Site, SyncOp, SyncQueueRow, SyncIssue,
   ActivityLog, Transaction, TransactionStatus,
 } from '../../shared/types';
+import { canonicalPlate } from '../../shared/plate';
 import { randomUUID } from 'node:crypto';
 
 let db: Database.Database | null = null;
@@ -186,6 +187,13 @@ function applySchema(db: Database.Database) {
       -- UI. Payment outcome lives in the transactions table.
       payment_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (payment_status IN ('pending','paid','declined','cancelled','free','manual_release')),
+      -- Why this exit cost nothing. pass_id points at the season_passes row that
+      -- waived the charge (NULL when the exit was free for a non-pass reason);
+      -- free_reason records which rule applied ('pass-monthly', 'within-grace',
+      -- 'rate-zero', 'no-policy'). Revenue assurance depends on being able to
+      -- tell a legitimate pass exit from a misconfigured rate plan.
+      pass_id TEXT,
+      free_reason TEXT,
       terminal_txn_id TEXT,
       notes TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -279,6 +287,55 @@ function applySchema(db: Database.Database) {
     );
     -- Gate lookup is by plate alone (passes are already site-scoped).
     CREATE INDEX IF NOT EXISTS idx_passes_plate ON season_passes (plate_number);
+
+    -- Read-only customer + vehicle directories mirrored from qparking SaaS, so
+    -- staff can look an owner up at the gate without a browser. The cloud_
+    -- prefix marks them as mirrors this app never writes back (unlike
+    -- sessions/lanes/cameras, which are locally owned).
+    CREATE TABLE IF NOT EXISTS cloud_customers (
+      id TEXT PRIMARY KEY,
+      full_name TEXT,
+      email TEXT,
+      phone TEXT,
+      type TEXT,
+      is_enabled INTEGER NOT NULL DEFAULT 1,
+      vehicles_count INTEGER NOT NULL DEFAULT 0,
+      active_passes_count INTEGER NOT NULL DEFAULT 0,
+      last_sign_in TEXT,
+      created_at TEXT,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS cloud_vehicles (
+      id TEXT PRIMARY KEY,
+      plate_number TEXT NOT NULL,
+      vehicle_type TEXT,
+      color TEXT,
+      model TEXT,
+      owner_name TEXT,
+      owner_kind TEXT,
+      is_blacklisted INTEGER NOT NULL DEFAULT 0,
+      blacklist_reason TEXT,
+      pass_type TEXT,
+      pass_status TEXT,
+      pass_end_date TEXT,
+      created_at TEXT,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    -- Plate lookup is the whole point of this mirror.
+    CREATE INDEX IF NOT EXISTS idx_cloud_vehicles_plate ON cloud_vehicles (plate_number);
+
+    -- Blacklisted plates mirrored from qparking SaaS (vehicles.is_blacklisted).
+    -- Separate from season_passes because a banned vehicle usually holds NO
+    -- pass, so the pass roster can never carry this. Checked BEFORE the
+    -- free-exit shortcut: a banned plate that still holds an active pass must
+    -- still be stopped. Plates are stored canonically (see shared/plate.ts).
+    CREATE TABLE IF NOT EXISTS blocked_plates (
+      plate_number TEXT PRIMARY KEY,
+      vehicle_id TEXT,
+      reason TEXT,
+      fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -448,7 +505,11 @@ function applySchema(db: Database.Database) {
   }
   // Same pattern for sessions — older installs predate card_scheme /
   // payment_timestamp. Both feed the new finance columns on the cloud.
-  for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT']) {
+  // pass_id / free_reason (2026-07-29) make a zero-fee exit self-explaining: a
+  // pass exit, a grace exit and a misconfigured RM0 rate plan all used to land
+  // as payment_status='free' with nothing to tell them apart, so "why did this
+  // car leave without paying?" was unanswerable after the fact.
+  for (const col of ['card_scheme TEXT', 'payment_timestamp TEXT', 'pass_id TEXT', 'free_reason TEXT']) {
     try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   // 2026-07-17: split the car's journey (sessions.status) out of the payment
@@ -952,6 +1013,8 @@ function rowToSession(row: any): ParkingSession {
     status: row.status, paymentStatus: row.payment_status, terminalTxnId: row.terminal_txn_id,
     cardScheme: row.card_scheme ?? null,
     paymentTimestamp: row.payment_timestamp ?? null,
+    passId: row.pass_id ?? null,
+    freeReason: row.free_reason ?? null,
     notes: row.notes,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
@@ -995,12 +1058,19 @@ export function recordExit(sessionId: number, patch: {
   terminalTxnId: string | null;
   cardScheme?: string | null;
   paymentTimestamp?: string | null;
+  /** The season_passes row that waived this charge, when the exit was free
+   *  because of a pass. */
+  passId?: string | null;
+  /** Which rule made this exit free — 'pass-<type>' | 'within-grace' |
+   *  'rate-zero' | 'no-policy'. */
+  freeReason?: string | null;
 }): ParkingSession | null {
-  getDb().prepare(`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+  getDb().prepare(`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, pass_id=?, free_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
     .run(
       patch.exitAt, patch.exitLaneId, patch.exitCameraId, patch.exitImagePath,
       patch.durationMinutes, patch.feeCents, patch.status ?? 'exited', patch.paymentStatus, patch.terminalTxnId,
       patch.cardScheme ?? null, patch.paymentTimestamp ?? null,
+      patch.passId ?? null, patch.freeReason ?? null,
       sessionId,
     );
   return getSessionById(sessionId);
@@ -1589,6 +1659,9 @@ export function resetLocalDataForRebind(opts: { wipeEquipment: boolean }): void 
     db.exec('DELETE FROM tariff_rules');
     db.exec('DELETE FROM rate_policies');
     db.exec('DELETE FROM season_passes');
+    db.exec('DELETE FROM blocked_plates');
+    db.exec('DELETE FROM cloud_customers');
+    db.exec('DELETE FROM cloud_vehicles');
     db.exec('DELETE FROM parking_spaces');
     db.exec('DELETE FROM activity_logs');
     db.exec('DELETE FROM sites');
@@ -1730,18 +1803,60 @@ function rowToSeasonPass(row: any): SeasonPass {
   };
 }
 
-/** Find an active pass for the given plate. Season passes are site-scoped (one
- *  site per install), so the lookup is purely by plate. Returns the
- *  longest-coverage pass first so a plate with a free_access + corporate match
- *  prefers the broader entitlement. */
-export function findSeasonPassByPlate(plate: string): SeasonPass | null {
-  const normalisedPlate = plate.toUpperCase().replace(/\s+/g, '');
+/** Site-local (GMT+8, pinned in tz.ts) calendar day for an instant, as the
+ *  YYYY-MM-DD the cloud stores pass start/end dates in. Comparing date-only
+ *  strings keeps this a plain lexicographic test. */
+function siteDayKey(at?: string | null): string {
+  const ms = at ? Date.parse(at) : Date.now();
+  const d = new Date(Number.isNaN(ms) ? Date.now() : ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * Find a valid pass for the given plate. Season passes are site-scoped (one site
+ * per install), so the lookup is purely by plate. Returns the longest-coverage
+ * pass first so a plate with a free_access + corporate match prefers the broader
+ * entitlement.
+ *
+ * Validity is decided ENTIRELY from the dates cached on the row — the gate never
+ * calls the cloud to ask. The SaaS already filters its roster to today's valid
+ * passes, but that filter only protects an ONLINE box: a WAN outage used to
+ * leave a one-day visitor pass in this cache honouring free exits forever, since
+ * the old lookup checked `status` and nothing else.
+ *
+ * A pass counts if it covers the entry instant OR the exit instant. Covering
+ * entry means a monthly holder who drove in on their last valid day isn't
+ * charged on the way out; covering exit means someone who renewed mid-stay isn't
+ * charged either. Omitting the window falls back to "valid right now".
+ */
+export function findSeasonPassByPlate(
+  plate: string,
+  window?: { entryAt?: string | null; exitAt?: string | null },
+): SeasonPass | null {
+  const normalisedPlate = canonicalPlate(plate);
+  const entryDay = siteDayKey(window?.entryAt ?? null);
+  const exitDay = siteDayKey(window?.exitAt ?? null);
+  // NULLIF guards against a cloud row carrying '' instead of NULL for an
+  // open-ended pass (resident / complimentary) — '' would fail every date
+  // comparison and silently deny a forever-pass.
   const row = getDb().prepare(`
     SELECT * FROM season_passes
-    WHERE plate_number = ? AND status = 'active'
+    WHERE plate_number = @plate AND status = 'active'
+      AND (
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
+        )
+        OR
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
+        )
+      )
     ORDER BY is_free DESC, end_date DESC
     LIMIT 1
-  `).get(normalisedPlate) as any;
+  `).get({ plate: normalisedPlate, entryDay, exitDay }) as any;
   return row ? rowToSeasonPass(row) : null;
 }
 
@@ -1752,6 +1867,148 @@ export function findSeasonPassByPlate(plate: string): SeasonPass | null {
 export function listSeasonPasses(): SeasonPass[] {
   const rows = getDb().prepare('SELECT * FROM season_passes ORDER BY plate_number').all() as any[];
   return rows.map(rowToSeasonPass);
+}
+
+// ─── customer / vehicle directories (read-only mirrors) ─────────────────────
+// Replace-all like every other cloud mirror, so a customer or vehicle deleted
+// in the cloud stops showing here on the next sync.
+
+function rowToCloudCustomer(row: any): CloudCustomer {
+  return {
+    id: row.id,
+    fullName: row.full_name ?? null,
+    email: row.email ?? null,
+    phone: row.phone ?? null,
+    type: row.type ?? null,
+    isEnabled: !!row.is_enabled,
+    vehiclesCount: row.vehicles_count ?? 0,
+    activePassesCount: row.active_passes_count ?? 0,
+    lastSignIn: row.last_sign_in ?? null,
+    createdAt: row.created_at ?? null,
+    fetchedAt: row.fetched_at,
+  };
+}
+
+export function listCloudCustomers(): CloudCustomer[] {
+  return (getDb().prepare('SELECT * FROM cloud_customers ORDER BY full_name').all() as any[])
+    .map(rowToCloudCustomer);
+}
+
+export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM cloud_customers').run();
+    const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
+        id, full_name, email, phone, type, is_enabled,
+        vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    for (const c of customers) {
+      insert.run(
+        c.id, c.fullName, c.email, c.phone, c.type, c.isEnabled ? 1 : 0,
+        c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt,
+      );
+    }
+  });
+  tx();
+}
+
+function rowToCloudVehicle(row: any): CloudVehicle {
+  return {
+    id: row.id,
+    plateNumber: row.plate_number,
+    vehicleType: row.vehicle_type ?? null,
+    color: row.color ?? null,
+    model: row.model ?? null,
+    ownerName: row.owner_name ?? null,
+    ownerKind: row.owner_kind ?? null,
+    isBlacklisted: !!row.is_blacklisted,
+    blacklistReason: row.blacklist_reason ?? null,
+    passType: row.pass_type ?? null,
+    passStatus: row.pass_status ?? null,
+    passEndDate: row.pass_end_date ?? null,
+    createdAt: row.created_at ?? null,
+    fetchedAt: row.fetched_at,
+  };
+}
+
+export function listCloudVehicles(): CloudVehicle[] {
+  return (getDb().prepare('SELECT * FROM cloud_vehicles ORDER BY plate_number').all() as any[])
+    .map(rowToCloudVehicle);
+}
+
+export function replaceAllCloudVehicles(vehicles: CloudVehicle[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM cloud_vehicles').run();
+    const insert = db.prepare(`INSERT OR REPLACE INTO cloud_vehicles (
+        id, plate_number, vehicle_type, color, model, owner_name, owner_kind,
+        is_blacklisted, blacklist_reason, pass_type, pass_status, pass_end_date,
+        created_at, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    for (const v of vehicles) {
+      insert.run(
+        // Canonical plate so a staff search matches what the gate reads.
+        v.id, canonicalPlate(v.plateNumber), v.vehicleType, v.color, v.model,
+        v.ownerName, v.ownerKind,
+        v.isBlacklisted ? 1 : 0, v.blacklistReason,
+        v.passType, v.passStatus, v.passEndDate, v.createdAt,
+      );
+    }
+  });
+  tx();
+}
+
+// ─── blocked plates (mirror) ───────────────────────────────────────────────
+// Deny list pulled from qparking SaaS. Checked at BOTH ends of the journey and
+// BEFORE the free-exit pass shortcut — a banned vehicle that still holds a valid
+// pass must not be waved through by it.
+
+function rowToBlockedPlate(row: any): BlockedPlate {
+  return {
+    plateNumber: row.plate_number,
+    vehicleId: row.vehicle_id ?? null,
+    reason: row.reason ?? null,
+    fetchedAt: row.fetched_at,
+  };
+}
+
+/** Is this plate banned? Canonicalises the incoming plate the same way ingest
+ *  does, so an LPR read always lines up with the stored key. */
+export function findBlockedPlate(plate: string): BlockedPlate | null {
+  const row = getDb()
+    .prepare('SELECT * FROM blocked_plates WHERE plate_number = ?')
+    .get(canonicalPlate(plate)) as any;
+  return row ? rowToBlockedPlate(row) : null;
+}
+
+export function listBlockedPlates(): BlockedPlate[] {
+  return (getDb().prepare('SELECT * FROM blocked_plates ORDER BY plate_number').all() as any[])
+    .map(rowToBlockedPlate);
+}
+
+/**
+ * Replace the whole deny list in one transaction. Replace-all matters here in
+ * the un-banning direction: a plate the cloud no longer reports as blacklisted
+ * must stop being blocked on the very next sync, or a lifted ban would keep
+ * trapping the car at the barrier.
+ */
+export function replaceAllBlockedPlates(plates: BlockedPlate[]): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM blocked_plates').run();
+    const insert = db.prepare(
+      `INSERT OR REPLACE INTO blocked_plates (plate_number, vehicle_id, reason, fetched_at)
+       VALUES (?,?,?,CURRENT_TIMESTAMP)`,
+    );
+    for (const plate of plates) {
+      const key = canonicalPlate(plate.plateNumber);
+      // A row whose plate canonicalises to nothing would become a PK of '' and
+      // then match every unreadable plate — drop it instead.
+      if (!key) continue;
+      insert.run(key, plate.vehicleId, plate.reason);
+    }
+  });
+  tx();
 }
 
 // ─── parking spaces (mirror) ───────────────────────────────────────────────
@@ -1816,7 +2073,10 @@ export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
       ) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
     for (const pass of passes) {
       insert.run(
-        pass.passId, pass.plateNumber.toUpperCase().replace(/\s+/g, ''),
+        // Canonical key (see shared/plate.ts) — the cloud keeps whatever
+        // separators the operator typed, the gate reads separator-free, so the
+        // cache must store the form BOTH will agree on.
+        pass.passId, canonicalPlate(pass.plateNumber),
         pass.passType, pass.status,
         pass.startDate, pass.endDate,
         pass.isFree ? 1 : 0,

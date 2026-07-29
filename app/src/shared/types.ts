@@ -13,6 +13,9 @@ export * from './db-models';
 
 import type {
   SeasonPass,
+  BlockedPlate,
+  CloudCustomer,
+  CloudVehicle,
   AppSettings,
   LprCamera,
   ParkingLane,
@@ -165,13 +168,6 @@ export interface BridgeApi {
    *  `laneId` is the exit lane the operator triggered from, so the exit runs on
    *  that gate's controller. */
   retriggerSessionPaymentByPlate(plate: string, laneId?: number | null): Promise<{ ok: boolean; error?: string }>;
-  /** DEV/QA: record a completed session over an explicit entry→exit window
-   *  (local only; computes the fee from the lane's plan). Backs the Sessions
-   *  simulator's "Simulate session" mode. */
-  simulateSession(laneId: number, plate: string, entryIso: string, exitIso: string): Promise<{
-    ok: boolean; error?: string; sessionId?: number; durationMinutes?: number;
-    feeCents?: number; scopeName?: string; currency?: string; paymentStatus?: string;
-  }>;
   /** DEV/QA: open a session stamped with a chosen entry time (no gate/terminal). */
   simulateEntry(laneId: number, plate: string, entryIso: string): Promise<{ ok: boolean; error?: string; sessionId?: number }>;
   /** DEV/QA: run the real exit flow (fee + terminal) at a chosen exit time. */
@@ -218,6 +214,20 @@ export interface BridgeApi {
   /** Read every active pass cached from the cloud. Already populated by the
    *  periodic syncSeasonPasses(); this just lets the UI display them. */
   listSeasonPasses(): Promise<SeasonPass[]>;
+  /** Force a fresh pull of the pass roster from the cloud. The 60s background
+   *  sync does this too — this is the operator's "I just issued a pass, get it
+   *  down here NOW" button. */
+  syncSeasonPassesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  /** Plates the gate refuses at the barrier (cloud `vehicles.is_blacklisted`). */
+  listBlockedPlates(): Promise<BlockedPlate[]>;
+  syncBlockedPlatesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  /** Read-only customer + vehicle directories, so staff can look an owner up at
+   *  the gate without opening the cloud portal. Not on the background tick —
+   *  refresh via these sync calls or Settings → Sync now. */
+  listCloudCustomers(): Promise<CloudCustomer[]>;
+  syncCloudCustomersNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+  listCloudVehicles(): Promise<CloudVehicle[]>;
+  syncCloudVehiclesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
 
   // Rate policies
   listRatePolicies(): Promise<RatePolicy[]>;
@@ -226,6 +236,9 @@ export interface BridgeApi {
   syncAllNow(): Promise<{
     policies: { ok: boolean; fetched: number; error?: string };
     passes: { ok: boolean; fetched: number; error?: string };
+    blockedPlates: { ok: boolean; fetched: number; error?: string };
+    customers: { ok: boolean; fetched: number; error?: string };
+    vehicles: { ok: boolean; fetched: number; error?: string };
     spaces: { ok: boolean; fetched: number; error?: string };
     site: { ok: boolean; fetched: number; error?: string };
     /** Local equipment pushed UP to the cloud registry, per item. */

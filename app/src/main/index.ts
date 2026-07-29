@@ -91,14 +91,15 @@ import {
   getTransactionById, getOpenTransactionForSession, updateTransaction,
   listTransactionsPage, countTransactions,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
-  listParkingSpaces, listSeasonPasses,
+  listParkingSpaces, listSeasonPasses, listBlockedPlates, listCloudCustomers, listCloudVehicles,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
   listActivityLogs,
 } from './services/db';
-import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateCompletedSession, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
+import { computeFee, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
-  startBackgroundSync, syncRatePolicies, syncParkingSpaces,
+  startBackgroundSync, syncRatePolicies, syncParkingSpaces, syncSeasonPasses, syncBlockedPlates,
+  syncCloudCustomers, syncCloudVehicles,
   syncAll, syncSite, fetchSiteWith,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
@@ -235,6 +236,10 @@ function wireRendererEvents() {
   // exits keep the gate closed — the operator handles those manually.
   parkingEvents.on('entry', (p: any) => {
     const laneName = p?.session?.entryLaneId ? getLane(p.session.entryLaneId)?.name : undefined;
+    // A blacklisted plate never reaches here — handleEntry refuses before it
+    // creates a session or emits this event — so WELCOME, the turnstile and the
+    // cloud mirror below are all unreachable for a banned vehicle by
+    // construction, rather than by a conditional that could be missed.
     sendGateEvent({ state: 'open', plate: p?.session?.plate, laneName, direction: 'in', holdMs: 4_000 });
     setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
     // Raise the physical face-auth turnstile on entry — same moment the gate
@@ -289,7 +294,30 @@ function wireRendererEvents() {
   // to specific renderer layouts (red banner + which thing is missing).
   parkingEvents.on('warning', (p: any) => {
     const kind = p?.kind as string;
-    if (kind === 'exit-without-entry') {
+    if (kind === 'exit-blacklisted' || kind === 'entry-blacklisted') {
+      // Held at the barrier for staff attention. Long hold (12s) because this
+      // screen exists to be READ by whoever walks over, not to flash past — and
+      // no automatic recovery follows it.
+      //
+      // Single owner of the BLOCKED screen for BOTH directions. The entry path
+      // emits this warning first and then paints nothing, so this survives; and
+      // the dev simulator's Entry button reaches the operator through here too
+      // (it bypasses handleEntry entirely).
+      sendGateEvent({
+        state: 'closed',
+        plate: p?.plate,
+        direction: kind === 'entry-blacklisted' ? 'in' : 'out',
+        reason: 'blacklisted',
+        detail: p?.reason ?? null,
+        holdMs: 12_000,
+      });
+      sendToRenderer('log', {
+        terminalId: 0,
+        direction: 'error',
+        message: `BLACKLISTED plate ${p?.plate} — ${kind === 'entry-blacklisted' ? 'entered (alert only; entry barrier is not app-driven)' : 'exit refused, car held at barrier'}`,
+        payload: p,
+      });
+    } else if (kind === 'exit-without-entry') {
       sendGateEvent({ state: 'closed', plate: p?.plate, direction: 'out',
         reason: 'exit-without-entry', holdMs: 4_000 });
     } else if (kind === 'exit-no-lane') {
@@ -530,9 +558,6 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: num
   if (gateLaneId) openBarrier({ laneId: gateLaneId, reason: 'manual-release' }).catch(() => null);
   return session;
 });
-// DEV/QA: record a completed session over an explicit entry→exit window.
-ipcMain.handle('sessions:simulate-session', (_e, laneId: number, plate: string, entryIso: string, exitIso: string) =>
-  simulateCompletedSession(laneId, plate, entryIso, exitIso));
 // DEV/QA: timed live flow — open a session at a chosen entry time, then exit at
 // a chosen exit time (prices the stay + drives the terminal).
 ipcMain.handle('sessions:simulate-entry', (_e, laneId: number, plate: string, entryIso: string) =>
@@ -637,6 +662,16 @@ ipcMain.handle('policies:sync', () => syncRatePolicies());
 ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
+ipcMain.handle('season-passes:sync', () => syncSeasonPasses());
+ipcMain.handle('blocked-plates:list', () => listBlockedPlates());
+ipcMain.handle('blocked-plates:sync', () => syncBlockedPlates());
+// Read-only directories. Deliberately NOT on the 60s background tick (they
+// change rarely and only feed lookups, never a gate decision) — refreshed by
+// "Sync now" in Settings or each page's own Sync-from-cloud button.
+ipcMain.handle('cloud-customers:list', () => listCloudCustomers());
+ipcMain.handle('cloud-customers:sync', () => syncCloudCustomers());
+ipcMain.handle('cloud-vehicles:list', () => listCloudVehicles());
+ipcMain.handle('cloud-vehicles:sync', () => syncCloudVehicles());
 ipcMain.handle('activity-logs:list', () => listActivityLogs());
 // "Test price" — simulate the fee a rate plan charges for an entry→exit window.
 ipcMain.handle('policies:simulate', (_e, input: { policyId: string; entry: string; exit: string }) =>

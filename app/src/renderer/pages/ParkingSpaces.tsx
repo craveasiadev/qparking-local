@@ -6,10 +6,14 @@ import { fmtDateTime } from '../lib/datetime';
 import { toast } from '../toast';
 
 /**
- * Parking space inventory — mirrored read-only from qparking SaaS.
+ * Bay inventory — mirrored read-only from qparking SaaS.
  * Shows occupancy by building + level + zone, with status counts.
- * Edits happen in the cloud Operator → Space Management; this page is
+ * Edits happen in the cloud Operator → Bay Management; this page is
  * for at-the-gate visibility.
+ *
+ * Naming: user-visible text says "bay" to match the cloud operator UI, while
+ * identifiers / IPC channels / DB columns stay `space` (same split the cloud
+ * uses, so the two codebases still line up).
  */
 export function ParkingSpaces() {
   const [spaces, setSpaces] = useState<ParkingSpace[]>([]);
@@ -21,7 +25,7 @@ export function ParkingSpaces() {
 
   const [sync, syncing] = useAsyncAction(async () => {
     const r = await window.bridge.syncParkingSpacesNow();
-    if (r.ok) toast({ tone: 'success', title: `Fetched ${r.fetched} space(s)` });
+    if (r.ok) toast({ tone: 'success', title: `Fetched ${r.fetched} bay(s)` });
     else toast({ tone: 'error', title: 'Sync failed', detail: String(r.error) });
     await refresh();
   });
@@ -76,10 +80,10 @@ export function ParkingSpaces() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Grid3x3 size={22} /> Parking Spaces
+            <Grid3x3 size={22} /> Bay Management
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Live read-only view of the cloud's parking-space inventory. Edits happen in qparking SaaS — Operator → Space Management.
+            Live read-only view of the cloud's bay inventory. Edits happen in qparking SaaS — Operator → Bay Management.
           </p>
           {lastSynced && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
@@ -96,7 +100,7 @@ export function ParkingSpaces() {
 
       {/* Status counts strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-        <StatCard label="Total spaces" value={spaces.length} tone="default" />
+        <StatCard label="Total bays" value={spaces.length} tone="default" />
         <StatCard label="Occupied" value={stats.occupied ?? 0} tone="danger" />
         <StatCard label="Reserved / VIP" value={(stats.reserved ?? 0) + (stats.vip ?? 0)} tone="warning" />
         <StatCard label="Available" value={stats.available ?? 0} tone="success" />
@@ -158,11 +162,11 @@ export function ParkingSpaces() {
         </div>
       )}
 
-      {/* All spaces */}
+      {/* All bays */}
       {spaces.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center">
           <Grid3x3 size={28} className="mx-auto text-gray-300" />
-          <p className="mt-3 text-sm font-semibold text-gray-700">No space inventory cached yet</p>
+          <p className="mt-3 text-sm font-semibold text-gray-700">No bay inventory cached yet</p>
           <p className="mt-1 text-[13px] text-gray-500">Configure the qparking URL + API key in Settings, then click <strong>Sync now</strong>.</p>
         </div>
       ) : (
@@ -199,11 +203,11 @@ export function ParkingSpaces() {
 
           <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
             <div className="px-4 py-2 border-b border-gray-200 text-[10px] uppercase tracking-widest font-bold text-gray-500">
-              {filterActive ? `${filteredSpaces.length} of ${spaces.length} spaces` : `All spaces (${spaces.length})`}
+              {filterActive ? `${filteredSpaces.length} of ${spaces.length} bays` : `All bays (${spaces.length})`}
             </div>
 
             {filteredSpaces.length === 0 ? (
-              <div className="p-8 text-center text-sm text-gray-500">No spaces match the current filters.</div>
+              <div className="p-8 text-center text-sm text-gray-500">No bays match the current filters.</div>
             ) : (
               <>
                 {/* DESKTOP TABLE */}

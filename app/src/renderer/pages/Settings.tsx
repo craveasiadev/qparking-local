@@ -34,6 +34,9 @@ interface CloudSyncReport {
   site: CloudSyncResult;
   policies: CloudSyncResult;
   passes: CloudSyncResult;
+  blockedPlates: CloudSyncResult;
+  customers: CloudSyncResult;
+  vehicles: CloudSyncResult;
   spaces: CloudSyncResult;
   equipment?: {
     lanes: EquipmentPushItem[];
@@ -296,7 +299,7 @@ export function Settings() {
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-1.5">
             <div className="space-y-0.5">
               <div className="text-gray-400 uppercase tracking-wide text-[10px] not-italic">Pulled from cloud ↓</div>
-              {(['site', 'policies', 'passes', 'spaces'] as const).map((model) => {
+              {(['site', 'policies', 'passes', 'blockedPlates', 'customers', 'vehicles', 'spaces'] as const).map((model) => {
                 const result = cloudSyncReport[model];
                 if (!result) return null;
                 return (

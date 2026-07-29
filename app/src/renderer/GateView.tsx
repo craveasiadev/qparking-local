@@ -7,6 +7,8 @@ interface GateEvent {
   laneName?: string;
   direction?: 'in' | 'out' | 'test';
   reason?: string;
+  /** Extra line under the headline — currently the blacklist reason. */
+  detail?: string | null;
   feeCents?: number;
   holdMs?: number;
 }
@@ -39,6 +41,7 @@ export function GateView() {
   const isNoTerminal = !isOpen && reason === 'no-terminal';
   const isTerminalOffline = !isOpen && reason === 'terminal-offline';
   const isExitWithoutEntry = !isOpen && reason === 'exit-without-entry';
+  const isBlacklisted = !isOpen && reason === 'blacklisted';
   const isMisconfig = isNoLane || isNoTerminal || isTerminalOffline;
 
   // Pick a background — each driver-facing state gets its own colour so
@@ -50,6 +53,9 @@ export function GateView() {
     : isPleasePay ? 'bg-blue-600'
     : isRescanBlock ? 'bg-amber-500'
     : isExitWithoutEntry ? 'bg-orange-600'
+    // Near-black: deliberately unlike every other state, so staff can tell a
+    // blocked vehicle from an ordinary closed gate at a glance across the lane.
+    : isBlacklisted ? 'bg-zinc-900'
     : isMisconfig ? 'bg-red-700'
     : 'bg-red-600';
 
@@ -60,6 +66,7 @@ export function GateView() {
       : 'GATE OPEN')
     : isPleasePay ? 'PLEASE PAY'
     : isRescanBlock ? 'ALREADY INSIDE'
+    : isBlacklisted ? 'VEHICLE BLOCKED'
     : isExitWithoutEntry ? 'NO ENTRY ON RECORD'
     : isNoLane ? 'CAMERA HAS NO LANE'
     : isNoTerminal ? 'TERMINAL NOT CONFIGURED'
@@ -73,6 +80,9 @@ export function GateView() {
       : 'Test trigger')
     : isPleasePay ? 'Tap card on payment terminal'
     : isRescanBlock ? 'Please use exit lane to pay'
+    // Show the operator-entered blacklist reason when there is one, so staff
+    // walking over already know what this is about.
+    : isBlacklisted ? (event.detail ? `See attendant · ${event.detail}` : 'Please see attendant')
     : isExitWithoutEntry ? 'See attendant for assistance'
     : isTerminalOffline ? 'Operator: connect terminal in Terminals page'
     : isMisconfig ? 'Operator: check qparking-local settings'
@@ -82,7 +92,7 @@ export function GateView() {
   // triangle, normal closed gets a ban symbol.
   const HeadIcon = isOpen ? Check
     : isPleasePay ? CreditCard
-    : (isMisconfig || isExitWithoutEntry) ? AlertTriangle
+    : (isMisconfig || isExitWithoutEntry || isBlacklisted) ? AlertTriangle
     : Ban;
   const DirIcon = event.direction === 'in' ? ArrowDown : event.direction === 'out' ? ArrowUp : Bolt;
 

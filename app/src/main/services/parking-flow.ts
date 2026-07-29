@@ -26,7 +26,7 @@ import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRu
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
-  createTransaction, updateTransaction,
+  createTransaction, updateTransaction, findBlockedPlate,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
 import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, type PayResultBody } from './payment-tng';
@@ -136,18 +136,71 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
+  // ─── Blacklist at entry ──────────────────────────────────────────────
+  // A banned plate opens NOTHING: no session row, no cloud mirror, no WELCOME,
+  // no turnstile. Checked before createEntrySession so the refusal leaves no
+  // trace to clean up — "blocked" reading as "Entry stored" in the table was
+  // exactly the wrong signal.
+  //
+  // The car may still roll in past a camera-driven barrier this app can't veto,
+  // so the safety net is at the other end: handleExit checks the deny list
+  // BEFORE it requires an open session, meaning a banned plate is identified as
+  // BLOCKED at the exit whether or not an entry was ever recorded.
+  const blockedOnEntry = findBlockedPlate(event.plate);
+  if (blockedOnEntry) {
+    flog(`BLACKLISTED plate=${event.plate} lane=${lane?.id ?? 'null'} reason=${blockedOnEntry.reason ?? 'none given'} → entry REFUSED (no session created, no WELCOME, turnstile NOT opened)`);
+    parkingEvents.emit('warning', {
+      kind: 'entry-blacklisted',
+      plate: event.plate,
+      sessionId: null,
+      reason: blockedOnEntry.reason ?? null,
+      vehicleId: blockedOnEntry.vehicleId,
+    });
+    return;
+  }
+
   const session = createEntrySession(
     event.plate,
     lane?.id ?? null,
     event.cameraId,
     event.imagePath,
   );
+
   parkingEvents.emit('entry', { session, event });
   // TODO: pulse gate-relay if lane has gateRelayAddress configured.
 }
 
 async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   const session = findOpenSessionByPlate(event.plate);
+
+  // ─── Blacklist: refuse the exit outright ─────────────────────────────
+  // Deliberately does NOTHING except warn: no charge, no gate pulse, and any
+  // open session stays OPEN (status 'entered'). Recording an exit here would be
+  // a lie — the car hasn't left — and would also free the plate to open a fresh
+  // entry session. Leaving it stuck at the barrier is the point: the operator
+  // goes and speaks to the owner, then either lifts the ban in the cloud or
+  // manually releases the car.
+  //
+  // FIRST guard on purpose, ahead of both the no-session and no-lane checks:
+  //   - entry no longer creates a session for a banned plate, so one that rolled
+  //     in past a camera-driven barrier has NO open session. Checking after the
+  //     no-session guard would report a vague 'exit-without-entry' instead of
+  //     naming the real reason.
+  //   - it must also precede the pass shortcut, or a banned vehicle still
+  //     holding a valid pass would be waved straight out.
+  const blockedOnExit = findBlockedPlate(event.plate);
+  if (blockedOnExit) {
+    flog(`BLACKLISTED plate=${event.plate} session=${session?.id ?? 'none'} reason=${blockedOnExit.reason ?? 'none given'} → exit REFUSED (no charge, no gate${session ? ', session stays open' : ', no entry on record'})`);
+    parkingEvents.emit('warning', {
+      kind: 'exit-blacklisted',
+      plate: event.plate,
+      sessionId: session?.id ?? null,
+      reason: blockedOnExit.reason ?? null,
+      vehicleId: blockedOnExit.vehicleId,
+    });
+    return;
+  }
+
   if (!session) {
     // Driver exiting without a recorded entry. Could be an LPR misread, OR
     // the entry camera was down. Surface to operator for manual handling.
@@ -186,10 +239,14 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // explicitly waived). Skip the charge and open the gate — but still
   // record the exit so the audit row exists.
   // Season passes are site-scoped (one site per install), so look the plate up
-  // directly — no policy dimension.
-  const seasonPass = findSeasonPassByPlate(event.plate);
+  // directly — no policy dimension. Validity comes from the dates cached on the
+  // row (no cloud round-trip): the pass must cover this stay's entry or exit.
+  const seasonPass = findSeasonPassByPlate(event.plate, {
+    entryAt: session.entryAt,
+    exitAt: exitIso,
+  });
   if (seasonPass) {
-    flog(`PASS MATCH: plate=${event.plate} pass=${seasonPass.passType} id=${seasonPass.passId} → free exit (skip terminal)`);
+    flog(`PASS MATCH: plate=${event.plate} pass=${seasonPass.passType} id=${seasonPass.passId} valid=${seasonPass.startDate ?? '—'}→${seasonPass.endDate ?? 'forever'} → free exit (skip terminal)`);
     recordExit(session.id, {
       exitAt: new Date(exitMs).toISOString(),
       exitLaneId: lane.id,
@@ -201,6 +258,8 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
       terminalTxnId: null,
       cardScheme: null,
       paymentTimestamp: null,
+      passId: seasonPass.passId,
+      freeReason: `pass-${seasonPass.passType}`,
     });
     parkingEvents.emit('exit-completed', {
       sessionId: session.id,
@@ -233,6 +292,9 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     // possible because there's nothing to charge. We DO surface this on
     // the gate screen so the operator doesn't think the system was silent.
     flog(`FREE EXIT (fee=0) — no terminal interaction. Reason: ${!policy ? 'no policy on lane' : durationMinutes < (policy.freeMinutes ?? 0) ? `duration ${durationMinutes}min < freeMinutes ${policy.freeMinutes}` : 'policy rate is RM 0 — check Parking Policies page'}`);
+    const zeroFeeReason = !policy
+      ? 'no-policy'
+      : (durationMinutes < (policy.freeMinutes ?? 0) ? 'within-grace' : 'rate-zero');
     recordExit(session.id, {
       exitAt: new Date(exitMs).toISOString(),
       exitLaneId: lane.id,
@@ -244,11 +306,14 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
       terminalTxnId: null,
       cardScheme: null,
       paymentTimestamp: null,
+      // No pass involved — this exit was free because of the rate plan.
+      passId: null,
+      freeReason: zeroFeeReason,
     });
     parkingEvents.emit('exit-completed', {
       sessionId: session.id,
       outcome: 'free',
-      reason: !policy ? 'no-policy' : (durationMinutes < (policy.freeMinutes ?? 0) ? 'within-grace' : 'rate-zero'),
+      reason: zeroFeeReason,
     });
     return;
   }
@@ -920,69 +985,6 @@ export function retriggerSessionExitByPlate(plate: string, laneId?: number | nul
 }
 
 /**
- * DEV/QA helper — record a COMPLETE (already-exited) parking session with
- * explicit entry & exit times, so pricing can be verified over a real duration
- * without waiting or tapping a card. This writes a closed session straight to
- * the local DB with the fee the lane's plan computes for that exact window. It
- * stays LOCAL — no terminal, no gate, no cloud push. Gated behind devMode in
- * the UI.
- */
-export async function simulateCompletedSession(
-  laneId: number,
-  plate: string,
-  entryIso: string,
-  exitIso: string,
-): Promise<{ ok: boolean; error?: string; sessionId?: number; durationMinutes?: number; feeCents?: number; scopeName?: string; currency?: string; paymentStatus?: string }> {
-  const lane = getLane(laneId);
-  if (!lane) return { ok: false, error: 'lane_not_found' };
-  const norm = normalisePlate(plate);
-  if (!norm) return { ok: false, error: 'plate_required' };
-  const entryMs = Date.parse(entryIso);
-  const exitMs = Date.parse(exitIso);
-  if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return { ok: false, error: 'invalid_dates' };
-  if (exitMs < entryMs) return { ok: false, error: 'exit_before_entry' };
-
-  // Rate resolves the same way a real exit does: this lane plays the ENTRY role
-  // (its plan governs pricing), falling back to the site-default plan.
-  const policy = (lane.policyId ? getRatePolicy(lane.policyId) : null) ?? getSiteDefaultRatePolicy();
-  const durationMinutes = Math.max(0, Math.ceil((exitMs - entryMs) / 60_000));
-  const feeCents = computeFee(durationMinutes, policy, entryIso, exitIso);
-  const paymentStatus: ParkingSession['paymentStatus'] = feeCents > 0 ? 'paid' : 'free';
-
-  // Snapshot off the lane camera's live SDK feed (if any) so the record shows a
-  // real capture. Reuse the live-flow DB primitives: open a session, backdate
-  // its entry, then close it. No terminal, no gate, no cloud push.
-  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
-  // Simulated sessions carry NO capture image (synthetic test record).
-  const imagePath = null;
-  const session = createEntrySession(norm, laneId, cam?.id ?? null, imagePath);
-  updateSessionFields(session.id, { entryAt: new Date(entryMs).toISOString(), notes: 'Simulated (dev tool)' });
-  const paymentTs = paymentStatus === 'paid' ? new Date(exitMs).toISOString() : null;
-  const exited = recordExit(session.id, {
-    exitAt: new Date(exitMs).toISOString(),
-    exitLaneId: laneId,
-    exitCameraId: cam?.id ?? null,
-    exitImagePath: imagePath,
-    durationMinutes,
-    feeCents,
-    status: 'exited',
-    paymentStatus,
-    terminalTxnId: null,
-    cardScheme: null,
-    paymentTimestamp: paymentTs,
-  }) ?? session;
-  // Mirror to the cloud: the exit closes the record; a paid sim also gets a
-  // transaction so the ledger + cloud payment mirror show 'paid' (free = none).
-  if (paymentStatus === 'paid') {
-    const txn = createTransaction({ sessionId: session.id, status: 'paid', amountCents: feeCents, paymentTimestamp: paymentTs });
-    enqueueTransaction(exited, txn);
-  }
-  enqueueExit(exited);
-  flog(`DEV SIMULATE SESSION: lane="${lane.name}" plate=${norm} ${entryIso}→${exitIso} dur=${durationMinutes}min policy=${policy?.policyName ?? 'NONE'} img=${imagePath ? 'yes' : 'none'} → fee=${feeCents}c status=${paymentStatus} → cloud`);
-  return { ok: true, sessionId: session.id, durationMinutes, feeCents, scopeName: policy?.policyName, currency: policy?.currency, paymentStatus };
-}
-
-/**
  * DEV/QA — open a session NOW but stamped with an operator-chosen entry time,
  * so a later timed Exit can price a controlled stay. Creates only the open
  * session (no gate/turnstile side effects) — the point is just to "store" the
@@ -1000,6 +1002,24 @@ export async function simulateEntryAt(
   if (findOpenSessionByPlate(norm)) {
     return { ok: false, error: 'already_inside — this plate has an open session; press Exit first' };
   }
+  // Same refusal as the camera path (handleEntry): a banned plate creates no
+  // session. This helper writes to the DB directly, so the check has to be
+  // repeated here or the simulator would contradict the real flow.
+  const blockedSim = findBlockedPlate(norm);
+  if (blockedSim) {
+    flog(`DEV SIMULATE ENTRY: plate=${norm} is BLACKLISTED (${blockedSim.reason ?? 'no reason given'}) → entry REFUSED, no session created`);
+    parkingEvents.emit('warning', {
+      kind: 'entry-blacklisted',
+      plate: norm,
+      sessionId: null,
+      reason: blockedSim.reason ?? null,
+      vehicleId: blockedSim.vehicleId,
+    });
+    return {
+      ok: false,
+      error: `blacklisted — ${norm} is blocked${blockedSim.reason ? ` (${blockedSim.reason})` : ''}; no entry recorded. Lift the ban in the cloud to let it in.`,
+    };
+  }
   const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
   // Simulator entries carry NO capture image — they're synthetic test records,
   // not a real plate read, so a live-feed snapshot would be misleading.
@@ -1010,6 +1030,7 @@ export async function simulateEntryAt(
   // point of the simulator — but the record should still reach qparking SaaS).
   enqueueEntry(stored);
   flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} img=${imagePath ? 'yes' : 'none'} session=${session.id} → cloud`);
+
   return { ok: true, sessionId: session.id };
 }
 
@@ -1029,6 +1050,25 @@ export async function simulateExitAt(
   if (!norm) return { ok: false, error: 'plate_required' };
   const exitMs = Date.parse(exitIso);
   if (Number.isNaN(exitMs)) return { ok: false, error: 'invalid_exit_time' };
+  // Ahead of the no-open-session guard, mirroring handleExit's own ordering.
+  // Entry refuses a banned plate outright now, so one that slipped past the
+  // vehicle barrier has no session — and 'press Entry first' would hide the
+  // actual reason it can't leave.
+  const blockedSim = findBlockedPlate(norm);
+  if (blockedSim) {
+    flog(`DEV SIMULATE EXIT: plate=${norm} is BLACKLISTED (${blockedSim.reason ?? 'no reason given'}) → exit REFUSED`);
+    parkingEvents.emit('warning', {
+      kind: 'exit-blacklisted',
+      plate: norm,
+      sessionId: findOpenSessionByPlate(norm)?.id ?? null,
+      reason: blockedSim.reason ?? null,
+      vehicleId: blockedSim.vehicleId,
+    });
+    return {
+      ok: false,
+      error: `blacklisted — ${norm} is blocked${blockedSim.reason ? ` (${blockedSim.reason})` : ''}; the barrier stays down and nothing was charged. Lift the ban in the cloud, or release the session manually.`,
+    };
+  }
   if (!findOpenSessionByPlate(norm)) {
     return { ok: false, error: 'no_open_session — press Entry for this plate first' };
   }
