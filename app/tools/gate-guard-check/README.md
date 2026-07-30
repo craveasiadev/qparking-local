@@ -50,6 +50,20 @@ to break when someone touches this guard:
   60m30s stay: it must price free, and the gate's duration must equal the
   simulator's.
 
+## Open-session restore ("Sync now" recovery)
+
+A rebound / reinstalled / wiped box pulls the cloud's OPEN parking records
+(`GET /local-server/parking-records/open`) and re-creates its open sessions, so
+cars that entered before the reset can still exit. The suite pins the import
+guards in `importOpenSessionsFromCloud`: an unknown plate imports (with entry
+time + a "Restored from cloud" note), a plate already inside keeps the box's own
+record, a stay the box already knows (entry within ±5 min, even CLOSED) is
+skipped — the stale-cloud guard that stops a record whose exit push is still in
+our outbound queue from re-opening a stay this box just closed. Also: re-running
+is a no-op, and a restored session closes normally via recordExit. That guard is
+also why the restore rides ONLY on manual "Sync now" / post-rebind, never the
+60s tick.
+
 ## Not covered
 
 The auto-retrigger chargeability guard (`isStillChargeable`) is **not** tested here

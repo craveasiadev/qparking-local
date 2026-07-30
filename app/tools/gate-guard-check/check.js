@@ -185,6 +185,55 @@ try {
     flow.stayDurationMinutes(entryIso, exitIso) === sim.durationMinutes,
     `gate=${flow.stayDurationMinutes(entryIso, exitIso)} sim=${sim.durationMinutes}`);
 
+  // ─── Open-session restore import ("Sync now" recovery) ────────────────
+  // A wiped/rebound box pulls the cloud's open parking records so cars that
+  // entered before the reset can still exit. The guards under test:
+  //  (a) an unknown plate imports as an open session
+  //  (b) a plate already inside keeps the box's own record
+  //  (c) a stay the box already knows (entry within ±5 min, even CLOSED) is
+  //      skipped — a stale cloud record must not re-open a stay this box just
+  //      closed while its exit push sits in the outbound queue.
+  const knownEntryIso = '2026-07-30T01:00:00.000Z';
+  const closedStay = db.createEntrySession('CLOSED0010', lane.id, cam.id, null);
+  db.updateSessionFields(closedStay.id, { entryAt: knownEntryIso });
+  db.recordExit(closedStay.id, {
+    exitAt: '2026-07-30T02:00:00.000Z', exitLaneId: lane.id, exitCameraId: cam.id,
+    exitImagePath: null, durationMinutes: 60, feeCents: 300, paymentStatus: 'paid', terminalTxnId: 'c-1',
+  });
+
+  const restore = db.importOpenSessionsFromCloud([
+    { plate: 'REST0009', entryAt: '2026-07-30T00:30:00.000Z' },                 // (a) fresh → import
+    { plate: 'NEW0003', entryAt: '2026-07-30T00:00:00.000Z' },                  // (b) already inside → skip
+    { plate: 'CLOSED0010', entryAt: '2026-07-30T01:03:00.000Z' },               // (c) known closed stay (+3min) → skip
+  ]);
+  check('restore: unknown plate imported as open session',
+    restore.imported === 1 && !!db.findOpenSessionByPlate('REST0009'),
+    JSON.stringify(restore));
+  const restored = db.findOpenSessionByPlate('REST0009');
+  check('restore: entry time and origin note preserved',
+    restored?.entryAt === '2026-07-30T00:30:00.000Z' && /Restored from cloud/.test(restored?.notes ?? ''),
+    `${restored?.entryAt} · ${restored?.notes}`);
+  check('restore: plate already inside keeps the local record',
+    db.listOpenSessions().filter((s) => s.plate === 'NEW0003').length === 1);
+  check('restore: known closed stay is not re-opened (stale-cloud guard)',
+    !db.findOpenSessionByPlate('CLOSED0010'));
+  // Idempotence: a second Sync now imports nothing new.
+  const again = db.importOpenSessionsFromCloud([
+    { plate: 'REST0009', entryAt: '2026-07-30T00:30:00.000Z' },
+  ]);
+  check('restore: re-running the import is a no-op', again.imported === 0 && again.skipped === 1,
+    JSON.stringify(again));
+  // …and the restored session exits like any other.
+  let restoreExitErr = null;
+  try {
+    db.recordExit(restored.id, {
+      exitAt: '2026-07-30T03:00:00.000Z', exitLaneId: lane.id, exitCameraId: cam.id,
+      exitImagePath: null, durationMinutes: 150, feeCents: 0, paymentStatus: 'free', terminalTxnId: null,
+      freeReason: 'rate-zero',
+    });
+  } catch (e) { restoreExitErr = e.message; }
+  check('restore: restored session can be closed by the exit flow', restoreExitErr === null && !db.findOpenSessionByPlate('REST0009'), restoreExitErr);
+
   out.ok = out.checks.every((c) => c.pass);
 } catch (e) {
   out.error = e && e.stack ? e.stack : String(e);

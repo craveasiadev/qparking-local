@@ -25,6 +25,7 @@ import {
   replaceParkingSpaces,
   pruneStaleRatePolicies,
   replaceAllActivityLogs,
+  importOpenSessionsFromCloud,
   getSettings,
   getBoundSiteId,
   setBoundSiteId,
@@ -238,6 +239,35 @@ export async function syncBlockedPlates(): Promise<SyncResult> {
 }
 
 /**
+ * Restore OPEN sessions (cars currently inside) from the cloud's parking
+ * records — the recovery pull for a rebound / reinstalled / wiped box, so cars
+ * that entered before the reset can still exit. Import guards live in
+ * importOpenSessionsFromCloud; `fetched` reports how many were actually
+ * IMPORTED (already-known stays are skipped, which is the normal case on a
+ * healthy box). Deliberately NOT on the 60s tick: a stale cloud record (its
+ * exit push still in our outbound queue) must never re-open a stay the box
+ * just closed — manual "Sync now" / post-rebind only.
+ */
+export async function syncOpenSessions(): Promise<SyncResult> {
+  const cloud = getCloudApi();
+  if (!cloud) return NOT_CONFIGURED;
+  try {
+    const { data: responseBody } = await cloud.get<CloudListBody>('/parking-records/open');
+    const rows = responseBody.data ?? [];
+    const { imported } = importOpenSessionsFromCloud(
+      rows
+        .filter((row: any) => row.plate_number && row.entry_time)
+        .map((row: any) => ({ plate: String(row.plate_number), entryAt: String(row.entry_time) })),
+    );
+    return { ok: true, fetched: imported };
+  } catch (error) {
+    // 404 = an older qparking SaaS without the endpoint — gracefully no-op.
+    if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+    return toFailedSyncResult(error);
+  }
+}
+
+/**
  * Pull the read-only customer directory. Exists so site staff can look up an
  * owner at the gate without opening the cloud portal in a browser — the on-prem
  * app never writes these back.
@@ -431,8 +461,9 @@ export async function syncAll(): Promise<{
   spaces: SyncResult;
   site: SyncResult;
   activity: SyncResult;
+  sessions: SyncResult;
 }> {
-  const [policies, passes, blockedPlates, customers, vehicles, spaces, site, activity] = await Promise.all([
+  const [policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions] = await Promise.all([
     syncRatePolicies().catch(toFailedSyncResult),
     syncSeasonPasses().catch(toFailedSyncResult),
     syncBlockedPlates().catch(toFailedSyncResult),
@@ -441,8 +472,11 @@ export async function syncAll(): Promise<{
     syncParkingSpaces().catch(toFailedSyncResult),
     syncSite().catch(toFailedSyncResult),
     syncActivityLogs().catch(toFailedSyncResult),
+    // Open-session restore rides ONLY on this manual/post-rebind path — never
+    // the 60s tick (see syncOpenSessions for why).
+    syncOpenSessions().catch(toFailedSyncResult),
   ]);
-  return { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity };
+  return { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions };
 }
 
 // ─── background sync timer ───────────────────────────────────────────────────

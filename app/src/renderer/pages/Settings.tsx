@@ -38,12 +38,42 @@ interface CloudSyncReport {
   customers: CloudSyncResult;
   vehicles: CloudSyncResult;
   spaces: CloudSyncResult;
+  activity?: CloudSyncResult;
+  /** Open-session restore (cars still inside per the cloud). `fetched` counts
+   *  sessions actually IMPORTED — stays this box already knows are skipped, so
+   *  0 is the normal healthy-box result. */
+  sessions?: CloudSyncResult;
   equipment?: {
     lanes: EquipmentPushItem[];
     terminals: EquipmentPushItem[];
     cameras: EquipmentPushItem[];
   };
 }
+
+/**
+ * Display names for the sync-report rows — the SIDEBAR page name for each model,
+ * so the operator can map a row straight to the page it filled (raw object keys
+ * like "blockedPlates" read as developer debug output). Blocked plates have no
+ * page of their own; their operator-facing home is Vehicle Management's Blocked
+ * filter, hence the one label that isn't verbatim from the sidebar.
+ */
+const PULL_MODEL_LABELS: Record<string, string> = {
+  site: 'Sites',
+  policies: 'Parking Rates',
+  passes: 'Season Passes',
+  blockedPlates: 'Blocked Plates',
+  customers: 'Customer Management',
+  vehicles: 'Vehicle Management',
+  spaces: 'Bay Management',
+  activity: 'Activity Logs',
+  sessions: 'Sessions',
+};
+
+const PUSH_GROUP_LABELS: Record<string, string> = {
+  lanes: 'Lanes',
+  terminals: 'Payment terminals',
+  cameras: 'LPR cameras',
+};
 
 /** A downloadable build artifact offered by the update endpoint. */
 interface UpdateArtifact { filename: string; size: number | null; url: string }
@@ -299,12 +329,17 @@ export function Settings() {
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-1.5">
             <div className="space-y-0.5">
               <div className="text-gray-400 uppercase tracking-wide text-[10px] not-italic">Pulled from cloud ↓</div>
-              {(['site', 'policies', 'passes', 'blockedPlates', 'customers', 'vehicles', 'spaces'] as const).map((model) => {
+              {(['site', 'policies', 'passes', 'blockedPlates', 'customers', 'vehicles', 'spaces', 'activity', 'sessions'] as const).map((model) => {
                 const result = cloudSyncReport[model];
                 if (!result) return null;
+                // Sessions is an IMPORT (restore of cars still inside), not a
+                // mirror replace — word it so "0" reads as healthy, not broken.
+                const okText = model === 'sessions'
+                  ? `${result.fetched} open session${result.fetched === 1 ? '' : 's'} restored`
+                  : `${result.fetched} pulled`;
                 return (
                   <div key={model} className={result.ok ? 'text-emerald-700' : 'text-red-700'}>
-                    {result.ok ? '✓' : '✗'} {model} — {result.ok ? `${result.fetched} pulled` : result.error}
+                    {result.ok ? '✓' : '✗'} {PULL_MODEL_LABELS[model] ?? model} — {result.ok ? okText : result.error}
                   </div>
                 );
               })}
@@ -323,7 +358,7 @@ export function Settings() {
                   return (
                     <div key={group}>
                       <div className={failed.length ? 'text-red-700' : skipped.length ? 'text-amber-700' : 'text-emerald-700'}>
-                        {failed.length ? '✗' : skipped.length ? '⚠' : '✓'} {group} — {sent}/{items.length} sent
+                        {failed.length ? '✗' : skipped.length ? '⚠' : '✓'} {PUSH_GROUP_LABELS[group] ?? group} — {sent}/{items.length} sent
                         {skipped.length ? `, ${skipped.length} skipped` : ''}
                         {failed.length ? `, ${failed.length} failed` : ''}
                       </div>
@@ -341,7 +376,7 @@ export function Settings() {
         )}
         <div className="text-[11px] text-gray-500 flex items-start gap-1.5">
           <AlertCircle size={13} className="flex-shrink-0 mt-0.5" />
-          <p>Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code> and re-pulled every 60 seconds. Equipment (cameras, lanes, terminals) syncs manually from each device page's <strong>Push / Pull to cloud</strong> buttons — not here.</p>
+          <p>Site, policies, passes and spaces are pulled from <code className="font-mono">{`{base}/api/v1/local-server/…`}</code> and re-pulled every 60 seconds. <strong>Sync now</strong> additionally restores open sessions (cars the cloud says are still inside) — recovery for a reset or rebound box; stays this box already knows are left untouched. Equipment (cameras, lanes, terminals) syncs manually from each device page's <strong>Push / Pull to cloud</strong> buttons — not here.</p>
         </div>
       </section>
 

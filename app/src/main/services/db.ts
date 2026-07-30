@@ -1064,6 +1064,64 @@ export function getSessionById(id: number): ParkingSession | null {
   return row ? rowToSession(row) : null;
 }
 
+/**
+ * Restore OPEN sessions from the cloud's parking records — cars the cloud says
+ * are still inside this site. This is the recovery path for a rebound /
+ * reinstalled / wiped box: without it, a car that entered before the wipe has
+ * no open session and the barrier reports exit-without-entry.
+ *
+ * Import rules (per row, newest entry first):
+ *  - a plate with an OPEN local session is skipped — the box's own record wins;
+ *  - a plate whose local sessions already include this stay (any session with
+ *    entry_at within ±5 minutes of the cloud's entry time, open OR closed) is
+ *    skipped — this is the guard against a STALE cloud record re-opening a stay
+ *    the box just closed while its exit push is still in the outbound queue.
+ *    That guard is also why this import runs on manual "Sync now" only, never
+ *    the 60s tick;
+ *  - everything else becomes a normal open session (no lane/camera/image — the
+ *    exit flow doesn't need them; pricing falls back exit-lane → site default),
+ *    stamped in notes as restored so the operator can tell it apart.
+ * Nothing is enqueued back to the cloud — these rows came FROM it.
+ */
+export function importOpenSessionsFromCloud(
+  rows: Array<{ plate: string; entryAt: string }>,
+): { imported: number; skipped: number } {
+  const db = getDb();
+  const TOLERANCE_MS = 5 * 60_000;
+  let imported = 0;
+  let skipped = 0;
+
+  const insert = db.prepare(
+    `INSERT INTO sessions (plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path, notes)
+     VALUES (?,?,NULL,NULL,NULL,?)`,
+  );
+  const tx = db.transaction(() => {
+    // Newest first, so a duplicate-plate anomaly resolves to the latest stay
+    // (the older row then skips on the open-session guard).
+    const sorted = [...rows].sort((a, b) => Date.parse(b.entryAt) - Date.parse(a.entryAt));
+    for (const row of sorted) {
+      const plate = canonicalPlate(row.plate);
+      const entryMs = Date.parse(row.entryAt);
+      if (!plate || Number.isNaN(entryMs)) { skipped++; continue; }
+
+      const open = db.prepare('SELECT 1 FROM sessions WHERE plate = ? AND exit_at IS NULL LIMIT 1').get(plate);
+      if (open) { skipped++; continue; }
+
+      const known = (db.prepare('SELECT entry_at FROM sessions WHERE plate = ?').all(plate) as { entry_at: string }[])
+        .some((s) => {
+          const ms = Date.parse(s.entry_at);
+          return !Number.isNaN(ms) && Math.abs(ms - entryMs) <= TOLERANCE_MS;
+        });
+      if (known) { skipped++; continue; }
+
+      insert.run(plate, new Date(entryMs).toISOString(), 'Restored from cloud (Sync now) — entered before this box was reset/rebound');
+      imported++;
+    }
+  });
+  tx();
+  return { imported, skipped };
+}
+
 export function recordExit(sessionId: number, patch: {
   exitAt: string;
   exitLaneId: number | null;
