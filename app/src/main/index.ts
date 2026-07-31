@@ -100,9 +100,10 @@ import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSession
 import { canonicalPlate } from '../shared/plate';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
-  startBackgroundSync, syncRatePolicies, syncParkingSpaces, syncSeasonPasses, syncBlockedPlates,
+  syncRatePolicies, syncParkingSpaces, syncSeasonPasses, syncBlockedPlates,
   syncCloudCustomers, syncCloudVehicles,
   syncAll, syncSite, fetchSiteWith,
+  cloudPullEvents, getCloudPullState,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
@@ -149,7 +150,12 @@ app.whenReady().then(async () => {
   console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listener → :${lprPort}`);
   startLprServer(lprPort);
   startParkingFlow();
-  startBackgroundSync();
+  // One-shot cloud pull at boot — the recurring 60s tick was removed, so the
+  // cloud-owned mirrors (passes, deny list, spaces, activity) refresh only here
+  // and on the operator's manual "Sync now" / site rebind. The local SQLite
+  // cache persists across restarts, so a failed boot pull just leaves the gate
+  // pricing and gating from the last successful sync.
+  void syncAll().catch(() => null);
   startSyncDrain();
   // W4G PayResult callback listener — only start when the operator has
   // enabled the TNG integration. Toggling it on/off in Settings restarts
@@ -399,6 +405,11 @@ function wireRendererEvents() {
 
   // Sync status → renderer for the Dashboard panel.
   syncEvents.on('status', (status) => sendToRenderer('sync-status', status));
+
+  // Cloud PULL outcome → renderer. Drives the header's "last synced" stamp.
+  // Event-driven rather than polled: with the 60s tick gone this only changes
+  // on boot, a manual "Sync now", or a rebind.
+  cloudPullEvents.on('pulled', (state) => sendToRenderer('cloud-pull', state));
 
   // Live parking-flow debug log → renderer. Lets the operator see exactly
   // which guard fired (or didn't) without needing to open DevTools — shown
@@ -961,6 +972,10 @@ ipcMain.handle('sync:all-tables', async () => {
   // per type, from each device page via the Push/Pull-to-cloud buttons.
   return await syncAll();
 });
+
+// Initial state for the header's "last synced" stamp. Live updates then arrive
+// on the 'cloud-pull' event, so this is only read once per window.
+ipcMain.handle('sync:cloud-pull-state', () => getCloudPullState());
 
 // ─── manual equipment sync (per device page: Push / Pull to cloud) ──────────
 ipcMain.handle('devices:preview-sync', (_e, type: DeviceType, direction: 'push' | 'pull') =>

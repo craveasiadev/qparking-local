@@ -3,7 +3,7 @@ import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
   Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
-  Users, Car,
+  Users, Car, RefreshCw, Loader2,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -22,7 +22,7 @@ import { VehicleManagement } from './pages/VehicleManagement';
 import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
 import { useCurrentSite } from './hooks/useCurrentSite';
-import { fmtTimeSeconds } from './lib/datetime';
+import { fmtTime, fmtTimeSeconds } from './lib/datetime';
 import { subscribeToast } from './toast';
 
 type Page =
@@ -91,6 +91,61 @@ const SECTIONS: NavSection[] = [
 interface DebugLogEntry {
   ts: string;
   text: string;
+}
+
+/**
+ * Header cloud-pull stamp + manual "Sync now".
+ *
+ * There is no recurring pull timer any more (see cloud-sync.ts) — cloud-owned
+ * data, the barrier's deny list and season passes included, refreshes only at
+ * boot, on a site rebind, or when someone presses this button.
+ */
+function CloudSyncStamp() {
+  const [pullState, setPullState] = useState<{ lastCloudPullAt: string; lastCloudPullError: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    window.bridge.getCloudPullState()
+      .then((s) => { if (alive) setPullState(s); })
+      .catch(() => null);
+    const off = window.bridge.onEvent('cloud-pull', (p: any) => { if (alive) setPullState(p); });
+    return () => { alive = false; off(); };
+  }, []);
+
+  async function syncNow() {
+    setBusy(true);
+    try { await window.bridge.syncAllNow(); }
+    finally { setBusy(false); }
+  }
+
+  const pulledAt = pullState?.lastCloudPullAt || '';
+  const pullError = pullState?.lastCloudPullError || '';
+  const failed = !!pullError;
+  const label = failed
+    ? (pulledAt ? `Sync failed · last good ${fmtTime(pulledAt)}` : 'Sync failed · never synced')
+    : (pulledAt ? `Synced ${fmtTime(pulledAt)}` : 'Never synced');
+
+  return (
+    <div className="flex items-center gap-3 min-w-0">
+      <span
+        className={`inline-flex items-center gap-1.5 text-[11px] font-medium min-w-0 ${failed ? 'text-red-600' : 'text-gray-500'}`}
+        title={pullError || (pulledAt ? `Last clean cloud pull: ${pulledAt}` : 'No successful cloud pull yet')}
+      >
+        {failed ? <AlertTriangle size={12} className="flex-shrink-0" /> : <CheckCircle2 size={12} className="flex-shrink-0" />}
+        <span className="truncate">{label}</span>
+      </span>
+      <button
+        onClick={syncNow}
+        disabled={busy}
+        title="Pull passes, deny list, rates, bays and activity from the cloud now"
+        className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-[11px] font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50 flex-shrink-0"
+      >
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+        {busy ? 'Syncing' : 'Sync now'}
+      </button>
+    </div>
+  );
 }
 
 /** A staff-facing alert toast. Distinct from the low-level parking-flow debug
@@ -294,6 +349,19 @@ export function App() {
         </div>
       </aside>
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        {/* App-wide header. Present on every page so the cloud-pull stamp and
+            "Sync now" are always one glance / one click away — the recurring
+            60s pull was removed, so this is the operator's only routine way to
+            refresh passes and the barrier deny list. */}
+        <header className="flex-shrink-0 h-11 bg-white border-b border-gray-200 flex items-center justify-between gap-4 px-5 sm:px-8">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <MapPin size={12} className="text-gray-400 flex-shrink-0" />
+            <span className="text-[12px] font-semibold text-gray-800 truncate">
+              {site?.name ?? 'No site linked'}
+            </span>
+          </div>
+          <CloudSyncStamp />
+        </header>
         <div className="flex-1 min-h-0 overflow-y-auto">
           {/* Global connection banner — every page except Settings (where the
               operator fixes the link) gets the "not connected" notice until a

@@ -249,6 +249,11 @@ export interface BridgeApi {
     };
   }>;
 
+  /** Persisted outcome of the last full cloud pull, for the header's "last
+   *  synced" stamp. `lastCloudPullAt` is '' until the first clean pull and is
+   *  NOT refreshed by a failed one; `lastCloudPullError` is '' when clean. */
+  getCloudPullState(): Promise<{ lastCloudPullAt: string; lastCloudPullError: string }>;
+
   /** The site profile mirrored from qparking SaaS (one site per install).
    *  Populated by the periodic syncSite(); null until the first sync lands. */
   getCurrentSite(): Promise<Site | null>;
@@ -384,7 +389,7 @@ export interface BridgeApi {
   }>;
 
   // Stream events to renderer (returns an unsubscribe fn)
-  onEvent(channel: 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void): () => void;
+  onEvent(channel: 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'cloud-pull' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void): () => void;
 }
 
 /**

@@ -80,6 +80,7 @@ const api: BridgeApi = {
   listRatePolicies: () => ipcRenderer.invoke('policies:list'),
   syncRatePoliciesNow: () => ipcRenderer.invoke('policies:sync'),
   syncAllNow: () => ipcRenderer.invoke('sync:all-tables'),
+  getCloudPullState: () => ipcRenderer.invoke('sync:cloud-pull-state'),
 
   // Mirrored config from qparking SaaS (read-only locally)
   listParkingSpaces: () => ipcRenderer.invoke('parking-spaces:list'),
@@ -137,7 +138,7 @@ const api: BridgeApi = {
   tngTestPayCancel: (orderId: string, target?: { host?: string; port?: number }) => ipcRenderer.invoke('tng:test-pay-cancel', orderId, target),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'session'|'log'|'plate-detected'|'gate-state'|'sync-status'|'parking-flow-log'|'app-update-progress', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'session'|'log'|'plate-detected'|'gate-state'|'sync-status'|'cloud-pull'|'parking-flow-log'|'app-update-progress', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };
