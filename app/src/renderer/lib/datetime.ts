@@ -45,17 +45,6 @@ export function fmtDateTime(ts?: string | null): string {
   });
 }
 
-/** Date + time + seconds — for logs / live feeds where seconds matter. */
-export function fmtDateTimeSeconds(ts?: string | null): string {
-  const d = toDate(ts);
-  if (!d) return '—';
-  return d.toLocaleString('en-MY', {
-    timeZone: APP_TZ,
-    year: 'numeric', month: 'short', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  });
-}
-
 /** Date only — e.g. "23 Jul 2026". */
 export function fmtDate(ts?: string | null): string {
   const d = toDate(ts);

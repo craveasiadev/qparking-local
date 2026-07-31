@@ -242,7 +242,7 @@ export async function syncBlockedPlates(): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
 	try {
-		const { data: responseBody } = await cloud.get<CloudListBody>("/blocked-plates");
+		const { data: responseBody } = await cloud.get<CloudListBody>("/vehicles/blacklisted");
 		const rows = responseBody.data ?? [];
 		const fetchedAt = new Date().toISOString();
 		const blockedPlates: BlockedPlate[] = rows

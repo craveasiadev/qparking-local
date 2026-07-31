@@ -176,7 +176,6 @@ export interface BridgeApi {
    *  the renderer can't load the raw file:// path over its http/app origin. */
   readSessionImage(filePath: string): Promise<{ base64: string; contentType: string } | null>;
   deleteSession(id: number): Promise<boolean>;
-  deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): Promise<{ deleted: number }>;
   manualReleaseSession(id: number, reason: string, laneId?: number | null): Promise<void>;
   updateSession(id: number, patch: {
     plate?: string;
@@ -218,9 +217,6 @@ export interface BridgeApi {
    *  sync does this too — this is the operator's "I just issued a pass, get it
    *  down here NOW" button. */
   syncSeasonPassesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
-  /** Plates the gate refuses at the barrier (cloud `vehicles.is_blacklisted`). */
-  listBlockedPlates(): Promise<BlockedPlate[]>;
-  syncBlockedPlatesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
   /** Read-only customer + vehicle directories, so staff can look an owner up at
    *  the gate without opening the cloud portal. Not on the background tick —
    *  refresh via these sync calls or Settings → Sync now. */
@@ -307,8 +303,6 @@ export interface BridgeApi {
   diagnoseLpr(): Promise<{ port: number; addresses: string[]; cameras: number }>;
 
   // Gate simulator
-  openGateSimulator(): Promise<void>;
-  testGate(opts?: { plate?: string; direction?: 'in' | 'out' | 'test'; laneName?: string }): Promise<void>;
   /** Operator "open barrier" for a lane/camera from the Live display —
    *  raises the gate (simulator + face turnstile). */
   manualOpenGate(opts: { cameraId?: number | null; laneId?: number | null }): Promise<{ ok: boolean; note?: string }>;

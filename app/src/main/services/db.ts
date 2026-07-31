@@ -1530,30 +1530,6 @@ export function retryAllFailedSync(): number {
   ).run().changes;
 }
 
-/**
- * Bulk delete. Accepts a list of ids OR a `tab` filter ('open' | 'recent' | 'all')
- * for the "delete everything in this tab" use case.
- */
-export function deleteSessionsBulk(opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }): number {
-  const db = getDb();
-  if (opts.ids && opts.ids.length > 0) {
-    const placeholders = opts.ids.map(() => '?').join(',');
-    const info = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...opts.ids);
-    return info.changes;
-  }
-  if (opts.tab === 'open') {
-    return db.prepare('DELETE FROM sessions WHERE exit_at IS NULL').run().changes;
-  }
-  if (opts.tab === 'recent') {
-    // "Recent" tab clears completed sessions only — never wipes open ones.
-    return db.prepare('DELETE FROM sessions WHERE exit_at IS NOT NULL').run().changes;
-  }
-  if (opts.tab === 'all') {
-    return db.prepare('DELETE FROM sessions').run().changes;
-  }
-  return 0;
-}
-
 // ─── policies ────────────────────────────────────────────────────────────────
 
 function rowToRatePolicy(row: any, rules: TariffRule[] = []): RatePolicy {
@@ -2076,11 +2052,6 @@ export function findBlockedPlate(plate: string): BlockedPlate | null {
     .prepare('SELECT * FROM blocked_plates WHERE plate_number = ?')
     .get(canonicalPlate(plate)) as any;
   return row ? rowToBlockedPlate(row) : null;
-}
-
-export function listBlockedPlates(): BlockedPlate[] {
-  return (getDb().prepare('SELECT * FROM blocked_plates ORDER BY plate_number').all() as any[])
-    .map(rowToBlockedPlate);
 }
 
 /**

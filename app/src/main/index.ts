@@ -86,12 +86,12 @@ import {
   listCameras, upsertCamera, deleteCamera,
   listLanes, upsertLane, deleteLane, getLane, setLaneCameras,
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
-  countSessions, listSessionsPage, deleteSession, deleteSessionsBulk,
+  countSessions, listSessionsPage, deleteSession,
   updateSessionFields,
   getTransactionById, getOpenTransactionForSession, updateTransaction,
   listTransactionsPage, countTransactions,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
-  listParkingSpaces, listSeasonPasses, listBlockedPlates, listCloudCustomers, listCloudVehicles,
+  listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
   findSeasonPassByPlate,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
   listActivityLogs,
@@ -100,7 +100,7 @@ import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSession
 import { canonicalPlate } from '../shared/plate';
 import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
-  syncRatePolicies, syncParkingSpaces, syncSeasonPasses, syncBlockedPlates,
+  syncRatePolicies, syncParkingSpaces, syncSeasonPasses,
   syncCloudCustomers, syncCloudVehicles,
   syncAll, syncSite, fetchSiteWith,
   cloudPullEvents, getCloudPullState,
@@ -550,22 +550,6 @@ ipcMain.handle('sessions:delete', (_e, id: number) => {
   if (ok && session) enqueueDelete(session);
   return ok;
 });
-ipcMain.handle('sessions:delete-bulk', (_e, opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) => {
-  // Snapshot sessions to be deleted so each can be enqueued for SaaS sync.
-  let toSync: typeof opts.ids extends infer T ? any[] : any[] = [];
-  if (opts.ids?.length) {
-    toSync = opts.ids.map((sid) => getSessionById(sid)).filter(Boolean);
-  } else if (opts.tab === 'open') {
-    toSync = listOpenSessions();
-  } else if (opts.tab === 'recent') {
-    toSync = listRecentSessions(10_000).filter((s: any) => s.exitAt != null);
-  } else if (opts.tab === 'all') {
-    toSync = listRecentSessions(10_000);
-  }
-  const deleted = deleteSessionsBulk(opts);
-  toSync.forEach((s: any) => { if (s) enqueueDelete(s); });
-  return { deleted };
-});
 ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
   // Abort any in-flight W4G exit charge FIRST, so a PayResult that lands after
   // this release can't flip the voided txn back to 'paid' and un-release the car.
@@ -724,8 +708,6 @@ ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('season-passes:sync', () => syncSeasonPasses());
-ipcMain.handle('blocked-plates:list', () => listBlockedPlates());
-ipcMain.handle('blocked-plates:sync', () => syncBlockedPlates());
 // Read-only directories. Deliberately NOT on the 60s background tick (they
 // change rarely and only feed lookups, never a gate decision) — refreshed by
 // "Sync now" in Settings or each page's own Sync-from-cloud button.
@@ -914,25 +896,6 @@ ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string, target?: { hos
 });
 
 ipcMain.handle('diagnose:lpr', () => require('./services/lpr-webhook').diagnose());
-
-// Gate simulator — opens the always-on-top red/green window.
-ipcMain.handle('gate:open', () => { openGateSimulator(isDev); });
-
-// Fire a fake gate trigger for testing. The window will flash green for ~4s
-// then return to red. Useful for sanity-checking the wiring before any
-// camera or terminal is online.
-ipcMain.handle('gate:test', (_e, opts: { plate?: string; direction?: 'in'|'out'|'test'; laneName?: string } = {}) => {
-  openGateSimulator(isDev);
-  sendGateEvent({
-    state: 'open',
-    plate: opts.plate ?? 'TEST',
-    direction: opts.direction ?? 'test',
-    laneName: opts.laneName,
-    reason: 'manual test',
-    holdMs: 4_000,
-  });
-  setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
-});
 
 // Open the barrier for a lane/camera. Mirrors the remote gate-open path: flash
 // the gate simulator so the operator sees it, pulse the camera's onboard relay

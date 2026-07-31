@@ -58,8 +58,6 @@ const api: BridgeApi = {
   simulateExit: (laneId: number, plate: string, exitIso: string) => ipcRenderer.invoke('sessions:simulate-exit', laneId, plate, exitIso),
   readSessionImage: (filePath: string) => ipcRenderer.invoke('sessions:image', filePath),
   deleteSession: (id: number) => ipcRenderer.invoke('sessions:delete', id),
-  deleteSessionsBulk: (opts: { ids?: number[]; tab?: 'open' | 'recent' | 'all' }) =>
-    ipcRenderer.invoke('sessions:delete-bulk', opts),
   manualReleaseSession: (id: number, reason: string, laneId?: number | null) => ipcRenderer.invoke('sessions:release', id, reason, laneId),
   /** Edit entry/exit/plate/status/notes on a session. Server-side recomputes
    *  duration + fee from the new times against the session's policy rate. */
@@ -87,8 +85,6 @@ const api: BridgeApi = {
   syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
   syncSeasonPassesNow: () => ipcRenderer.invoke('season-passes:sync'),
-  listBlockedPlates: () => ipcRenderer.invoke('blocked-plates:list'),
-  syncBlockedPlatesNow: () => ipcRenderer.invoke('blocked-plates:sync'),
   listCloudCustomers: () => ipcRenderer.invoke('cloud-customers:list'),
   syncCloudCustomersNow: () => ipcRenderer.invoke('cloud-customers:sync'),
   listCloudVehicles: () => ipcRenderer.invoke('cloud-vehicles:list'),
@@ -119,8 +115,6 @@ const api: BridgeApi = {
   diagnoseLpr: () => ipcRenderer.invoke('diagnose:lpr'),
 
   // gate simulator
-  openGateSimulator: () => ipcRenderer.invoke('gate:open'),
-  testGate: (opts?: { plate?: string; direction?: 'in'|'out'|'test'; laneName?: string }) => ipcRenderer.invoke('gate:test', opts ?? {}),
   manualOpenGate: (opts: { cameraId?: number | null; laneId?: number | null }) => ipcRenderer.invoke('gate:manual-open', opts),
 
   // App self-update — check / download / apply against the qparking cloud.
