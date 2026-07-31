@@ -9,7 +9,7 @@
  *   this file    → runtime status objects, wire-protocol envelopes, and the
  *                  BridgeApi contract that types `window.bridge`
  */
-export * from './db-models';
+export * from './schema';
 
 import type {
   SeasonPass,
@@ -26,7 +26,7 @@ import type {
   Site,
   ActivityLog,
   Transaction,
-} from './db-models';
+} from './schema';
 
 // ─── runtime status objects (never persisted) ────────────────────────────────
 
@@ -182,7 +182,7 @@ export interface BridgeApi {
     plate?: string;
     entryAt?: string;
     exitAt?: string | null;
-    paymentStatus?: 'pending'|'paid'|'declined'|'cancelled'|'free'|'manual_release';
+    paymentStatus?: 'pending' | 'paid' | 'declined' | 'cancelled' | 'free' | 'manual_release';
     notes?: string;
     policyIdOverride?: string | null;
   }): Promise<ParkingSession>;
@@ -303,13 +303,13 @@ export interface BridgeApi {
 
   // Gate simulator
   openGateSimulator(): Promise<void>;
-  testGate(opts?: { plate?: string; direction?: 'in'|'out'|'test'; laneName?: string }): Promise<void>;
+  testGate(opts?: { plate?: string; direction?: 'in' | 'out' | 'test'; laneName?: string }): Promise<void>;
   /** Operator "open barrier" for a lane/camera from the Live display —
    *  raises the gate (simulator + face turnstile). */
   manualOpenGate(opts: { cameraId?: number | null; laneId?: number | null }): Promise<{ ok: boolean; note?: string }>;
 
   listActivityLogs(): Promise<ActivityLog[]>;
-  
+
 
   // App self-update — checks qparking cloud /latest-built endpoint.
   /** Probe the cloud for a newer published build. Reads version from

@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { Activity, Filter, Clock, AlertCircle, AlertTriangle, Info, ChevronDown } from 'lucide-react';
 import { useAsyncAction } from '../hooks/useAsyncAction';
-import { ActivityLog } from '@shared/db-models';
+import { ActivityLog } from '@shared/schema';
 import { fmtDateTime } from '../lib/datetime';
 
 const SEVERITY_COLORS: Record<ActivityLog['severity'], string> = {
@@ -40,9 +40,9 @@ export function ActivityLogs() {
 
   const [loadActivityLogs, loading] = useAsyncAction(async () => {
     setActivityLogs(await window.bridge.listActivityLogs());
-  }); 
+  });
 
-  useEffect(() =>{
+  useEffect(() => {
     loadActivityLogs();
   }, [])
 
@@ -173,11 +173,10 @@ export function ActivityLogs() {
                       </span>
                       {log.outcome && (
                         <span
-                          className={`inline-block px-2 py-1 text-xs font-medium rounded ${
-                            log.outcome === 'ok'
+                          className={`inline-block px-2 py-1 text-xs font-medium rounded ${log.outcome === 'ok'
                               ? 'bg-green-100 text-green-800'
                               : 'bg-red-100 text-red-800'
-                          }`}
+                            }`}
                         >
                           {log.outcome}
                         </span>
@@ -201,9 +200,8 @@ export function ActivityLogs() {
                   {/* Expand Button */}
                   <div className="flex-shrink-0 mt-1">
                     <ChevronDown
-                      className={`w-5 h-5 text-slate-600 transition-transform ${
-                        expandedId === log.id ? 'rotate-180' : ''
-                      }`}
+                      className={`w-5 h-5 text-slate-600 transition-transform ${expandedId === log.id ? 'rotate-180' : ''
+                        }`}
                     />
                   </div>
                 </div>

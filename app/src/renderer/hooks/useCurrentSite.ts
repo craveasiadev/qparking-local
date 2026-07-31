@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Site } from '@shared/db-models';
+import type { Site } from '@shared/schema';
 
 /**
  * The operator's site this local server is linked to, or null when it isn't
