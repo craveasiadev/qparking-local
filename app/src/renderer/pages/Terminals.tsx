@@ -66,17 +66,18 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
     setFormError(null);
     if (!editing?.name) { setFormError('Name is required.'); return; }
     if (!editing?.host) { setFormError('Device IP is required.'); return; }
-    await window.bridge.saveTerminal(editing as any);
+    const isNewTerminal = !editing.id;
+    const savedResult = await window.bridge.saveTerminal(editing as any);
     await window.bridge.insertActivityLog({
       eventKey: 'equipment.terminal.saved',
-      action: editing.id ? 'edit' : 'create',
+      action: isNewTerminal ? 'create' : 'edit',
       category: 'config',
       severity: 'high',
       siteId: site?.id ?? null,
       outcome: 'ok',
       resourceType: 'local_terminal',
-      resourceId: (editing.id) ? String(editing.id) : null,
-      description: `Terminal ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${editing.host}`
+      resourceId: String(savedResult.id),
+      description: `Terminal ${(isNewTerminal ? 'added' : 'updated')} · ${editing.name} · ${editing.host}`
     });
     setEditing(null);
     await refresh();

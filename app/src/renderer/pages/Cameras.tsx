@@ -65,17 +65,18 @@ export function Cameras() {
 				return;
 			}
 
-			await window.bridge.saveCamera(editing as any);
+			const isNewCamera = !editing.id;
+			const savedResult = await window.bridge.saveCamera(editing as any);
 			await window.bridge.insertActivityLog({ 
 				eventKey: "equipment.camera.saved",
-				action: editing.id ? "edit" : "create",
+				action: isNewCamera ? "create" : "edit",
 				category: "config",
 				severity: "medium",
 				siteId: site?.id ?? null,
 				outcome: "ok",
 				resourceType: "camera_device",
-				resourceId: (editing.id) ? String(editing.id) : null,
-				description: `Camera ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${editing.direction}`
+				resourceId: String(savedResult.id),
+				description: `Camera ${(isNewCamera ? 'added' : 'updated')} · ${editing.name} · ${editing.direction}`
 			});
 
 			setEditing(null);
@@ -93,7 +94,7 @@ export function Cameras() {
 		if (!(await confirm({ title: "Delete camera", message: "Delete this camera?", danger: true, confirmLabel: "Delete" }))) return;
 		setDeletingId(id);
 		try {
-			const cam = cameras.find((c) => c.id === id);
+			const camera = cameras.find((camera) => camera.id === id);
 			await window.bridge.deleteCamera(id);
 			await window.bridge.insertActivityLog({
 				eventKey: "equipment.camera.removed",
@@ -104,7 +105,7 @@ export function Cameras() {
 				outcome: "ok",
 				resourceType: "camera_device",
 				resourceId: String(id),
-				description: `Camera removed · ${cam?.name ?? `#${id}`}`
+				description: `Camera removed · ${camera?.name ?? `#${id}`}`
 			});
 			await refresh();
 		} finally {

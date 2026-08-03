@@ -67,7 +67,8 @@ export function Lanes() {
       policyId: (dir === 'entry' || dir === 'dual') ? (editing.policyId ?? null) : null,
       terminalId: (dir === 'exit' || dir === 'dual') ? (editing.terminalId ?? null) : null,
     };
-    await window.bridge.saveLane(payload as any);
+    
+    const savedResult = await window.bridge.saveLane(payload as any);
     await window.bridge.insertActivityLog({
       eventKey: 'equipment.lane.saved',
       action: editing.id ? 'edit' : 'create',
@@ -76,7 +77,7 @@ export function Lanes() {
       siteId: site?.id ?? null,
       outcome: 'ok',
       resourceType: 'local_lane',
-      resourceId: (editing.id) ? String(editing.id) : null,
+      resourceId: String(savedResult.id),
       description: `Lane ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${dir ?? 'unset'}`
     });
     setEditing(null);
