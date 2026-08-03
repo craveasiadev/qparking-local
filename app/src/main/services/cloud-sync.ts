@@ -30,10 +30,11 @@ import {
 	getBoundSiteId,
 	setBoundSiteId,
 	bindSiteApiKey,
+	updateActivityLogs,
 } from "./db";
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
-import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site } from "../../shared/types";
+import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site, ActivityLog } from "../../shared/types";
 
 export interface SyncResult {
 	ok: boolean;
@@ -221,6 +222,24 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 			.map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
+	} catch (error) {
+		// 404 means an older qparking SaaS without the endpoint — gracefully no-op.
+		if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+		return toFailedSyncResult(error);
+	}
+}
+
+export async function syncActivityLogs(payload: {data: string}): Promise<SyncResult>{
+	const cloud = getCloudApi();
+	if(!cloud) return NOT_CONFIGURED;
+
+	try {
+		const { data: responseBody } = await cloud.post<CloudListBody>("/activity-logs/sync", payload);
+		const activityLogRows = responseBody.data ?? [];
+
+		const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow));
+		updateActivityLogs(activityLogs);
+		return { ok: true, fetched: activityLogs.length };
 	} catch (error) {
 		// 404 means an older qparking SaaS without the endpoint — gracefully no-op.
 		if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
@@ -495,7 +514,7 @@ export async function syncAll(): Promise<{
 		syncCloudVehicles().catch(toFailedSyncResult),
 		syncParkingSpaces().catch(toFailedSyncResult),
 		syncSite().catch(toFailedSyncResult),
-		syncActivityLogs().catch(toFailedSyncResult),
+		syncActivityLogs({data: ""}).catch(toFailedSyncResult),
 		syncOpenSessions().catch(toFailedSyncResult),
 	]);
 	const results = { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions };
@@ -553,20 +572,18 @@ function stampPullOutcome(results: Record<string, SyncResult>): void {
 // casing so a resource tweak doesn't silently null a column. `_fetchedAt` is
 // unused — activity_logs tracks occurred_at/created_at, not a fetch stamp —
 // but kept in the signature to match the syncActivityLogs() call site.
-function mapApiRowToActivityLogs(activityLogRow: any, _fetchedAt: string): any {
+function mapApiRowToActivityLogs(activityLogRow: any): any {
 	return {
-		id: String(activityLogRow.id),
-		eventKey: String(activityLogRow.event_key ?? activityLogRow.eventKey ?? ""),
-		action: String(activityLogRow.action ?? ""),
-		category: String(activityLogRow.category ?? ""),
+		id: activityLogRow.id,
+		eventKey: activityLogRow.event_key ?? null,
+		action: activityLogRow.action,
+		category: activityLogRow.category ?? null,
 		severity: activityLogRow.severity ?? "low",
 		outcome: activityLogRow.outcome ?? null,
 		resourceType: activityLogRow.resource_type ?? activityLogRow.resourceType ?? null,
 		resourceId: activityLogRow.resource_id ?? activityLogRow.resourceId ?? null,
 		correlationId: activityLogRow.correlation_id ?? activityLogRow.correlationId ?? null,
 		description: activityLogRow.description ?? null,
-		// Cloud sends `changes` as an object/array; replaceAllActivityLogs()
-		// JSON-stringifies it on the way into the TEXT column.
 		changes: activityLogRow.changes ?? null,
 		source: activityLogRow.source ?? "cloud",
 		actorName: activityLogRow.actor_name ?? activityLogRow.actorName ?? null,
@@ -574,26 +591,4 @@ function mapApiRowToActivityLogs(activityLogRow: any, _fetchedAt: string): any {
 		occurredAt: activityLogRow.occurred_at ?? activityLogRow.occurredAt ?? null,
 		createdAt: activityLogRow.created_at ?? activityLogRow.createdAt ?? null,
 	};
-}
-
-export async function syncActivityLogs(): Promise<SyncResult> {
-	const cloud = getCloudApi();
-	if (!cloud) return NOT_CONFIGURED;
-	try {
-		const { data: responseBody } = await cloud.get<CloudListBody>("/activity-logs");
-		const activityLogRows = responseBody.data ?? [];
-		const fetchedAt = new Date().toISOString();
-
-		// Replace-all mirror of the cloud's audit trail. An empty payload is a
-		// legitimate state (e.g. a freshly provisioned site), so we still clear the
-		// local cache — otherwise the PREVIOUS site's logs would keep showing after
-		// a re-provision to a site that has no logs yet.
-		const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow, fetchedAt));
-		replaceAllActivityLogs(activityLogs);
-		return { ok: true, fetched: activityLogs.length };
-	} catch (error) {
-		// 404 means an older qparking SaaS without the endpoint — gracefully no-op.
-		if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
-		return toFailedSyncResult(error);
-	}
 }

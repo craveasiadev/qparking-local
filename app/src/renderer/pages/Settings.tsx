@@ -22,6 +22,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { fmtTimeSeconds, fmtDate } from '../lib/datetime';
 import { toast } from '../toast';
+import { useCurrentSite } from '../../context/SiteContext';
 
 // ─── Types local to this page ────────────────────────────────────────────────
 
@@ -102,6 +103,8 @@ export function Settings() {
   const [justSaved, setJustSaved] = useState<boolean>(false);
   const [syncError , setSyncError] = useState<string | null>(null);
 
+  const site = useCurrentSite();
+
   useEffect(() => { window.bridge.getSettings().then((s) => { setSettings(s); setSavedSnapshot(JSON.stringify(s)); }); }, []);
 
   // Persist the current form AND refresh the saved snapshot so the unsaved
@@ -110,6 +113,17 @@ export function Settings() {
   async function persistSettings(): Promise<AppSettings | null> {
     if (!settings) return null;
     const saved = await window.bridge.saveSettings(settings);
+    await window.bridge.insertActivityLog({
+      eventKey: 'config.settings.saved',
+      action: 'edit',
+      category: 'config',
+      severity: 'high',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'app_settings',
+      resourceId: null,
+      description: `Server settings updated · ${saved.qparkingBaseUrl || 'no cloud URL'}`
+    });
     setSettings(saved);
     setSavedSnapshot(JSON.stringify(saved));
     return saved;

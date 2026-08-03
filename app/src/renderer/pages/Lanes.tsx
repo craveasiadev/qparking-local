@@ -3,6 +3,7 @@ import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, 
 import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
+import { useCurrentSite } from '../../context/SiteContext';
 
 const EMPTY: Omit<ParkingLane, 'id' | 'externalId'> = {
   name: '', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
@@ -32,6 +33,8 @@ export function Lanes() {
   const [search, setSearch] = useState('');
   const [dirFilter, setDirFilter] = useState<'all' | 'entry' | 'exit' | 'dual'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+
+  const site = useCurrentSite();
 
   async function refresh() {
     setList(await window.bridge.listLanes());
@@ -65,6 +68,17 @@ export function Lanes() {
       terminalId: (dir === 'exit' || dir === 'dual') ? (editing.terminalId ?? null) : null,
     };
     await window.bridge.saveLane(payload as any);
+    await window.bridge.insertActivityLog({
+      eventKey: 'equipment.lane.saved',
+      action: editing.id ? 'edit' : 'create',
+      category: 'config',
+      severity: 'high',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'local_lane',
+      resourceId: (editing.id) ? String(editing.id) : null,
+      description: `Lane ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${dir ?? 'unset'}`
+    });
     setEditing(null);
     refresh();
   }
@@ -187,7 +201,7 @@ export function Lanes() {
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={() => { setFormError(null); setEditing({ ...l, cameraIds: cameras.filter((c) => c.laneId === l.id).map((c) => c.id) }); }} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">Edit</button>
-                <button onClick={async () => { if (await confirm({ title: 'Delete lane', message: `Delete lane "${l.name}"?`, danger: true, confirmLabel: 'Delete' })) { await window.bridge.deleteLane(l.id); refresh(); } }}
+                <button onClick={async () => { if (await confirm({ title: 'Delete lane', message: `Delete lane "${l.name}"?`, danger: true, confirmLabel: 'Delete' })) { await window.bridge.deleteLane(l.id); await window.bridge.insertActivityLog({ eventKey: 'equipment.lane.removed', action: 'delete', category: 'config', severity: 'high', siteId: site?.id ?? null, outcome: 'ok', resourceType: 'local_lane', resourceId: String(l.id), description: `Lane removed · ${l.name}` }); refresh(); } }}
                   className="w-9 h-9 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center justify-center"><Trash2 size={14} /></button>
               </div>
             </div>

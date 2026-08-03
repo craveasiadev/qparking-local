@@ -5,7 +5,7 @@
  * security recommendations).
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import type { BridgeApi } from '../shared/types';
+import type { ActivityLogPayload, BridgeApi } from '../shared/types';
 
 // Typed against the shared contract: add a method here without declaring it
 // in BridgeApi (or vice versa) and this file stops compiling. That same
@@ -90,6 +90,8 @@ const api: BridgeApi = {
   listCloudVehicles: () => ipcRenderer.invoke('cloud-vehicles:list'),
   syncCloudVehiclesNow: () => ipcRenderer.invoke('cloud-vehicles:sync'),
   listActivityLogs: () => ipcRenderer.invoke('activity-logs:list'),
+  insertActivityLog: (payload: ActivityLogPayload) => ipcRenderer.invoke('activity-logs:insert', payload),
+  syncActivityLogsNow: (payload: { data: string }) => ipcRenderer.invoke('activity-logs:sync', payload),
   simulateRatePolicyFee: (input: { policyId: string; entry: string; exit: string }) =>
     ipcRenderer.invoke('policies:simulate', input),
 

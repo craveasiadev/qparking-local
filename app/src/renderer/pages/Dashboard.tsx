@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
-import { useCurrentSite } from '../hooks/useCurrentSite';
+import { useCurrentSite } from '../../context/SiteContext';
 import { fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
 
 /** Live reachability of one device: undefined = not probed yet, 'checking' =

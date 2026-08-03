@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { RefreshCw, CameraOff, DoorOpen, CreditCard, Loader2, ScanLine } from 'lucide-react';
 import type { LprCamera, ParkingLane } from '@shared/types';
 import { fmtTimeSeconds } from '../lib/datetime';
+import { useCurrentSite } from '../../context/SiteContext';
 
 /** A plate read pushed by a camera over the LPR webhook — overlaid live on the
  *  matching tile so the wall shows the recognition result, not just video. */
@@ -262,6 +263,7 @@ function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }
   const [busy, setBusy] = useState<null | 'open' | 'pay'>(null);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [plate, setPlate] = useState('');
+  const site = useCurrentSite();
 
   // Auto-dismiss the action result banner a few seconds after it appears so it
   // doesn't linger on the wall. Any new action replaces `result`, which resets
@@ -283,6 +285,17 @@ function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }
     setBusy('open'); setResult(null);
     try {
       const r = await window.bridge.manualOpenGate({ cameraId: cam.id, laneId: lane?.id ?? null });
+      await window.bridge.insertActivityLog({
+        eventKey: 'gate.manual.opened',
+        action: 'manual_open',
+        category: 'gate',
+        severity: 'high',
+        siteId: site?.id ?? null,
+        outcome: r.ok ? 'ok' : 'failed',
+        resourceType: 'local_lane',
+        resourceId: lane?.id != null ? String(lane.id) : null,
+        description: `Barrier manually opened · ${lane?.name ?? 'no lane'} · ${cam.name}`
+      });
       setResult({ ok: r.ok, text: r.note ?? (r.ok ? 'Barrier opened' : 'Failed to open') });
     } catch (e: any) {
       setResult({ ok: false, text: e?.message ?? String(e) });

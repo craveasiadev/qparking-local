@@ -450,9 +450,9 @@ export interface ActivityLog {
   /** Has this row been delivered to /activity-logs/batch yet? */
   pushedToCloud: boolean;
   /** Timestamp of the successful push (ISO 8601). null until pushed. */
-  pushedAt: string | null;
+  pushedAt?: string | null;
   /** Last push error, if delivery failed. null = no error. */
-  syncError: string | null;
+  syncError?: string | null;
 }
 
 // ─── settings (key-value) ────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ import { CustomerManagement } from './pages/CustomerManagement';
 import { VehicleManagement } from './pages/VehicleManagement';
 import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
-import { useCurrentSite } from './hooks/useCurrentSite';
+import { useCurrentSite } from '../context/SiteContext';
 import { fmtTime, fmtTimeSeconds } from './lib/datetime';
 import { subscribeToast } from './toast';
 

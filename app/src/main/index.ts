@@ -11,6 +11,7 @@ import './tz';
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import type { ActivityLogPayload } from '../shared/types';
 
 // ─── userData isolation (dev vs packaged) ──────────────────────────────────
 // In packaged builds Electron derives userData from package.json's productName.
@@ -94,7 +95,7 @@ import {
   listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
   findSeasonPassByPlate,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
-  listActivityLogs,
+  listActivityLogs, insertActivityLog,
 } from './services/db';
 import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
@@ -104,6 +105,7 @@ import {
   syncCloudCustomers, syncCloudVehicles,
   syncAll, syncSite, fetchSiteWith,
   cloudPullEvents, getCloudPullState,
+  syncActivityLogs,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
@@ -708,6 +710,7 @@ ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('season-passes:sync', () => syncSeasonPasses());
+ipcMain.handle('activity-logs:sync', (_event, payload: {data: string}) => syncActivityLogs(payload));
 // Read-only directories. Deliberately NOT on the 60s background tick (they
 // change rarely and only feed lookups, never a gate decision) — refreshed by
 // "Sync now" in Settings or each page's own Sync-from-cloud button.
@@ -716,6 +719,7 @@ ipcMain.handle('cloud-customers:sync', () => syncCloudCustomers());
 ipcMain.handle('cloud-vehicles:list', () => listCloudVehicles());
 ipcMain.handle('cloud-vehicles:sync', () => syncCloudVehicles());
 ipcMain.handle('activity-logs:list', () => listActivityLogs());
+ipcMain.handle('activity-logs:insert', (_e, payload: ActivityLogPayload) => insertActivityLog(payload));
 // "Test price" — simulate the fee a rate plan charges for an entry→exit window.
 ipcMain.handle('policies:simulate', (_e, input: { policyId: string; entry: string; exit: string }) =>
   simulateRatePolicyFee(input.policyId, input.entry, input.exit));

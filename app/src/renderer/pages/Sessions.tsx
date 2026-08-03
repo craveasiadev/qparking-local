@@ -9,6 +9,7 @@ import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { fmtDateTime, fmtTimeSeconds, elapsedMinutesSince } from '../lib/datetime';
 import { toast } from '../toast';
+import { useCurrentSite } from '../../context/SiteContext';
 
 const PAGE_SIZE = 20;
 
@@ -253,6 +254,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [pageLoading, setPageLoading] = useState(false);
+  const site = useCurrentSite();
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
 
@@ -334,7 +336,19 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   }
 
   const [runDeleteOne, deletingOne] = useAsyncAction(async (id: number) => {
+    const row = rows.find((r) => r.id === id);
     await window.bridge.deleteSession(id);
+    await window.bridge.insertActivityLog({
+      eventKey: 'session.delete',
+      action: 'delete',
+      category: 'session',
+      severity: 'high',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'parking_record',
+      resourceId: String(id),
+      description: `Session deleted · ${row?.plate ?? `#${id}`}`
+    });
     setViewing(null);
     await fetchPage();
   });
@@ -961,6 +975,7 @@ function ReleaseSessionModal({
   session, lanes, defaultLaneId, onClose, onReleased,
 }: { session: ParkingSession; lanes: ParkingLane[]; defaultLaneId: number | null; onClose: () => void; onReleased: () => void }) {
   useEscapeToClose(onClose);
+  const site = useCurrentSite();
   const [reason, setReason] = useState('');
   // Default to a lane that's actually in the (exit-only) list: the lane the
   // operator triggered from, else the session's own exit lane, else the first
@@ -976,6 +991,17 @@ function ReleaseSessionModal({
     if (!reason.trim()) { setError('Reason is required.'); return; }
     setError(null);
     await window.bridge.manualReleaseSession(session.id, reason.trim(), laneId);
+    await window.bridge.insertActivityLog({
+      eventKey: 'session.manual_release',
+      action: 'manual_release',
+      category: 'session',
+      severity: 'critical',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'parking_record',
+      resourceId: String(session.id),
+      description: `Session manually released without payment · ${session.plate} · ${reason.trim()}`
+    });
     onReleased();
   }, { onError: (e: any) => setError(e?.message ?? String(e)) });
 
@@ -1035,6 +1061,7 @@ function EditSessionModal({
   session, policies, defaultPolicy, onClose, onSaved,
 }: { session: ParkingSession; policies: RatePolicy[]; defaultPolicy: RatePolicy | null; onClose: () => void; onSaved: () => void }) {
   useEscapeToClose(onClose);
+  const site = useCurrentSite();
   const [plate, setPlate] = useState(session.plate);
   const [entryAt, setEntryAt] = useState(toLocalInput(session.entryAt));
   // Default exit BLANK when the session is still open — so an operator can't
@@ -1100,6 +1127,17 @@ function EditSessionModal({
       paymentStatus,
       notes: notes.trim() || undefined,
       policyIdOverride: policyOverride || null,
+    });
+    await window.bridge.insertActivityLog({
+      eventKey: 'session.edited',
+      action: 'edit',
+      category: 'session',
+      severity: 'high',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'parking_record',
+      resourceId: String(session.id),
+      description: `Session edited · ${plate.trim().toUpperCase()} · ${paymentStatus}`
     });
     onSaved();
   }, { onError: (e: any) => setError(e?.message ?? String(e)) });

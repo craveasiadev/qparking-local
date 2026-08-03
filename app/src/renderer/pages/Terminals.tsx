@@ -8,6 +8,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 import { fmtTimeSeconds } from '../lib/datetime';
+import { useCurrentSite } from '../../context/SiteContext';
 
 /**
  * Payment terminals = Alarmtech Touch'n'Go W4G devices. One device per exit
@@ -41,6 +42,8 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
 
+  const site = useCurrentSite();
+
   async function refresh() {
     setList(await window.bridge.listTerminals());
     setLanes(await window.bridge.listLanes());
@@ -64,6 +67,17 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
     if (!editing?.name) { setFormError('Name is required.'); return; }
     if (!editing?.host) { setFormError('Device IP is required.'); return; }
     await window.bridge.saveTerminal(editing as any);
+    await window.bridge.insertActivityLog({
+      eventKey: 'equipment.terminal.saved',
+      action: editing.id ? 'edit' : 'create',
+      category: 'config',
+      severity: 'high',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'local_terminal',
+      resourceId: (editing.id) ? String(editing.id) : null,
+      description: `Terminal ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${editing.host}`
+    });
     setEditing(null);
     await refresh();
   });
@@ -71,7 +85,22 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
   const [runDelete] = useAsyncAction(async (id: number) => {
     if (!(await confirm({ title: 'Delete device', message: 'Delete this payment device? Any lane wired to it will need re-assigning.', danger: true, confirmLabel: 'Delete' }))) return;
     setDeletingId(id);
-    try { await window.bridge.deleteTerminal(id); await refresh(); }
+    try {
+      const term = list.find((t) => t.id === id);
+      await window.bridge.deleteTerminal(id);
+      await window.bridge.insertActivityLog({
+        eventKey: 'equipment.terminal.removed',
+        action: 'delete',
+        category: 'config',
+        severity: 'high',
+        siteId: site?.id ?? null,
+        outcome: 'ok',
+        resourceType: 'local_terminal',
+        resourceId: String(id),
+        description: `Terminal removed · ${term?.name ?? `#${id}`}`
+      });
+      await refresh();
+    }
     finally { setDeletingId(null); }
   });
 
@@ -80,6 +109,18 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
   // listener via the main-process settings:save handler.
   async function persistListener(patch: { tngEnabled?: boolean; tngCallbackPort?: number; tngCallbackPorts?: string; tngAutoRetrigger?: boolean }) {
     await window.bridge.saveSettings(patch);
+    await window.bridge.insertActivityLog({
+      eventKey: 'config.terminal.listener_saved',
+      action: 'edit',
+      category: 'config',
+      severity: 'medium',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'app_settings',
+      resourceId: null,
+      changes: patch,
+      description: `W4G listener updated · ${Object.keys(patch).join(', ')}`
+    });
     try { setStatus(await window.bridge.tngStatus() as any); } catch { /* ignore */ }
   }
   const [saveCallbackPorts, savingCallbackPorts] = useAsyncAction(async () => {
