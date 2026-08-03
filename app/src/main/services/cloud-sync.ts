@@ -31,6 +31,7 @@ import {
 	setBoundSiteId,
 	bindSiteApiKey,
 	updateActivityLogs,
+	listActivityLogs,
 } from "./db";
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
@@ -229,12 +230,33 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 	}
 }
 
-export async function syncActivityLogs(payload: {data: string}): Promise<SyncResult>{
+export async function syncActivityLogs(): Promise<SyncResult> {
 	const cloud = getCloudApi();
-	if(!cloud) return NOT_CONFIGURED;
+	if (!cloud) return NOT_CONFIGURED;
+	try {
+		const { data: responseBody } = await cloud.get<CloudListBody>("/activity-logs");
+		const activityLogRows = responseBody.data ?? [];
+		const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow));
+		replaceAllActivityLogs(activityLogs);
+		return { ok: true, fetched: activityLogs.length };
+	} catch (error) {
+		// 404 means an older qparking SaaS without the endpoint — gracefully no-op.
+		if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+		return toFailedSyncResult(error);
+	}
+}
+
+export async function pushActivityLogsToCloud(): Promise<SyncResult> {
+	const cloud = getCloudApi();
+	if (!cloud) return NOT_CONFIGURED;
+
+	// Only ever push local-origin rows the cloud hasn't acked yet — rows
+	// mirrored down FROM the cloud (source='cloud') must never be sent back.
+	const pending = listActivityLogs().filter((log) => log.source === "local" && !log.pushedToCloud);
+	if (!pending.length) return { ok: true, fetched: 0 };
 
 	try {
-		const { data: responseBody } = await cloud.post<CloudListBody>("/activity-logs/sync", payload);
+		const { data: responseBody } = await cloud.post<CloudListBody>("/activity-logs/sync", { data: JSON.stringify(pending) });
 		const activityLogRows = responseBody.data ?? [];
 
 		const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow));
@@ -514,7 +536,7 @@ export async function syncAll(): Promise<{
 		syncCloudVehicles().catch(toFailedSyncResult),
 		syncParkingSpaces().catch(toFailedSyncResult),
 		syncSite().catch(toFailedSyncResult),
-		syncActivityLogs({data: ""}).catch(toFailedSyncResult),
+		syncActivityLogs().catch(toFailedSyncResult),
 		syncOpenSessions().catch(toFailedSyncResult),
 	]);
 	const results = { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions };
@@ -571,7 +593,7 @@ function stampPullOutcome(results: Record<string, SyncResult>): void {
 // camelCase shape replaceAllActivityLogs() writes into SQLite. Accepts either
 // casing so a resource tweak doesn't silently null a column. `_fetchedAt` is
 // unused — activity_logs tracks occurred_at/created_at, not a fetch stamp —
-// but kept in the signature to match the syncActivityLogs() call site.
+// but kept in the signature to match the pushActivityLogsToCloud() call site.
 function mapApiRowToActivityLogs(activityLogRow: any): any {
 	return {
 		id: activityLogRow.id,

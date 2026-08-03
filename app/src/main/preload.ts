@@ -65,7 +65,7 @@ const api: BridgeApi = {
     plate?: string;
     entryAt?: string;
     exitAt?: string | null;
-    paymentStatus?: 'pending'|'paid'|'declined'|'cancelled'|'free'|'manual_release';
+    paymentStatus?: 'pending' | 'paid' | 'declined' | 'cancelled' | 'free' | 'manual_release';
     notes?: string;
     policyIdOverride?: string | null;
   }) => ipcRenderer.invoke('sessions:update', id, patch),
@@ -91,7 +91,7 @@ const api: BridgeApi = {
   syncCloudVehiclesNow: () => ipcRenderer.invoke('cloud-vehicles:sync'),
   listActivityLogs: () => ipcRenderer.invoke('activity-logs:list'),
   insertActivityLog: (payload: ActivityLogPayload) => ipcRenderer.invoke('activity-logs:insert', payload),
-  syncActivityLogsNow: (payload: { data: string }) => ipcRenderer.invoke('activity-logs:sync', payload),
+  pushActivityLogsToCloudNow: () => ipcRenderer.invoke('activity-logs:push'),
   simulateRatePolicyFee: (input: { policyId: string; entry: string; exit: string }) =>
     ipcRenderer.invoke('policies:simulate', input),
 
@@ -134,7 +134,7 @@ const api: BridgeApi = {
   tngTestPayCancel: (orderId: string, target?: { host?: string; port?: number }) => ipcRenderer.invoke('tng:test-pay-cancel', orderId, target),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'session'|'log'|'plate-detected'|'gate-state'|'sync-status'|'cloud-pull'|'parking-flow-log'|'app-update-progress', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'cloud-pull' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };

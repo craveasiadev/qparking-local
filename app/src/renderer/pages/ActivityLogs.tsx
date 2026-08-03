@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { Activity, Filter, Clock, AlertCircle, AlertTriangle, Info, ChevronDown, RefreshCw, CloudDownload, X } from "lucide-react";
+import { Activity, Filter, Clock, AlertCircle, AlertTriangle, Info, ChevronDown, RefreshCw, CloudDownload, X, CloudUpload } from "lucide-react";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { ActivityLog } from "@shared/schema";
 import { fmtDateTime } from "../lib/datetime";
@@ -44,11 +44,8 @@ export function ActivityLogs() {
 	});
 
 	const pushToCloudActivityLogs = useMemo(() => activityLogs.filter((activityLog: ActivityLog) => !activityLog.pushedToCloud), [activityLogs]);
-
-	const [syncFromCloud, syncing] = useAsyncAction(async () => {
-		const result = await window.bridge.syncActivityLogsNow({
-			data: JSON.stringify(pushToCloudActivityLogs),
-		});
+	const [syncFromCloud, pushing] = useAsyncAction(async () => {
+		const result = await window.bridge.pushActivityLogsToCloudNow();
 		if (!result.ok) {
 			setError(result.error ?? "Sync failed");
 			return;
@@ -93,11 +90,11 @@ export function ActivityLogs() {
 					</button>
 					<button
 						onClick={() => syncFromCloud()}
-						disabled={syncing}
+						disabled={pushing}
 						className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 text-white hover:bg-gray-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50"
 					>
-						<CloudDownload size={13} className={syncing ? "animate-pulse" : ""} />
-						{syncing ? "Syncing…" : `Sync to cloud${pushToCloudActivityLogs.length ? ` (${pushToCloudActivityLogs.length})` : ""}`}
+						<CloudUpload size={13} className={pushing ? "animate-pulse" : ""} />
+						{pushing ? "Pushing…" : `Push to cloud${pushToCloudActivityLogs.length ? ` (${pushToCloudActivityLogs.length})` : ""}`}
 					</button>
 				</div>
 			</header>

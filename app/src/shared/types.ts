@@ -249,7 +249,7 @@ export interface BridgeApi {
 	 *  sync does this too — this is the operator's "I just issued a pass, get it
 	 *  down here NOW" button. */
 	syncSeasonPassesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
-	syncActivityLogsNow(payload: {data: string}): Promise<{ ok: boolean; fetched: number; error?: string }>;
+	pushActivityLogsToCloudNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
 	/** Read-only customer + vehicle directories, so staff can look an owner up at
 	 *  the gate without opening the cloud portal. Not on the background tick —
 	 *  refresh via these sync calls or Settings → Sync now. */

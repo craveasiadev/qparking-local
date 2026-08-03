@@ -105,7 +105,7 @@ import {
   syncCloudCustomers, syncCloudVehicles,
   syncAll, syncSite, fetchSiteWith,
   cloudPullEvents, getCloudPullState,
-  syncActivityLogs,
+  pushActivityLogsToCloud,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
 import { openGateSimulator, sendGateEvent } from './gate-simulator';
@@ -237,7 +237,7 @@ function createTray() {
 
 function wireRendererEvents() {
   lprEvents.on('plate', (event) => sendToRenderer('plate-detected', event));
-  for (const ev of ['entry','exit-pending','exit-completed','exit-declined','warning','rescan-ignored','entry-ignored-recent-exit'] as const) {
+  for (const ev of ['entry', 'exit-pending', 'exit-completed', 'exit-declined', 'warning', 'rescan-ignored', 'entry-ignored-recent-exit'] as const) {
     parkingEvents.on(ev, (payload) => sendToRenderer('session', { kind: ev, payload }));
   }
 
@@ -340,8 +340,10 @@ function wireRendererEvents() {
         payload: p,
       });
     } else if (kind === 'exit-without-entry') {
-      sendGateEvent({ state: 'closed', plate: p?.plate, direction: 'out',
-        reason: 'exit-without-entry', holdMs: 4_000 });
+      sendGateEvent({
+        state: 'closed', plate: p?.plate, direction: 'out',
+        reason: 'exit-without-entry', holdMs: 4_000
+      });
     } else if (kind === 'exit-no-lane') {
       sendGateEvent({ state: 'closed', direction: 'out', reason: 'no-lane', holdMs: 5_000 });
     } else if (kind === 'exit-no-terminal' || kind === 'exit-terminal-disabled' || kind === 'exit-tng-not-configured') {
@@ -386,7 +388,7 @@ function wireRendererEvents() {
       const txn = getTransactionById(p.transactionId);
       if (txn) enqueueTransaction(session, txn);
     }
-    const allowed = ['paid','free','manual_release'].includes(p?.outcome);
+    const allowed = ['paid', 'free', 'manual_release'].includes(p?.outcome);
     if (!allowed) return;
     const laneName = session?.exitLaneId ? getLane(session.exitLaneId)?.name : undefined;
     sendGateEvent({
@@ -617,7 +619,7 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   plate?: string;
   entryAt?: string;
   exitAt?: string | null;
-  paymentStatus?: 'pending'|'paid'|'declined'|'cancelled'|'free'|'manual_release';
+  paymentStatus?: 'pending' | 'paid' | 'declined' | 'cancelled' | 'free' | 'manual_release';
   notes?: string;
   policyIdOverride?: string | null;
 }) => {
@@ -666,7 +668,7 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
     let policy = patch.policyIdOverride ? getRatePolicy(patch.policyIdOverride) : null;
     if (!policy) {
       const entryLane = working.entryLaneId ? getLane(working.entryLaneId) : null;
-      const exitLane  = working.exitLaneId ? getLane(working.exitLaneId) : null;
+      const exitLane = working.exitLaneId ? getLane(working.exitLaneId) : null;
       policy =
         (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
         ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
@@ -710,7 +712,7 @@ ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('season-passes:sync', () => syncSeasonPasses());
-ipcMain.handle('activity-logs:sync', (_event, payload: {data: string}) => syncActivityLogs(payload));
+ipcMain.handle('activity-logs:push', () => pushActivityLogsToCloud());
 // Read-only directories. Deliberately NOT on the 60s background tick (they
 // change rarely and only feed lookups, never a gate decision) — refreshed by
 // "Sync now" in Settings or each page's own Sync-from-cloud button.
