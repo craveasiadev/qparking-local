@@ -885,6 +885,38 @@ function applySchema(db: Database.Database) {
 		}
 		console.error("[db] sessions rebuild failed:", e);
 	}
+
+	// 2026-08-04: drop NOT NULL from activity_logs.event_key / .category — the
+	// CREATE TABLE above only fixes FRESH installs (IF NOT EXISTS). Cloud rows
+	// written by ActivityLogSupport::record() (web UI) leave both null, which
+	// failed the mirror-down pull with "NOT NULL constraint failed:
+	// activity_logs.event_key". SQLite has no ALTER COLUMN, so each is DROPped
+	// and re-ADDed nullable — existing values in those two columns are lost,
+	// which is fine since this table is a cloud mirror that gets wiped and
+	// refilled on every sync anyway.
+	try {
+		const meta = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='activity_logs'").get() as { sql?: string } | undefined;
+		if (meta?.sql?.includes("event_key VARCHAR(64) NOT NULL") || meta?.sql?.includes("category VARCHAR(32) NOT NULL")) {
+			db.exec("BEGIN");
+			if (meta.sql.includes("event_key VARCHAR(64) NOT NULL")) {
+				db.exec("ALTER TABLE activity_logs DROP COLUMN event_key");
+				db.exec("ALTER TABLE activity_logs ADD COLUMN event_key VARCHAR(64)");
+			}
+			if (meta.sql.includes("category VARCHAR(32) NOT NULL")) {
+				db.exec("ALTER TABLE activity_logs DROP COLUMN category");
+				db.exec("ALTER TABLE activity_logs ADD COLUMN category VARCHAR(32)");
+			}
+			db.exec("COMMIT");
+			console.log("[db] activity_logs: event_key / category re-added as nullable");
+		}
+	} catch (e) {
+		try {
+			db.exec("ROLLBACK");
+		} catch {
+			/* no active txn */
+		}
+		console.error("[db] activity_logs nullable migration failed:", e);
+	}
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────

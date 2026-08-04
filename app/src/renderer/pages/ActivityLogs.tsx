@@ -66,7 +66,9 @@ export function ActivityLogs() {
 		});
 	}, [activityLogs, filters]);
 
-	const categories = Array.from(new Set(activityLogs.map((l) => l.category)));
+	// Cloud operator-CRUD rows carry no category — drop them from the filter
+	// options rather than offering a blank one that matches nothing.
+	const categories = Array.from(new Set(activityLogs.map((l) => l.category).filter((c): c is string => !!c)));
 	const severities = Array.from(new Set(activityLogs.map((l) => l.severity)));
 
 	return (
@@ -189,7 +191,9 @@ export function ActivityLogs() {
 									{/* Main Content */}
 									<div className="flex-1 min-w-0">
 										<div className="flex items-center gap-2 mb-1">
-											<span className="font-semibold text-slate-900">{log.eventKey}</span>
+											{/* Cloud CRUD rows have no event_key; the description below carries
+											    the detail, so a dash beats an empty heading that reads as a bug. */}
+											<span className="font-semibold text-slate-900">{log.eventKey ?? "—"}</span>
 											<span className="inline-block px-2 py-1 text-xs font-medium rounded bg-white bg-opacity-60">{log.action}</span>
 											{log.outcome && (
 												<span
@@ -235,7 +239,7 @@ export function ActivityLogs() {
 										</div>
 										<div>
 											<span className="font-medium text-slate-900">Category:</span>
-											<p className="text-slate-700">{log.category.charAt(0).toUpperCase() + log.category.slice(1)}</p>
+											<p className="text-slate-700">{log.category ? log.category.charAt(0).toUpperCase() + log.category.slice(1) : "—"}</p>
 										</div>
 										<div>
 											<span className="font-medium text-slate-900">Severity:</span>

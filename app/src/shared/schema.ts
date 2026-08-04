@@ -419,12 +419,15 @@ export interface ActivityLog {
   /** UUID — generated locally so the row keeps its identity when pushed to the
    *  cloud (the cloud ActivityLog is UUID-keyed too), avoiding a re-key. */
   id: string;
-  /** Machine slug, e.g. 'gate.manual.opened' | 'payment.declined' | 'sync.failed'. */
-  eventKey: string;
+  /** Machine slug, e.g. 'gate.manual.opened' | 'payment.declined' | 'sync.failed'.
+   *  NULL on rows mirrored down from the cloud's own operator-CRUD writer, which
+   *  doesn't set one — locally-written rows (ActivityLogPayload) always do. */
+  eventKey: string | null;
   /** Verb: 'create' | 'edit' | 'delete' | 'access' | 'failed' | 'retry' | … */
   action: string;
-  /** Grouping: 'gate' | 'payment' | 'equipment' | 'config' | 'sync' | 'session' | … */
-  category: string;
+  /** Grouping: 'gate' | 'payment' | 'equipment' | 'config' | 'sync' | 'session' | …
+   *  NULL on cloud operator-CRUD rows, same as eventKey. */
+  category: string | null;
   severity: 'low' | 'medium' | 'high' | 'critical';
   /**     Result: 'ok' | 'failed' | 'declined' | 'timeout' | 'skipped' | … null = n/a. */
   outcome: string | null;
