@@ -11,7 +11,7 @@
  */
 import {
   MapPin, Phone, Printer, Mail, Globe2, User,
-  Car, Layers, DollarSign, AlertTriangle, Clock, Image as ImageIcon,
+  Car, Layers, Clock, Image as ImageIcon,
   RefreshCw, Loader2,
 } from 'lucide-react';
 import type { Site } from '@shared/types';
@@ -25,12 +25,20 @@ const STATUS_STYLE: Record<Site['status'], { dot: string; text: string; label: s
 
 export function Sites() {
   const [currentSite, setCurrentSite] = useState<Site | null>(null);
+  // Live occupancy comes from OUR open sessions, not the synced
+  // `occupiedSpaces` counter — see the "Live numbers" section below.
+  const [openCount, setOpenCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   async function load() {
     try {
-      setCurrentSite(await window.bridge.getCurrentSite());
+      const [site, open] = await Promise.all([
+        window.bridge.getCurrentSite(),
+        window.bridge.listOpenSessions().catch(() => []),
+      ]);
+      setCurrentSite(site);
+      setOpenCount(open.length);
     } catch (e) {
       console.error('[Sites] failed to load site', e);
     }
@@ -127,7 +135,9 @@ export function Sites() {
   }
 
   const status = STATUS_STYLE[currentSite.status];
-  const occupancyPct = currentSite.totalSpaces > 0 ? Math.round((currentSite.occupiedSpaces / currentSite.totalSpaces) * 100) : 0;
+  const occupancyPct = currentSite.totalSpaces > 0
+    ? Math.min(100, Math.round((openCount / currentSite.totalSpaces) * 100))
+    : 0;
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
@@ -173,17 +183,17 @@ export function Sites() {
         </div>
       </section>
 
-      {/* ─── Live numbers ──────────────────────────────────────────────── */}
-      <section className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+      {/* ─── Live numbers ──────────────────────────────────────────────────
+          Capacity and identity are the cloud's to own, but the live figures
+          are ours. `revenueToday` and `alarmCount` on the synced row mirror
+          cloud columns that nothing ever writes, so tiles reading them showed
+          a permanent RM 0.00 / 0 — they are gone rather than lying. Occupancy
+          is counted from our own open sessions instead of the drifting
+          `occupiedSpaces` counter. */}
+      <section className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
         <StatTile icon={Car} label="Total spaces" value={currentSite.totalSpaces.toLocaleString()} />
-        <StatTile icon={Layers} label="Occupied" value={`${currentSite.occupiedSpaces.toLocaleString()} (${occupancyPct}%)`} />
-        <StatTile icon={DollarSign} label="Revenue today" value={formatCents(currentSite.revenueToday)} />
-        <StatTile
-          icon={AlertTriangle}
-          label="Alarms"
-          value={String(currentSite.alarmCount)}
-          tone={currentSite.alarmCount > 0 ? 'warn' : 'default'}
-        />
+        <StatTile icon={Layers} label="Occupied now" value={`${openCount.toLocaleString()} (${occupancyPct}%)`} />
+        <StatTile icon={Clock} label="Status" value={STATUS_STYLE[currentSite.status].label} />
       </section>
 
       {/* ─── Occupancy bar ─────────────────────────────────────────────── */}
@@ -191,7 +201,7 @@ export function Sites() {
         <section className="mt-3 rounded-xl border border-gray-200 bg-white p-4">
           <div className="flex items-center justify-between text-sm">
             <span className="font-semibold flex items-center gap-2"><Layers size={15} className="text-gray-400" /> Occupancy</span>
-            <span className="tabular-nums text-gray-600"><strong>{currentSite.occupiedSpaces.toLocaleString()}</strong> / {currentSite.totalSpaces.toLocaleString()} spaces · {occupancyPct}%</span>
+            <span className="tabular-nums text-gray-600"><strong>{openCount.toLocaleString()}</strong> / {currentSite.totalSpaces.toLocaleString()} spaces · {occupancyPct}%</span>
           </div>
           <div className="mt-2.5 h-2.5 w-full rounded-full bg-gray-100 overflow-hidden">
             <div className={`h-full rounded-full transition-all ${occupancyPct >= 90 ? 'bg-red-500' : occupancyPct >= 70 ? 'bg-amber-500' : 'bg-emerald-500'}`}
@@ -243,10 +253,5 @@ function InfoRow({ icon: Icon, label, value }: { icon?: any; label: string; valu
       <div className="mt-0.5 text-sm text-gray-900">{value || <span className="text-gray-400">—</span>}</div>
     </div>
   );
-}
-
-/** Cents → "RM 12.30" for display. */
-function formatCents(cents: number): string {
-  return `RM ${(cents / 100).toFixed(2)}`;
 }
 

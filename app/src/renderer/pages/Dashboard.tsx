@@ -133,19 +133,23 @@ export function Dashboard() {
   // that replaced the transient "live plate events" tail.
   const recentExits = recent.filter((s) => s.exitAt).slice(0, RECENT_LIMIT);
 
-  // Prefer the cloud-authoritative daily revenue; fall back to summing what we
-  // collected locally today so the tile is still useful while unlinked.
-  const localCollectedToday = recent
+  // Sum what we collected locally today. This used to prefer the synced
+  // `site.revenueToday`, but that mirrors a cloud column nothing ever writes —
+  // so a LINKED site showed RM 0.00 while this perfectly good local figure sat
+  // unused. Our own sessions are the authority for gate takings at this site.
+  const revenueCents = recent
     .filter((s) => {
       if (s.paymentStatus !== 'paid') return false;
       const paidTs = s.paymentTimestamp ?? s.exitAt;
       return !!paidTs && dateInAppTz(new Date(paidTs)) === today;
     })
     .reduce((sum, s) => sum + (s.feeCents ?? 0), 0);
-  const revenueCents = site ? site.revenueToday : localCollectedToday;
 
+  // Occupancy from our OWN open sessions, the same figure the "Cars inside"
+  // tile shows. The synced `site.occupiedSpaces` is an event counter that
+  // drifts, and the two sitting side by side used to contradict each other.
   const occupancyPct = site && site.totalSpaces > 0
-    ? Math.round((site.occupiedSpaces / site.totalSpaces) * 100)
+    ? Math.min(100, Math.round((open.length / site.totalSpaces) * 100))
     : null;
 
   return (
@@ -168,7 +172,7 @@ export function Dashboard() {
         <Tile icon={Car} label="Cars inside" value={String(open.length)}
           sub={occupancyPct !== null ? `${occupancyPct}% of ${site!.totalSpaces} spaces` : 'open sessions'} />
         <Tile icon={DollarSign} label="Revenue today" value={formatCents(revenueCents)}
-          sub={site ? 'from qparking SaaS' : 'collected locally'} />
+          sub="collected on this site" />
         <Tile icon={Activity} label="Entries today" value={String(entriesToday)} sub="new sessions today" />
         <Tile icon={offlineCount > 0 ? WifiOff : Wifi} label="Devices online"
           value={enabledRows.length === 0 ? '0/0' : `${onlineCount}/${enabledRows.length}`}
