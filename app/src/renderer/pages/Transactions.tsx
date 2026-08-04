@@ -1,10 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  Receipt, RefreshCw, Search, X, Loader2, ChevronLeft, ChevronRight,
+  Receipt, RefreshCw, Search, X, Loader2,
   Eye, CheckCircle2, XCircle, Clock, RotateCcw, Ban, UploadCloud, CalendarDays,
 } from 'lucide-react';
 import type { Transaction, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { usePagination } from '../hooks/usePagination';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { PaginationBar, PageLoadingOverlay } from '../components/Pagination';
+import { InfoTip } from '../components/InfoTip';
 import { fmtDateTime, appTzDayStartUtc, appTzDayEndUtc, todayInAppTz } from '../lib/datetime';
 import { toast } from '../toast';
 
@@ -64,10 +68,8 @@ function StatusBadge({ status }: { status: string }) {
 
 export function Transactions() {
   const [rows, setRows] = useState<TxnRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(0);
+  const pager = usePagination(PAGE_SIZE);
   const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   // GMT+8 calendar dates ('YYYY-MM-DD'); mapped to a UTC range at fetch time.
   // Default to today's GMT+8 day so the ledger opens on the current shift;
@@ -77,30 +79,21 @@ export function Transactions() {
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [viewing, setViewing] = useState<TxnRow | null>(null);
   const [pageLoading, setPageLoading] = useState(false);
-
-  useEffect(() => {
-    const h = setTimeout(() => setDebouncedSearch(search.trim()), 300);
-    return () => clearTimeout(h);
-  }, [search]);
-
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const offset = page * PAGE_SIZE;
+  const debouncedSearch = useDebouncedValue(search.trim());
 
   async function fetchPage() {
     setPageLoading(true);
     try {
       const result = await window.bridge.listTransactionsPage({
         limit: PAGE_SIZE,
-        offset,
+        offset: pager.offset,
         search: debouncedSearch || null,
         status: statusFilter || null,
         dateFrom: appTzDayStartUtc(dateFrom),
         dateTo: appTzDayEndUtc(dateTo),
       });
       setRows(result.rows);
-      setTotal(result.total);
-      const lastValid = Math.max(0, Math.ceil(result.total / PAGE_SIZE) - 1);
-      if (page > lastValid) setPage(lastValid);
+      pager.setTotal(result.total);
       if (viewing) setViewing(result.rows.find((r) => r.id === viewing.id) ?? viewing);
     } finally {
       setPageLoading(false);
@@ -129,7 +122,7 @@ export function Transactions() {
     await fetchPage();
   });
 
-  useEffect(() => { void fetchPage(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [page, debouncedSearch, statusFilter, dateFrom, dateTo]);
+  useEffect(() => { void fetchPage(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [pager.page, debouncedSearch, statusFilter, dateFrom, dateTo]);
   useEffect(() => { window.bridge.listLanes().then(setLanes).catch(() => null); }, []);
   // A completed/failed exit writes a transaction — refresh live off the same
   // 'session' event stream the Sessions page listens to.
@@ -137,8 +130,8 @@ export function Transactions() {
     const off = window.bridge.onEvent('session', () => { void fetchPage(); });
     return off;
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
-  }, [page, debouncedSearch, statusFilter]);
-  useEffect(() => { setPage(0); }, [debouncedSearch, statusFilter]);
+  }, [pager.page, debouncedSearch, statusFilter]);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [debouncedSearch, statusFilter]);
 
   function laneName(id: number | null): string {
     if (!id) return '—';
@@ -149,7 +142,15 @@ export function Transactions() {
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Transactions</h1>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+            Transactions
+            <InfoTip title="About this page" kind="info">
+              Every card payment attempted at the exit terminals — successful,
+              failed, refunded or cancelled. Click a row for the full receipt.
+              "Sync now" sends these records to the qparking cloud so head
+              office reports include them; it's safe to press any time.
+            </InfoTip>
+          </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">Every payment attempt (W4G PayRequest → PayResult) recorded by this server, newest first.</p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
@@ -205,7 +206,7 @@ export function Transactions() {
             type="date"
             value={dateFrom}
             max={dateTo || undefined}
-            onChange={(e) => { setPage(0); setDateFrom(e.target.value); }}
+            onChange={(e) => { pager.reset(); setDateFrom(e.target.value); }}
             title="From date"
             className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white"
           />
@@ -214,19 +215,19 @@ export function Transactions() {
             type="date"
             value={dateTo}
             min={dateFrom || undefined}
-            onChange={(e) => { setPage(0); setDateTo(e.target.value); }}
+            onChange={(e) => { pager.reset(); setDateTo(e.target.value); }}
             title="To date"
             className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white"
           />
           <button
-            onClick={() => { setPage(0); const t = todayInAppTz(); setDateFrom(t); setDateTo(t); }}
+            onClick={() => { pager.reset(); const t = todayInAppTz(); setDateFrom(t); setDateTo(t); }}
             className="h-9 px-2.5 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700"
           >
             Today
           </button>
           {(dateFrom || dateTo) && (
             <button
-              onClick={() => { setPage(0); setDateFrom(''); setDateTo(''); }}
+              onClick={() => { pager.reset(); setDateFrom(''); setDateTo(''); }}
               title="Clear dates"
               className="h-9 px-2 rounded-lg text-gray-400 hover:text-gray-700 inline-flex items-center"
             >
@@ -237,13 +238,7 @@ export function Transactions() {
       </div>
 
       <div className="relative">
-        {pageLoading && (
-          <div className="absolute inset-0 z-10 flex items-start justify-center pt-16 bg-white/50 backdrop-blur-[1px] pointer-events-none">
-            <span className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-500 bg-white border border-gray-200 rounded-full px-3 py-1.5 shadow-sm">
-              <Loader2 size={13} className="animate-spin" /> Loading…
-            </span>
-          </div>
-        )}
+        <PageLoadingOverlay show={pageLoading} />
 
         {/* DESKTOP / TABLET TABLE */}
         <div className={`hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
@@ -322,25 +317,7 @@ export function Transactions() {
         </div>
       </div>
 
-      {/* Pagination */}
-      <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <p className="text-[11px] text-gray-500">
-          {rows.length > 0 && <>Showing {offset + 1}–{offset + rows.length} of {total}</>}
-        </p>
-        {pageCount > 1 && (
-          <div className="inline-flex items-center gap-1 self-start sm:self-auto">
-            <button onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={page === 0}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-gray-200 hover:border-gray-900 disabled:opacity-40 disabled:cursor-not-allowed">
-              <ChevronLeft size={15} />
-            </button>
-            <span className="text-xs font-bold tabular-nums px-3">Page {page + 1} / {pageCount}</span>
-            <button onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))} disabled={page >= pageCount - 1}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-gray-200 hover:border-gray-900 disabled:opacity-40 disabled:cursor-not-allowed">
-              <ChevronRight size={15} />
-            </button>
-          </div>
-        )}
-      </div>
+      <PaginationBar pager={pager} rowsOnPage={rows.length} />
 
       {viewing && (
         <TransactionModal txn={viewing} laneName={laneName} onClose={() => setViewing(null)} />

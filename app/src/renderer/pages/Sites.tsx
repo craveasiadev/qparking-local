@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { Site } from '@shared/types';
 import { useEffect, useState } from 'react';
+import { InfoTip } from '../components/InfoTip';
 
 const STATUS_STYLE: Record<Site['status'], { dot: string; text: string; label: string }> = {
   active: { dot: 'bg-emerald-500', text: 'text-emerald-700', label: 'Active' },
@@ -143,7 +144,15 @@ export function Sites() {
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Sites</h1>
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            Sites
+            <InfoTip>
+              Your site's profile — name, address, contact details and operating
+              hours — as registered in the qparking cloud. To change anything
+              here, edit the site in the cloud admin panel; this page updates on
+              the next sync.
+            </InfoTip>
+          </h1>
           <p className="text-sm text-gray-500 mt-1">Read-only site profile, mirrored from qparking SaaS. Edit these values in the cloud admin panel.</p>
         </div>
         <button onClick={() => refresh()} disabled={refreshing}

@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
-  Trash2, Loader2, ChevronLeft, ChevronRight,
+  Trash2, Loader2,
   Image as ImageIcon, Zap, ArrowDown, ArrowUp, MapPin,
   LogIn, LogOut, Clock, Banknote,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { usePagination } from '../hooks/usePagination';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { PaginationBar, PageLoadingOverlay } from '../components/Pagination';
+import { InfoTip } from '../components/InfoTip';
 import { fmtDateTime, fmtTimeSeconds, elapsedMinutesSince } from '../lib/datetime';
 import { toast } from '../toast';
 import { useCurrentSite } from '../../context/SiteContext';
@@ -233,19 +237,15 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const tab = 'recent' as const;
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [counts, setCounts] = useState({ open: 0, total: 0 });
-  const [page, setPage] = useState(0);
+  const pager = usePagination(PAGE_SIZE);
   const [plateSearch, setPlateSearch] = useState('');
-  const [debouncedPlateSearch, setDebouncedPlateSearch] = useState('');
+  const debouncedPlateSearch = useDebouncedValue(plateSearch.trim());
   // Single entry-date range + one payment-status dropdown. Dates default to
   // empty (no range = all time); status defaults to "pending" so unpaid /
   // still-inside cars surface first, which is what an operator usually needs.
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState('pending');
-  useEffect(() => {
-    const h = setTimeout(() => setDebouncedPlateSearch(plateSearch.trim()), 300);
-    return () => clearTimeout(h);
-  }, [plateSearch]);
   const [viewing, setViewing] = useState<SessionRow | null>(null);
   const [editing, setEditing] = useState<ParkingSession | null>(null);
   const [releasing, setReleasing] = useState<{ session: SessionRow; laneId: number | null } | null>(null);
@@ -258,17 +258,13 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
 
-  const totalForTab = counts.total;
-  const pageCount = Math.max(1, Math.ceil(totalForTab / PAGE_SIZE));
-  const offset = page * PAGE_SIZE;
-
   async function fetchPage() {
     setPageLoading(true);
     try {
       const result = await window.bridge.listSessionsPage({
         tab,
         limit: PAGE_SIZE,
-        offset,
+        offset: pager.offset,
         plateSearch: debouncedPlateSearch || null,
         // The date range filters on ENTRY day (whole-day bounds), matching the
         // operator page's start_date / end_date.
@@ -281,9 +277,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       });
       setRows(result.rows);
       setCounts(result.counts);
-      const newTotal = result.counts.total;
-      const lastValidPage = Math.max(0, Math.ceil(newTotal / PAGE_SIZE) - 1);
-      if (page > lastValidPage) setPage(lastValidPage);
+      pager.setTotal(result.counts.total);
       if (viewing) {
         const fresh = result.rows.find((r) => r.id === viewing.id);
         if (fresh) setViewing(fresh);
@@ -315,12 +309,13 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     await Promise.all([fetchPage(), fetchAux()]);
   });
 
-  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, page, debouncedPlateSearch, startDate, endDate, statusFilter]);
+  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, pager.page, debouncedPlateSearch, startDate, endDate, statusFilter]);
   useEffect(() => {
     const off = window.bridge.onEvent('session', () => { void fetchPage(); });
     return off;
-  }, [tab, page, debouncedPlateSearch, startDate, endDate, statusFilter]);
-  useEffect(() => { setPage(0); }, [debouncedPlateSearch, startDate, endDate, statusFilter]);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [tab, pager.page, debouncedPlateSearch, startDate, endDate, statusFilter]);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [debouncedPlateSearch, startDate, endDate, statusFilter]);
 
   function policyForSession(s: ParkingSession): RatePolicy | null {
     const laneId = s.exitLaneId ?? s.entryLaneId;
@@ -369,7 +364,15 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Sessions</h1>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+            Sessions
+            <InfoTip title="About this page" kind="info">
+              One row per car visit: when it came in, when it left, how long it
+              stayed and what it paid. Click a row to see the camera photos and
+              details, fix a wrong record, charge the driver again, or let a
+              stuck car out (manual release).
+            </InfoTip>
+          </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">Every parking entry/exit recorded by this server.</p>
         </div>
         <button
@@ -454,13 +457,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       {/* Results — desktop table + mobile cards share one relative wrapper so a
           single loading overlay can dim them during a fetch. */}
       <div className="relative">
-        {pageLoading && (
-          <div className="absolute inset-0 z-10 flex items-start justify-center pt-16 bg-white/50 backdrop-blur-[1px] pointer-events-none">
-            <span className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-gray-500 bg-white border border-gray-200 rounded-full px-3 py-1.5 shadow-sm">
-              <Loader2 size={13} className="animate-spin" /> Loading…
-            </span>
-          </div>
-        )}
+        <PageLoadingOverlay show={pageLoading} />
 
       {/* DESKTOP/TABLET TABLE */}
       <div className={`hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
@@ -542,33 +539,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       </div>
       </div>
 
-      {/* Pagination + footnote */}
-      <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <p className="text-[11px] text-gray-500">
-          {rows.length > 0 && (
-            <>Showing {offset + 1}–{offset + rows.length} of {totalForTab}</>
-          )}
-        </p>
-        {pageCount > 1 && (
-          <div className="inline-flex items-center gap-1 self-start sm:self-auto">
-            <button
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-              disabled={page === 0}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-gray-200 hover:border-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <ChevronLeft size={15} />
-            </button>
-            <span className="text-xs font-bold tabular-nums px-3">Page {page + 1} / {pageCount}</span>
-            <button
-              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-              disabled={page >= pageCount - 1}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-gray-200 hover:border-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <ChevronRight size={15} />
-            </button>
-          </div>
-        )}
-      </div>
+      <PaginationBar pager={pager} rowsOnPage={rows.length} />
 
       {viewing && (
         <ViewSessionModal

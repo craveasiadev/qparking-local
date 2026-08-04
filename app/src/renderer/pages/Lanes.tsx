@@ -2,8 +2,13 @@ import { useEffect, useState } from 'react';
 import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Cpu, Search } from 'lucide-react';
 import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
+import { usePagedList } from '../hooks/usePagination';
+import { PaginationBar } from '../components/Pagination';
+import { InfoTip } from '../components/InfoTip';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 import { useCurrentSite } from '../../context/SiteContext';
+
+const PAGE_SIZE = 10;
 
 const EMPTY: Omit<ParkingLane, 'id' | 'externalId'> = {
   name: '', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
@@ -107,13 +112,24 @@ export function Lanes() {
     }
     return true;
   });
+  const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [q, dirFilter, statusFilter]);
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       {confirmDialog}
       <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Lanes</h1>
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            Lanes
+            <InfoTip title="About this page" kind="info">
+              A lane is one gate where cars drive in or out. This page ties the
+              equipment together: give each lane its camera, then a parking rate
+              for entry lanes (what to charge) and a payment terminal for exit
+              lanes (where drivers tap to pay). A lane's direction comes from
+              the camera you assign to it.
+            </InfoTip>
+          </h1>
           <p className="text-sm text-gray-500 mt-1">Entry and exit gates. Each lane links cameras + a payment terminal + a policy rate.</p>
           {list.length > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
@@ -173,7 +189,7 @@ export function Lanes() {
       )}
 
       <div className="grid grid-cols-1 gap-3">
-        {filtered.map((l) => {
+        {pageItems.map((l) => {
           const t = terminals.find((x) => x.id === l.terminalId);
           const s = policies.find((x) => x.policyId === l.policyId);
           const laneCams = cameras.filter((c) => c.laneId === l.id);
@@ -229,6 +245,8 @@ export function Lanes() {
           </div>
         )}
       </div>
+
+      <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
 
       {editing && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setEditing(null)}>

@@ -339,6 +339,28 @@ function wireRendererEvents() {
         message: `BLACKLISTED plate ${p?.plate} — ${kind === 'entry-blacklisted' ? 'entered (alert only; entry barrier is not app-driven)' : 'exit refused, car held at barrier'}`,
         payload: p,
       });
+      // Audit trail: a refused gate attempt is exactly what the Activity Log
+      // exists for — without this row the ban fires invisibly (gate screen +
+      // device log only) and the operator can't review attempts after the
+      // fact. try/catch so an audit-write hiccup can never break gate flow.
+      try {
+        const isEntry = kind === 'entry-blacklisted';
+        insertActivityLog({
+          eventKey: isEntry ? 'gate.entry.blacklisted' : 'gate.exit.blacklisted',
+          action: isEntry ? 'entry' : 'exit',
+          category: 'gate',
+          severity: 'high',
+          outcome: 'blocked',
+          siteId: getBoundSiteId(),
+          resourceType: 'vehicle',
+          resourceId: p?.vehicleId != null ? String(p.vehicleId) : (p?.plate ?? null),
+          description: `Blacklisted plate ${p?.plate ?? '?'} ${isEntry
+            ? 'tried to enter — refused (no session created, barrier not opened)'
+            : 'tried to exit — refused, car held at barrier'}${p?.reason ? ` · reason: ${p.reason}` : ''}`,
+        });
+      } catch (err) {
+        console.error('[activity-log] failed to record blacklist refusal', err);
+      }
     } else if (kind === 'exit-without-entry') {
       sendGateEvent({
         state: 'closed', plate: p?.plate, direction: 'out',

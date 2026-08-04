@@ -3,6 +3,7 @@ import { RefreshCw, CameraOff, DoorOpen, CreditCard, Loader2, ScanLine } from 'l
 import type { LprCamera, ParkingLane } from '@shared/types';
 import { fmtTimeSeconds } from '../lib/datetime';
 import { useCurrentSite } from '../../context/SiteContext';
+import { InfoTip } from '../components/InfoTip';
 
 /** A plate read pushed by a camera over the LPR webhook — overlaid live on the
  *  matching tile so the wall shows the recognition result, not just video. */
@@ -73,7 +74,15 @@ export function LiveDisplay() {
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Live display</h1>
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            Live display
+            <InfoTip title="About this page" kind="info">
+              Live video from every gate camera, with the latest plate read
+              shown on each tile. From here you can also open a barrier for a
+              car manually. If a camera's tile is missing or black, check its
+              IP address on the LPR cameras page.
+            </InfoTip>
+          </h1>
           <p className="text-sm text-gray-500 mt-1">Live video streamed straight from each device over RTSP. A camera needs its IP address set on the LPR cameras page to appear here.</p>
           {cameras.length > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">

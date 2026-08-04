@@ -1,9 +1,14 @@
 import { useEffect, useState } from 'react';
-import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Cloud, Clock, CloudDownload } from 'lucide-react';
+import { Ticket, RefreshCw, AlertCircle, Crown, Calendar, Car, Clock, CloudDownload } from 'lucide-react';
 import type { SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { usePagedList } from '../hooks/usePagination';
+import { PaginationBar } from '../components/Pagination';
+import { InfoTip } from '../components/InfoTip';
 import { toast } from '../toast';
 import { fmtDateTime, todayInAppTz, dateInAppTz } from '../lib/datetime';
+
+const PAGE_SIZE = 20;
 
 /**
  * Season passes view — every plate the gate currently honours without
@@ -55,6 +60,8 @@ export function SeasonPasses() {
     }
     return true;
   });
+  const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter, search]);
 
   const counts = {
     all: passes.length,
@@ -71,6 +78,13 @@ export function SeasonPasses() {
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
             <Ticket size={22} /> Season Passes
+            <InfoTip>
+              Season passes are created by customers in the qparking cloud portal
+              (the Passes tab → "Apply for a new pass", after adding a vehicle
+              under Profile → My vehicles) and approved by operators. This local
+              view refreshes every few minutes so the LPR gate always sees the
+              latest roster.
+            </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every plate the gate opens for without charging. Cached from the cloud.
@@ -92,25 +106,6 @@ export function SeasonPasses() {
           </button>
         </div>
       </header>
-
-      {/* Source-of-truth callout — passes are owned by qparking cloud (a
-          customer buys them via the customer portal, an operator approves
-          them in HQ / Operator UI). This page is a read-only mirror kept
-          fresh by the periodic sync. Making that obvious here prevents
-          operators from expecting an "Add pass" button that isn't coming. */}
-      <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-2.5">
-        <Cloud size={16} className="text-blue-600 mt-0.5 flex-shrink-0" />
-        <div className="text-xs text-blue-900 leading-relaxed">
-          <p className="font-bold uppercase tracking-wide text-[10px]">Managed in cloud</p>
-          <p className="mt-1">
-            Season passes are created by customers in the qparking cloud portal
-            (the Passes tab → "Apply for a new pass", after adding a vehicle
-            under Profile → My vehicles) and approved by operators. This local
-            view refreshes every few minutes so the LPR gate always sees the
-            latest roster.
-          </p>
-        </div>
-      </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
         {([
@@ -162,7 +157,7 @@ export function SeasonPasses() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((p) => {
+                {pageItems.map((p) => {
                   const expiringSoon = p.endDate && p.endDate >= today && p.endDate <= in7Days;
                   return (
                     <tr key={`${p.passId}-${p.plateNumber}`} className={`border-t border-gray-100 ${expiringSoon ? 'bg-amber-50/40' : ''}`}>
@@ -189,7 +184,7 @@ export function SeasonPasses() {
 
           {/* MOBILE CARDS */}
           <ul className="md:hidden divide-y divide-gray-100">
-            {filtered.map((p) => {
+            {pageItems.map((p) => {
               const expiringSoon = p.endDate && p.endDate >= today && p.endDate <= in7Days;
               return (
                 <li key={`${p.passId}-${p.plateNumber}`} className={`p-3 ${expiringSoon ? 'bg-amber-50/40' : ''}`}>
@@ -213,6 +208,8 @@ export function SeasonPasses() {
           </ul>
         </div>
       )}
+
+      <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
     </div>
   );
 }

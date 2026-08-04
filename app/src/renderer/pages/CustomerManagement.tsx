@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Users, RefreshCw, CloudDownload, Cloud, Clock, Car, Ticket, Mail, Phone, UserX,
+  Users, RefreshCw, CloudDownload, Clock, Car, Ticket, Mail, Phone, UserX,
 } from 'lucide-react';
+import { InfoTip } from '../components/InfoTip';
 import type { CloudCustomer } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { usePagedList } from '../hooks/usePagination';
+import { PaginationBar } from '../components/Pagination';
 import { toast } from '../toast';
 import { fmtDateTime } from '../lib/datetime';
+
+const PAGE_SIZE = 20;
 
 /**
  * Customer directory — read-only mirror of the cloud's customers, so site staff
@@ -53,6 +58,8 @@ export function CustomerManagement() {
     }
     return true;
   });
+  const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter, search]);
 
   const lastSynced = customers.reduce((m, c) => (c.fetchedAt && c.fetchedAt > m ? c.fetchedAt : m), '');
 
@@ -62,6 +69,13 @@ export function CustomerManagement() {
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
             <Users size={22} /> Customer Management
+            <InfoTip>
+              Customers are added and edited in the qparking cloud portal
+              (Parking Management → Customers). This page is a copy kept on this
+              server so you can look up a name or phone number quickly, without
+              logging into the cloud. The vehicle and pass counts only cover
+              this site. Press "Sync from cloud" to get the latest list.
+            </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Who parks here, how to reach them, and how many vehicles and passes they hold.
@@ -83,18 +97,6 @@ export function CustomerManagement() {
           </button>
         </div>
       </header>
-
-      <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-2.5">
-        <Cloud size={16} className="text-blue-600 mt-0.5 flex-shrink-0" />
-        <div className="text-xs text-blue-900 leading-relaxed">
-          <p className="font-bold uppercase tracking-wide text-[10px]">View only — managed in cloud</p>
-          <p className="mt-1">
-            Customers are created and edited in the qparking cloud portal
-            (Parking Management → Customers). This page is a local copy for
-            on-site lookups. Pass counts are for THIS site only.
-          </p>
-        </div>
-      </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
         {([
@@ -147,7 +149,7 @@ export function CustomerManagement() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((c) => (
+                {pageItems.map((c) => (
                   <tr key={c.id} className={`border-t border-gray-100 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
                     <td className="px-3 py-2 font-semibold">{c.fullName || '—'}</td>
                     <td className="px-3 py-2 text-[12px] text-gray-600">
@@ -173,7 +175,7 @@ export function CustomerManagement() {
 
           {/* MOBILE CARDS */}
           <ul className="md:hidden divide-y divide-gray-100">
-            {filtered.map((c) => (
+            {pageItems.map((c) => (
               <li key={c.id} className={`p-3 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold">{c.fullName || '—'}</span>
@@ -192,6 +194,8 @@ export function CustomerManagement() {
           </ul>
         </div>
       )}
+
+      <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
     </div>
   );
 }

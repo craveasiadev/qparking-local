@@ -6,6 +6,7 @@ import {
 import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../../context/SiteContext';
+import { InfoTip } from '../components/InfoTip';
 import { fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
 
 /** Live reachability of one device: undefined = not probed yet, 'checking' =
@@ -155,7 +156,15 @@ export function Dashboard() {
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <header>
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+          Dashboard
+          <InfoTip title="About this page" kind="info">
+            Your at-a-glance view of the site right now — cars currently
+            inside, today's activity, and whether the cameras, payment
+            terminals and cloud connection are healthy. If something looks
+            wrong here, open the matching page from the menu for the details.
+          </InfoTip>
+        </h1>
         <p className="text-sm text-gray-500 mt-1">Live state of parking sessions, terminals and cameras on this site.</p>
       </header>
 

@@ -3,8 +3,13 @@ import { Plus, Trash2, Camera as CamIcon, X, Copy, Check, Activity, Loader2, Web
 import type { LprCamera, ParkingLane } from "@shared/types";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useConfirm } from "../hooks/useConfirm";
+import { usePagedList } from "../hooks/usePagination";
+import { PaginationBar } from "../components/Pagination";
+import { InfoTip } from "../components/InfoTip";
 import { DeviceSyncButtons } from "../components/DeviceSyncButtons";
 import { useCurrentSite } from "../../context/SiteContext";
+
+const PAGE_SIZE = 10;
 
 const EMPTY: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> = {
 	name: "",
@@ -44,6 +49,8 @@ export function Cameras() {
 		}
 		return true;
 	});
+	const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+	useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [q, dirFilter, statusFilter]);
 
 	async function refresh() {
 		setCameras(await window.bridge.listCameras());
@@ -117,7 +124,16 @@ export function Cameras() {
 		<div className="p-5 sm:p-8 max-w-7xl mx-auto">
 			<header className="flex flex-wrap items-start justify-between gap-3 mb-5">
 				<div>
-					<h1 className="text-2xl font-bold tracking-tight">LPR cameras</h1>
+					<h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+						LPR cameras
+						<InfoTip title="About this page" kind="info">
+							These are the number-plate cameras at your gates. Each camera
+							reads plates and sends them to this server — set the camera to
+							point at the "Webhook endpoint" address shown below. Use "Test"
+							to check a camera is reachable, and assign each camera to its
+							lane on the Lanes page.
+						</InfoTip>
+					</h1>
 					<p className="text-sm text-gray-500 mt-1">Cameras POST plate detections to this server's webhook URL.</p>
 					{cameras.length > 0 && (
 						<div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
@@ -234,7 +250,7 @@ export function Cameras() {
 			)}
 
 			<div className="grid grid-cols-1 gap-3">
-				{filtered.map((c) => (
+				{pageItems.map((c) => (
 					<CameraCard
 						key={c.id}
 						cam={c}
@@ -280,6 +296,8 @@ export function Cameras() {
 					</div>
 				)}
 			</div>
+
+			<PaginationBar pager={pager} rowsOnPage={pageItems.length} />
 
 			{editing && (
 				<CameraForm

@@ -23,6 +23,7 @@ import { useConfirm } from '../hooks/useConfirm';
 import { fmtTimeSeconds, fmtDate } from '../lib/datetime';
 import { toast } from '../toast';
 import { useCurrentSite } from '../../context/SiteContext';
+import { InfoTip } from '../components/InfoTip';
 
 // ─── Types local to this page ────────────────────────────────────────────────
 
@@ -313,7 +314,16 @@ export function Settings() {
           </div>
         </div>
       )}
-      <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+        Settings
+        <InfoTip title="About this page" kind="info">
+          Settings for this server only — the cloud connection, local ports and
+          app updates. Most changes apply as soon as you save. Be careful with
+          the qparking URL and API key: they link this server to your site in
+          the cloud, and changing them to a different site clears the local
+          data and starts fresh.
+        </InfoTip>
+      </h1>
       <p className="text-sm text-gray-500 mt-1">Server-wide configuration. Restart not required — most changes take effect immediately.</p>
 
       <section className="mt-5 rounded-xl border border-gray-200 bg-white p-5 space-y-4">

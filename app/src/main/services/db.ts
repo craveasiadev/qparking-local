@@ -2692,7 +2692,12 @@ function rowToActivityLog(activityLogRow: any): ActivityLog {
 }
 
 export function listActivityLogs(): ActivityLog[] {
-	const rows = getDb().prepare("SELECT * FROM activity_logs").all() as any[];
+	// Newest first — occurred_at is when the event actually happened (ISO 8601
+	// text, so lexicographic DESC is chronological); created_at breaks ties for
+	// rows logged in the same instant.
+	const rows = getDb()
+		.prepare("SELECT * FROM activity_logs ORDER BY occurred_at DESC, created_at DESC")
+		.all() as any[];
 	return rows.map(rowToActivityLog);
 }
 

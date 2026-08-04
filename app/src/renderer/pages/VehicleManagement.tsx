@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Car, RefreshCw, CloudDownload, Cloud, Clock, Ban, Ticket, Building2, User,
+  Car, RefreshCw, CloudDownload, Clock, Ban, Ticket, Building2, User,
 } from 'lucide-react';
+import { InfoTip } from '../components/InfoTip';
 import type { CloudVehicle } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { usePagedList } from '../hooks/usePagination';
+import { PaginationBar } from '../components/Pagination';
 import { toast } from '../toast';
 import { fmtDateTime, todayInAppTz } from '../lib/datetime';
+
+const PAGE_SIZE = 20;
 
 /**
  * Vehicle registry — read-only mirror of the cloud's registered vehicles, so
@@ -61,6 +66,8 @@ export function VehicleManagement() {
     }
     return true;
   });
+  const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter, search]);
 
   const lastSynced = vehicles.reduce((m, v) => (v.fetchedAt && v.fetchedAt > m ? v.fetchedAt : m), '');
 
@@ -70,6 +77,13 @@ export function VehicleManagement() {
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
             <Car size={22} /> Vehicle Management
+            <InfoTip>
+              Vehicles, their owners and the blocked list are managed in the
+              qparking cloud portal. This page is a copy kept on this server so
+              you can check who owns a plate right at the gate. To block or
+              unblock a vehicle, do it in the cloud — the gate picks up the
+              change within about a minute.
+            </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every registered vehicle, its owner, and its pass — plus which plates are blocked.
@@ -91,20 +105,6 @@ export function VehicleManagement() {
           </button>
         </div>
       </header>
-
-      <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-2.5">
-        <Cloud size={16} className="text-blue-600 mt-0.5 flex-shrink-0" />
-        <div className="text-xs text-blue-900 leading-relaxed">
-          <p className="font-bold uppercase tracking-wide text-[10px]">View only — managed in cloud</p>
-          <p className="mt-1">
-            Vehicles, owners and blacklisting are edited in the qparking cloud portal
-            (Parking Management → Customers, or Vehicle Registry). This page is a local
-            copy so staff can look a plate up at the gate without a browser. Blocking a
-            plate here isn't possible — ban it in the cloud and it reaches the barrier
-            within a minute.
-          </p>
-        </div>
-      </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
         {([
@@ -161,7 +161,7 @@ export function VehicleManagement() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((v) => (
+                {pageItems.map((v) => (
                   <tr key={v.id} className={`border-t border-gray-100 ${v.isBlacklisted ? 'bg-red-50/50' : ''}`}>
                     <td className="px-3 py-2 font-mono font-semibold">
                       <span className="inline-flex items-center gap-1.5">
@@ -190,7 +190,7 @@ export function VehicleManagement() {
 
           {/* MOBILE CARDS */}
           <ul className="md:hidden divide-y divide-gray-100">
-            {filtered.map((v) => (
+            {pageItems.map((v) => (
               <li key={v.id} className={`p-3 ${v.isBlacklisted ? 'bg-red-50/50' : ''}`}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono font-bold inline-flex items-center gap-1.5">
@@ -212,6 +212,8 @@ export function VehicleManagement() {
           </ul>
         </div>
       )}
+
+      <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
     </div>
   );
 }

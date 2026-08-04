@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import {
   Plus, Trash2, CreditCard, X, Activity, Loader2, Search, Radio, Copy, Check, MapPin,
-  Wifi, XCircle, FlaskConical,
+  Wifi, XCircle, FlaskConical, ChevronDown,
 } from 'lucide-react';
 import type { PaymentTerminal, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
+import { usePagedList } from '../hooks/usePagination';
+import { PaginationBar } from '../components/Pagination';
+import { InfoTip } from '../components/InfoTip';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 import { fmtTimeSeconds } from '../lib/datetime';
 import { useCurrentSite } from '../../context/SiteContext';
@@ -16,6 +19,8 @@ import { useCurrentSite } from '../../context/SiteContext';
  * fires a PayRequest at the device and settles from the PayResult callback that
  * the device POSTs back to this server's callback listener (shown below).
  */
+
+const PAGE_SIZE = 10;
 
 const EMPTY: Omit<PaymentTerminal, 'id' | 'externalId' | 'createdAt' | 'updatedAt'> = {
   name: '', host: '', port: 80, timeoutSeconds: 30, enabled: true,
@@ -151,12 +156,23 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
     }
     return true;
   });
+  const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [q, statusFilter]);
 
   return (
     <div className="p-5 sm:p-8 max-w-7xl mx-auto">
       <header className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Payment terminals</h1>
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            Payment terminals
+            <InfoTip title="About this page" kind="info">
+              These are the Touch 'n Go card readers where drivers tap to pay at
+              the exit. Add each device here with its network address, then link
+              it to an exit lane on the Lanes page. The "callback listener"
+              below must stay enabled — it's how the readers tell this server a
+              payment went through.
+            </InfoTip>
+          </h1>
           <p className="text-sm text-gray-500 mt-1">Alarmtech Touch'n'Go W4G devices on the LAN. Wire one to each exit lane on the <strong>Lanes</strong> page.</p>
           {list.length > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-medium text-gray-500">
@@ -208,7 +224,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
       )}
 
       <div className="grid grid-cols-1 gap-3">
-        {filtered.map((t) => (
+        {pageItems.map((t) => (
           <DeviceCard
             key={t.id}
             device={t}
@@ -237,6 +253,8 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
         )}
       </div>
 
+      <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
+
       {editing && <DeviceForm value={editing} onChange={setEditing} onCancel={() => { setFormError(null); setEditing(null); }} onSave={save} saving={saving} error={formError} />}
       {confirmDialog}
     </div>
@@ -260,16 +278,34 @@ function ListenerPanel({ status, enabled, onToggleEnabled, autoRetrigger, onTogg
   const listening = !!status?.listening;
   const ports = status?.listenPorts?.length ? status.listenPorts : (status?.listenPort ? [status.listenPort] : []);
   const addresses = status?.listenAddresses ?? [];
+  // Collapsed by default — the header line (status pill + ports) is what an
+  // operator glances at daily; the switches and device URLs are setup-time.
+  const [open, setOpen] = useState(false);
   return (
-    <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4">
-      <div className="flex items-center gap-2">
-        <Radio size={15} className={listening ? 'text-emerald-600' : 'text-gray-400'} />
-        <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-500">W4G PayResult listener</span>
-        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${listening ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${listening ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} /> {listening ? 'up' : 'down'}
+    <div className="mb-4 rounded-xl border border-gray-200 bg-white overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <Radio size={15} className={`flex-shrink-0 ${listening ? 'text-emerald-600' : 'text-gray-400'}`} />
+          <span className="text-[11px] font-semibold uppercase tracking-widest text-gray-500">W4G PayResult listener</span>
+          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${listening ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${listening ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} /> {listening ? 'up' : 'down'}
+          </span>
+          {!enabled && !listening && (
+            <span className="text-[11px] text-amber-600 font-semibold">payments off</span>
+          )}
         </span>
-      </div>
+        <span className="inline-flex items-center gap-2 text-[11px] text-gray-400 flex-shrink-0">
+          {listening && ports.length > 0 && <span className="font-mono">port {ports.join(', ')}</span>}
+          <ChevronDown size={15} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+        </span>
+      </button>
 
+      {open && (
+      <div className="px-4 pb-4 border-t border-gray-100">
       {/* Master enable switch — runs / stops the shared callback server. */}
       <label className="mt-3 flex items-start gap-3 p-3 rounded-lg border border-gray-200 hover:border-gray-300 cursor-pointer">
         <input type="checkbox" className="mt-0.5 w-4 h-4 accent-gray-900" checked={enabled} onChange={(e) => onToggleEnabled(e.target.checked)} />
@@ -335,6 +371,8 @@ function ListenerPanel({ status, enabled, onToggleEnabled, autoRetrigger, onTogg
           </div>
         )}
       </div>
+      </div>
+      )}
     </div>
   );
 }

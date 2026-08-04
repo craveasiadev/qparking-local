@@ -1,9 +1,14 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Cloud, Star, Calculator, Search, X } from 'lucide-react';
+import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Star, Calculator, Search, X } from 'lucide-react';
+import { InfoTip } from '../components/InfoTip';
 import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { usePagedList } from '../hooks/usePagination';
+import { PaginationBar } from '../components/Pagination';
 import { fmtDateTime, dateInAppTz, APP_TZ } from '../lib/datetime';
 import { toast } from '../toast';
+
+const PAGE_SIZE = 10;
 
 export function ParkingPolicies() {
   const [list, setList] = useState<RatePolicy[]>([]);
@@ -41,12 +46,24 @@ export function ParkingPolicies() {
     }
     return true;
   });
+  const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
+  useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [q, kindFilter]);
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Parking Rates</h1>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+            Parking Rates
+            <InfoTip>
+              Parking prices are set in the qparking cloud (Pricing &amp; Tariffs).
+              Every active plan appears here automatically and is saved on this
+              server, so the gate can still charge the right price even when the
+              internet is down. To give a lane a different plan, use the Lanes
+              page. To change a price, edit it in the cloud — it arrives here
+              within a minute.
+            </InfoTip>
+          </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
             Every active parking rate configured on the cloud, cached here so the gate can price sessions even if WAN is offline. Expand a rate to test a price.
           </p>
@@ -64,22 +81,6 @@ export function ParkingPolicies() {
           {syncing ? 'Syncing…' : 'Sync now'}
         </button>
       </header>
-
-      {/* Source-of-truth callout — the local editor path was retired when we
-          switched to multi-plan sync. Editing here would fight cloud writes
-          from other operators + break the priority-stacking model. */}
-      <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-2.5">
-        <Cloud size={16} className="text-blue-600 mt-0.5 flex-shrink-0" />
-        <div className="text-xs text-blue-900 leading-relaxed">
-          <p className="font-bold uppercase tracking-wide text-[10px]">Managed in cloud</p>
-          <p className="mt-1">
-            Create + edit plans in <strong>qparking → Pricing &amp; Tariffs</strong>. Each active plan appears
-            here as a policy; lanes bind to a specific plan via <strong>Lanes → assign rate plan</strong>.
-            Weekday, weekend, overnight, public holiday and promotion rules layer within a single plan
-            by priority (higher wins).
-          </p>
-        </div>
-      </div>
 
       {list.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500 inline-flex items-center justify-center gap-2 w-full">
@@ -146,7 +147,7 @@ export function ParkingPolicies() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((s) => {
+                  {pageItems.map((s) => {
                     const zero = s.firstBlockCents === 0 && s.perBlockCents === 0;
                     const ruleCount = s.rules?.length ?? 0;
                     const isOpen = !!expanded[s.policyId];
@@ -209,7 +210,7 @@ export function ParkingPolicies() {
 
           {/* Mobile cards */}
           <div className="md:hidden space-y-2">
-            {filtered.map((s) => {
+            {pageItems.map((s) => {
               const zero = s.firstBlockCents === 0 && s.perBlockCents === 0;
               const ruleCount = s.rules?.length ?? 0;
               const isOpen = !!expanded[s.policyId];
@@ -250,6 +251,8 @@ export function ParkingPolicies() {
           </div>
           </>
           )}
+
+          <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
 
           {list.some((s) => s.firstBlockCents === 0 && s.perBlockCents === 0) && (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-[12px] px-3 py-2">
