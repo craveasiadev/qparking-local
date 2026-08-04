@@ -2382,10 +2382,12 @@ function siteDayKey(at?: string | null): string {
  * leave a one-day visitor pass in this cache honouring free exits forever, since
  * the old lookup checked `status` and nothing else.
  *
- * A pass counts if it covers the entry instant OR the exit instant. Covering
- * entry means a monthly holder who drove in on their last valid day isn't
- * charged on the way out; covering exit means someone who renewed mid-stay isn't
- * charged either. Omitting the window falls back to "valid right now".
+ * A pass counts if it covers the entry instant OR the exit instant. How the two
+ * sides differ is the EXIT FLOW's call, not this lookup's: covering exit means
+ * a free exit (incl. someone who renewed mid-stay); covering only entry means
+ * the pass lapsed mid-stay, and parking-flow bills the uncovered tail as a
+ * transient stay (see PASS PARTIAL there). Omitting the window falls back to
+ * "valid right now".
  */
 export function findSeasonPassByPlate(plate: string, window?: { entryAt?: string | null; exitAt?: string | null }): SeasonPass | null {
 	const normalisedPlate = canonicalPlate(plate);

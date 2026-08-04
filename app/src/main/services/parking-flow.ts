@@ -22,7 +22,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
-import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule } from '../../shared/types';
+import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, SeasonPass, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
@@ -293,40 +293,68 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
 
   // ─── Active-pass shortcut ────────────────────────────────────────────
   // Before driving the terminal, see if this plate is on the cached pass
-  // roster from qparking SaaS. A match means the SaaS already settled
-  // payment (monthly/quarterly/yearly pre-paid, or VIP/staff/free_access
-  // explicitly waived). Skip the charge and open the gate — but still
-  // record the exit so the audit row exists.
+  // roster from qparking SaaS. A pass covering the EXIT day means the SaaS
+  // already settled payment (monthly/quarterly/yearly pre-paid, or VIP/staff/
+  // free_access explicitly waived): skip the charge and open the gate — but
+  // still record the exit so the audit row exists.
   // Season passes are site-scoped (one site per install), so look the plate up
   // directly — no policy dimension. Validity comes from the dates cached on the
-  // row (no cloud round-trip): the pass must cover this stay's entry or exit.
+  // row (no cloud round-trip). A pass that covered only the ENTRY (it lapsed
+  // mid-stay) no longer rides the whole overstay for free — see PASS PARTIAL
+  // below.
   const seasonPass = findSeasonPassByPlate(event.plate, {
     entryAt: session.entryAt,
     exitAt: exitIso,
   });
   if (seasonPass) {
-    flog(`PASS MATCH: plate=${event.plate} pass=${seasonPass.passType} id=${seasonPass.passId} valid=${seasonPass.startDate ?? '—'}→${seasonPass.endDate ?? 'forever'} → free exit (skip terminal)`);
-    recordExit(session.id, {
-      exitAt: new Date(exitMs).toISOString(),
-      exitLaneId: lane.id,
-      exitCameraId: event.cameraId,
-      exitImagePath: event.imagePath,
-      durationMinutes,
-      feeCents: 0,
-      paymentStatus: 'free',
-      terminalTxnId: null,
-      cardScheme: null,
-      paymentTimestamp: null,
-      passId: seasonPass.passId,
-      freeReason: `pass-${seasonPass.passType}`,
-    });
-    parkingEvents.emit('exit-completed', {
-      sessionId: session.id,
-      outcome: 'free',
-      reason: `pass-${seasonPass.passType}`,
-      passId: seasonPass.passId,
-    });
-    return;
+    // Free exit requires a pass covering the EXIT day. That pass may be a
+    // DIFFERENT row than the broadest entry∪exit match above (e.g. the lapsed
+    // pass is free_access and outranks the renewal), so when the matched row
+    // doesn't cover the exit, re-ask scoped to the exit instant before
+    // concluding the coverage lapsed.
+    const exitPass = passCoversDay(seasonPass, ymdLocal(exitMs))
+      ? seasonPass
+      : findSeasonPassByPlate(event.plate, { entryAt: exitIso, exitAt: exitIso });
+    if (exitPass) {
+      flog(`PASS MATCH: plate=${event.plate} pass=${exitPass.passType} id=${exitPass.passId} valid=${exitPass.startDate ?? '—'}→${exitPass.endDate ?? 'forever'} → free exit (skip terminal)`);
+      recordExit(session.id, {
+        exitAt: new Date(exitMs).toISOString(),
+        exitLaneId: lane.id,
+        exitCameraId: event.cameraId,
+        exitImagePath: event.imagePath,
+        durationMinutes,
+        feeCents: 0,
+        paymentStatus: 'free',
+        terminalTxnId: null,
+        cardScheme: null,
+        paymentTimestamp: null,
+        passId: exitPass.passId,
+        freeReason: `pass-${exitPass.passType}`,
+      });
+      parkingEvents.emit('exit-completed', {
+        sessionId: session.id,
+        outcome: 'free',
+        reason: `pass-${exitPass.passType}`,
+        passId: exitPass.passId,
+      });
+      return;
+    }
+
+    // ─── PASS PARTIAL: covered entry, lapsed before exit ─────────────────
+    // The pass paid for the stay up to the end of its last valid day; the tail
+    // is a normal transient stay. Re-price ONLY the uncovered window — from
+    // site-local midnight after end_date (clamped to the entry, belt-and-
+    // braces) to the exit — under the same policy chain. Grace minutes and
+    // caps apply to that window exactly as if the car had driven in at the
+    // boundary. durationMinutes keeps the TRUE stay length for the audit row;
+    // only the fee window shrinks. From here the exit proceeds like any
+    // transient one (terminal tap, or free if the window prices to 0).
+    // Reaching this branch guarantees a non-empty end_date: an open-ended
+    // pass ('' / NULL end_date) always covers the exit day above.
+    const billStartMs = Math.max(entryMs, startOfDayAfterKeyMs(seasonPass.endDate!));
+    const billedMinutes = stayDurationMinutes(billStartMs, exitMs);
+    feeCents = computeFee(billedMinutes, policy, new Date(billStartMs).toISOString(), exitIso);
+    flog(`PASS PARTIAL: plate=${event.plate} pass=${seasonPass.passType} id=${seasonPass.passId} lapsed ${seasonPass.endDate} mid-stay → billing ${billedMinutes}min of ${durationMinutes}min (from ${new Date(billStartMs).toISOString()}) as transient`);
   }
 
   // Diagnostic — without this, a 0-fee exit looks identical to "terminal
@@ -783,6 +811,23 @@ export function computeFee(
     total += res.total;
   }
   return total;
+}
+
+/** Does this cached pass cover the given site-local yyyy-MM-dd day? Mirrors the
+ *  SQL lookup in findSeasonPassByPlate, including its NULLIF guard ('' from a
+ *  sloppy cloud row = open-ended, same as NULL). */
+function passCoversDay(pass: SeasonPass, dayKey: string): boolean {
+  const start = pass.startDate || null;
+  const end = pass.endDate || null;
+  return (!start || start <= dayKey) && (!end || end >= dayKey);
+}
+
+/** ms instant of site-local midnight AFTER the given yyyy-MM-dd day — the first
+ *  chargeable moment once a pass whose end_date is that day has lapsed. Local
+ *  Date construction is safe here: tz.ts pins the process to the site zone. */
+function startOfDayAfterKeyMs(dayKey: string): number {
+  const [y, m, d] = dayKey.split('-').map(Number);
+  return new Date(y, m - 1, d + 1, 0, 0, 0, 0).getTime();
 }
 
 // ─── fee-calc internals (1:1 mirror of SaaS App\Services\TariffCalculator) ───

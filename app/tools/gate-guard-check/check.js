@@ -11,6 +11,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+// Pin the site timezone exactly like src/main/tz.ts does in the real app —
+// the pass-lapse billing boundary (site-local midnight) depends on it, and
+// this harness requires the services directly without going through index.ts.
+process.env.TZ = 'Asia/Kuala_Lumpur';
+
 const out = { ok: false, checks: [], error: null };
 const check = (name, pass, detail = null) => out.checks.push({ name, pass, detail });
 
@@ -233,6 +238,82 @@ try {
     });
   } catch (e) { restoreExitErr = e.message; }
   check('restore: restored session can be closed by the exit flow', restoreExitErr === null && !db.findOpenSessionByPlate('REST0009'), restoreExitErr);
+
+  // ─── Pass lapsed mid-stay → bill only the uncovered tail ──────────────
+  // Enter on the pass's last valid day, exit after it expired: the stay's tail
+  // (from site-local midnight after end_date) is priced as a transient stay;
+  // a pass covering the EXIT day still means a fully free exit, even when the
+  // covering pass is a different row than the lapsed one (renewed mid-stay).
+  db.upsertRatePolicy({
+    policyId: 'pass-tail', policyName: 'Pass tail', freeMinutes: 0,
+    firstBlockCents: 500, perBlockCents: 300, blockMinutes: 60, dailyCapCents: 0,
+    currency: 'MYR', fetchedAt: nowIso, rules: [],
+    policyDescription: null, graceExceededBehavior: 'charge_from_entry',
+    cutoffEnabled: false, cutoffTime: null, cutoffBehavior: null,
+    newDayFixedFeeCents: null, rateBasis: 'occupancy', flatMultiRate: 'sum',
+    firstBlockOncePerEntry: false, policyDailyCapCents: null, isSiteDefault: false,
+  });
+  const lane2 = db.upsertLane({ name: 'L2', policyId: 'pass-tail', terminalId: null, gateRelayAddress: null, enabled: true });
+  const camExit = db.upsertCamera({
+    name: 'C2', laneId: lane2.id, direction: 'exit', host: '10.0.0.10',
+    deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
+  });
+
+  const mkPlatePass = (passId, plateNumber, over = {}) => ({
+    passId, plateNumber, passType: 'monthly', status: 'active',
+    startDate: '2026-07-01', endDate: '2026-07-31', isFree: false,
+    spaceNumber: null, fetchedAt: nowIso, ...over,
+  });
+  db.replaceAllSeasonPasses([
+    mkPlatePass('p-lapsed-a', 'PART0011'),
+    mkPlatePass('p-lapsed-b', 'REN0012', { passType: 'free_access', isFree: true }),
+    mkPlatePass('p-renew', 'REN0012', { startDate: '2026-08-01', endDate: '2026-08-31' }),
+    mkPlatePass('p-full', 'FULL0013', { endDate: '2026-12-31' }),
+  ]);
+
+  const pendings = [];
+  const completed = [];
+  const warned = [];
+  flow.parkingEvents.on('exit-pending', (p) => pendings.push(p));
+  flow.parkingEvents.on('exit-completed', (p) => completed.push(p));
+  flow.parkingEvents.on('warning', (p) => warned.push(p));
+
+  /** Open a session on lane2 at `entryIso`, then fire a timed exit read. */
+  function driveExit(plate, entryIso, exitIso) {
+    const s = db.createEntrySession(plate, lane2.id, camExit.id, null);
+    db.updateSessionFields(s.id, { entryAt: entryIso });
+    lprEvents.emit('plate', {
+      cameraId: camExit.id, plate, confidence: 1, imagePath: null,
+      timestamp: exitIso, direction: 'exit', exitAtOverride: exitIso,
+    });
+    return s.id;
+  }
+
+  // Entry 31 Jul 10:00 MYT (last covered day), exit 1 Aug 12:00 MYT. Billable
+  // window starts 1 Aug 00:00 MYT → 720 min → RM5 first hour + 11×RM3 = RM38.
+  // (Full 26h stay would be RM80 — proves the covered head wasn't billed.)
+  driveExit('PART0011', '2026-07-31T02:00:00.000Z', '2026-08-01T04:00:00.000Z');
+  const partial = pendings.find((p) => p.session.plate === 'PART0011');
+  check('lapsed pass: exit is NOT free (goes to payment)', !!partial && !completed.some((c) => c.reason?.startsWith('pass-') && c.sessionId === partial?.session.id));
+  check('lapsed pass: only the uncovered tail is billed (RM38, not RM80)',
+    partial?.feeCents === 3800, `feeCents=${partial?.feeCents}`);
+  check('lapsed pass: audit duration stays the full stay (1560min)',
+    partial?.durationMinutes === 1560, `duration=${partial?.durationMinutes}`);
+  check('lapsed pass: session stays open awaiting the terminal',
+    !!db.findOpenSessionByPlate('PART0011') && warned.some((w) => w.kind === 'exit-no-terminal'));
+
+  // Renewed mid-stay: the lapsed free_access pass outranks the renewal in the
+  // broad lookup, but the exit-day re-query must still find the renewal → free.
+  driveExit('REN0012', '2026-07-31T02:00:00.000Z', '2026-08-01T04:00:00.000Z');
+  const renewed = completed.find((c) => c.passId === 'p-renew');
+  check('renewed mid-stay: still a free exit via the renewal pass',
+    !!renewed && renewed.outcome === 'free' && !db.findOpenSessionByPlate('REN0012'),
+    JSON.stringify(completed.map((c) => `${c.reason}/${c.passId ?? '-'}`)));
+
+  // Plain valid pass covering the whole stay: unchanged free exit.
+  driveExit('FULL0013', '2026-07-31T02:00:00.000Z', '2026-08-01T04:00:00.000Z');
+  check('pass covering exit: free exit unchanged',
+    completed.some((c) => c.passId === 'p-full' && c.outcome === 'free') && !db.findOpenSessionByPlate('FULL0013'));
 
   out.ok = out.checks.every((c) => c.pass);
 } catch (e) {
