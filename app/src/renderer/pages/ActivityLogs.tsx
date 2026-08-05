@@ -86,17 +86,6 @@ function OutcomeBadge({ outcome }: { outcome: string | null }) {
 	);
 }
 
-function timeAgo(isoDate: string): string {
-	const date = new Date(isoDate);
-	const now = new Date();
-	const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-
-	if (seconds < 60) return `${seconds}s ago`;
-	if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-	if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-	return `${Math.floor(seconds / 86400)}d ago`;
-}
-
 function cap(s: string): string {
 	return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -110,6 +99,7 @@ export function ActivityLogs() {
 		category: "" as string,
 		severity: "" as string,
 		source: "" as string,
+		pushed: "" as "" | "pushed" | "unpushed",
 	});
 
 	const [loadActivityLogs, loading] = useAsyncAction(async () => {
@@ -136,6 +126,8 @@ export function ActivityLogs() {
 			if (filters.category && log.category !== filters.category) return false;
 			if (filters.severity && log.severity !== filters.severity) return false;
 			if (filters.source && log.source !== filters.source) return false;
+			if (filters.pushed === "pushed" && !log.pushedToCloud) return false;
+			if (filters.pushed === "unpushed" && log.pushedToCloud) return false;
 			if (q) {
 				const hay = [log.eventKey, log.action, log.description, log.actorName, log.resourceType, log.resourceId]
 					.filter(Boolean).join(" ").toLowerCase();
@@ -146,7 +138,7 @@ export function ActivityLogs() {
 	}, [activityLogs, filters, q]);
 
 	const { pager, pageItems } = usePagedList(filteredActivityLogs, PAGE_SIZE);
-	useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [q, filters.category, filters.severity, filters.source]);
+	useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [q, filters.category, filters.severity, filters.source, filters.pushed]);
 
 	// Cloud operator-CRUD rows carry no category — drop them from the filter
 	// options rather than offering a blank one that matches nothing.
@@ -249,6 +241,16 @@ export function ActivityLogs() {
 						<option value="cloud">Cloud</option>
 					</select>
 				)}
+				<select
+					value={filters.pushed}
+					onChange={(e) => setFilters((prev) => ({ ...prev, pushed: e.target.value as "" | "pushed" | "unpushed" }))}
+					title="Filter by whether the row has been delivered to the qparking cloud"
+					className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white"
+				>
+					<option value="">All push status</option>
+					<option value="pushed">Pushed to cloud</option>
+					<option value="unpushed">Not pushed yet</option>
+				</select>
 			</div>
 
 			{/* DESKTOP / TABLET TABLE */}
@@ -280,8 +282,8 @@ export function ActivityLogs() {
 											<td className="px-3 py-2"><ActionBadge action={log.action} /></td>
 											<td className="px-3 py-2"><OutcomeBadge outcome={log.outcome} /></td>
 											<td className="px-3 py-2"><SeverityBadge severity={log.severity} /></td>
-											<td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap" title={fmtDateTime(log.occurredAt)}>
-												<span className="inline-flex items-center gap-1"><Clock size={11} className="text-gray-400" /> {timeAgo(log.occurredAt)}</span>
+											<td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">
+												<span className="inline-flex items-center gap-1"><Clock size={11} className="text-gray-400" /> {fmtDateTime(log.occurredAt)}</span>
 											</td>
 											<td className="px-3 py-2 text-right">
 												{isOpen
@@ -302,7 +304,7 @@ export function ActivityLogs() {
 							{pageItems.length === 0 && (
 								<tr>
 									<td colSpan={6} className="p-8 text-center text-sm text-gray-500">
-										<Activity size={16} className="inline mr-1 text-gray-400" /> {q || filters.category || filters.severity || filters.source ? "No activities match the current filters." : "No activity recorded yet."}
+										<Activity size={16} className="inline mr-1 text-gray-400" /> {q || filters.category || filters.severity || filters.source || filters.pushed ? "No activities match the current filters." : "No activity recorded yet."}
 									</td>
 								</tr>
 							)}
@@ -315,7 +317,7 @@ export function ActivityLogs() {
 			<div className="md:hidden space-y-2">
 				{pageItems.length === 0 && (
 					<div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500">
-						<Activity size={18} className="inline mr-1 text-gray-400" /> {q || filters.category || filters.severity || filters.source ? "No activities match the current filters." : "No activity recorded yet."}
+						<Activity size={18} className="inline mr-1 text-gray-400" /> {q || filters.category || filters.severity || filters.source || filters.pushed ? "No activities match the current filters." : "No activity recorded yet."}
 					</div>
 				)}
 				{pageItems.map((log) => {
@@ -331,7 +333,7 @@ export function ActivityLogs() {
 							</div>
 							{log.description && <p className="mt-1 text-[12px] text-gray-700">{log.description}</p>}
 							<div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-600">
-								<span className="inline-flex items-center gap-1"><Clock size={10} className="text-gray-400" /> {timeAgo(log.occurredAt)}</span>
+								<span className="inline-flex items-center gap-1"><Clock size={10} className="text-gray-400" /> {fmtDateTime(log.occurredAt)}</span>
 								<ActionBadge action={log.action} />
 								<OutcomeBadge outcome={log.outcome} />
 							</div>

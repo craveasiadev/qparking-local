@@ -90,6 +90,7 @@ function useEscapeToClose(onClose: () => void) {
  * Rates page for pure pricing checks, which needs no session at all.
  */
 function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSessionCreated?: () => void }) {
+  const site = useCurrentSite();
   const [plate, setPlate] = useState('');
   const [laneId, setLaneId] = useState<number | ''>('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -139,7 +140,24 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     try {
       const r = await window.bridge.simulateEntry(lid, plate.trim(), toIso(entryLocal));
       if (!r?.ok) push('warn', `✗ entry: ${r?.error ?? 'failed'}`);
-      else { push('in', `Entry stored — ${fmtDateTime(toIso(entryLocal))} (session #${r.sessionId})`); refreshRef.current?.(); }
+      else {
+        push('in', `Entry stored — ${fmtDateTime(toIso(entryLocal))} (session #${r.sessionId})`);
+        // Same local audit write as the other session actions on this page
+        // (delete / manual release / edit) — lands in the Activity Log
+        // immediately, stamped at the moment the button was pressed.
+        await window.bridge.insertActivityLog({
+          eventKey: 'session.entry',
+          action: 'entry',
+          category: 'session',
+          severity: 'high',
+          siteId: site?.id ?? null,
+          outcome: 'ok',
+          resourceType: 'parking_record',
+          resourceId: String(r.sessionId),
+          description: `Entry · ${plate.trim().toUpperCase()} · stamped ${fmtDateTime(toIso(entryLocal))}`,
+        });
+        refreshRef.current?.();
+      }
     } finally { setBusy(null); }
   }
 
@@ -152,6 +170,21 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     try {
       const r = await window.bridge.simulateExit(lid, plate.trim(), toIso(exitLocal));
       if (!r?.ok) push('warn', `✗ exit: ${r?.error ?? 'failed'}`);
+      else {
+        // The exit outcome (paid / declined / free) arrives async on the
+        // 'session' event stream — this row records that the exit was
+        // triggered; the cloud's session.exit.recorded row carries the result.
+        await window.bridge.insertActivityLog({
+          eventKey: 'session.exit',
+          action: 'exit',
+          category: 'session',
+          severity: 'high',
+          siteId: site?.id ?? null,
+          outcome: 'ok',
+          resourceType: 'parking_record',
+          description: `Exit · ${plate.trim().toUpperCase()} · stamped ${fmtDateTime(toIso(exitLocal))}`,
+        });
+      }
     } finally { setBusy(null); }
   }
 
