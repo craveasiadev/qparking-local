@@ -46,7 +46,7 @@ prices against the wall clock. Those fixtures are back-stamped relative to `now`
 
 | group | covers |
 | --- | --- |
-| **A · entry** | first read, rescan-ignored, exit-grace duplicate guard (incl. `=0` opt-out and the future-dated-exit escape), blacklist refusal, dual camera, `entryCameraHandlesExit`, lane-less camera, UTC `Z` stamping |
+| **A · entry** | first read, rescan-ignored, exit-grace duplicate guard (incl. `=0` opt-out and the future-dated-exit escape), blacklist refusal, shared-barrier entry+exit camera pair, entry-camera re-read, lane-less camera, UTC `Z` stamping |
 | **B · exit routing & free exits** | exit-without-entry, exit-no-lane, the three free reasons (`within-grace` / `rate-zero` / `no-policy`), no-device, disabled device, missing PayResult listener, `minimumChargeCents`, entry-lane-governs-the-fee, blacklist at exit (with and without an entry on record) |
 | **C · paid exit & the terminal** | approved / declined / timed-out taps, ledger row opened `pending` before the device is driven, the per-lane busy guard, `cancelExitInFlight` + PayCancel, auto-retrigger off / on / capped at 3 / aborted by a mid-delay release |
 | **D · manual release & retrigger** | release closes an open session and refuses a settled one, every `retriggerSessionExit` rejection (missing, closed, no lane, no device, no camera), the happy path, and `retriggerSessionExitByPlate` plate canonicalisation |

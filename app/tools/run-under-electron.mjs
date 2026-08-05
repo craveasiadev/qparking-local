@@ -14,7 +14,7 @@
  *     spawned. Check scripts report through a JSON result file instead, and the
  *     per-harness run.mjs (plain Node) does the printing.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -29,6 +29,20 @@ export const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url))
  * Resolves with its exit code; never rejects.
  */
 export function runUnderElectron(scriptPath, args = []) {
+  // Syntax-check first. A parse error in a check script otherwise surfaces as an
+  // electron "A JavaScript error occurred in the main process" MODAL — which has
+  // to be dismissed by hand, tells you nothing the compiler couldn't have, and
+  // leaves the harness looking hung. `node --check` gives the file and line on
+  // stderr in milliseconds.
+  const syntax = spawnSync(process.execPath, ['--check', path.join(APP_DIR, scriptPath)], {
+    encoding: 'utf8',
+  });
+  if (syntax.status !== 0) {
+    console.error(`\nSyntax error in ${scriptPath} — not launching electron:\n`);
+    console.error((syntax.stderr || '').trim());
+    return Promise.resolve(syntax.status ?? 1);
+  }
+
   delete process.env.ELECTRON_RUN_AS_NODE; // the whole point — see above
   const electronPath = require('electron');
   return new Promise((resolve) => {

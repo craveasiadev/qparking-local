@@ -10,7 +10,7 @@ import { InfoTip } from '../components/InfoTip';
 interface PlateEvent {
   cameraId: number;
   plate: string;
-  direction: 'entry' | 'exit' | 'dual';
+  direction: 'entry' | 'exit';
   timestamp: string;
 }
 
@@ -265,7 +265,7 @@ function TileFooter({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null })
  * Operator controls under each live feed. Real-world manual interventions only
  * (no test/simulate helpers):
  *   - Open barrier — every lane. Raises this lane's gate.
- *   - Retrigger payment — exit/dual lanes with a wired terminal. Operator reads
+ *   - Retrigger payment — exit-facing cameras with a wired terminal. Operator reads
  *     the plate off the feed and types it; we re-run that car's exit payment.
  */
 function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }) {
@@ -283,12 +283,12 @@ function LaneActions({ cam, lane }: { cam: LprCamera; lane: ParkingLane | null }
     return () => window.clearTimeout(t);
   }, [result]);
 
-  // Retrigger is an EXIT action — show it on exit/dual tiles. We don't gate on
+  // Retrigger is an EXIT action — show it on exit tiles. We don't gate on
   // a wired terminal: the fee may be collected via the TNG controller (no
   // terminal), and the retrigger-by-plate resolves the car's own session, so
   // the backend validates payment capability and returns a clear error if the
   // lane truly can't charge.
-  const canRetrigger = cam.direction === 'exit' || cam.direction === 'dual';
+  const canRetrigger = cam.direction === 'exit';
 
   async function openBarrier() {
     setBusy('open'); setResult(null);

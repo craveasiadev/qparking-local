@@ -56,8 +56,21 @@ export interface LprCamera {
   name: string;
   /** Which lane this camera covers — links plate detection to a parking lane. */
   laneId: number | null;
-  /** entry / exit / dual — overrides lane's default if present. */
-  direction: 'entry' | 'exit' | 'dual';
+  /**
+   * Which way this camera faces. A camera is single-direction BY PHYSICS: it is
+   * aimed down one approach and reads plates coming toward it. The old third
+   * value, 'dual', claimed one camera could gate both directions at a shared
+   * barrier — it can't. An exiting car approaches from behind the camera's cone
+   * and only enters frame AFTER it has passed the barrier, so that read arrives
+   * far too late to decide anything. It could record an exit, never authorise one.
+   *
+   * A shared in/out barrier is modelled as TWO cameras (one facing each way),
+   * which is also what makes the lane read as bidirectional — see
+   * deriveLaneDirection, where 'dual' remains a valid LANE value. Lane-level
+   * 'dual' is derived from having both an entry and an exit camera; it is a
+   * different concept from the retired camera value and is unaffected.
+   */
+  direction: 'entry' | 'exit';
   /** Camera's LAN IP/host — needed for ping/test-connection. e.g. 192.168.1.50 */
   host: string | null;
   /** Vendor-SDK login for pulling live H.264 video directly off the device
@@ -68,6 +81,55 @@ export interface LprCamera {
   deviceUser: string | null;
   devicePassword: string | null;
   devicePort: number | null;
+  /**
+   * Who this camera lets through.
+   *
+   *   'open'      — every plate (DEFAULT, and what every install did before
+   *                 2026-08-05). The barrier is opened by the camera's own
+   *                 onboard relay logic; this app only records the movement.
+   *   'pass_only' — ONLY a plate holding a season pass that is valid right now.
+   *                 Anything else is refused: no session, no barrier, an
+   *                 ACCESS DENIED screen for the driver and an audit row for
+   *                 the operator. Applies at entry AND exit — the question is
+   *                 always just "is there a valid pass?", never "is there an
+   *                 open session?".
+   *
+   * REQUIRES device credentials. In 'pass_only' this app becomes the thing that
+   * opens the barrier (pulseBarrier → VzLPRClient_SetIOOutputAuto), which needs
+   * host + deviceUser + devicePassword. Without them NOBODY gets through, pass
+   * or not — so the Cameras form refuses to save that combination.
+   *
+   * Also requires the camera's OWN auto-open to be switched off on the device.
+   * If the camera keeps firing its own relay, an unregistered car still gets in
+   * and this setting is decorative.
+   *
+   * TEXT rather than a boolean so a looser mode (e.g. 'registered' — any known
+   * vehicle, pass or not) can be added later without a second migration.
+   */
+  accessMode: 'open' | 'pass_only';
+  /**
+   * WHO physically opens the barrier for this camera. Deliberately separate from
+   * `accessMode`: "who is allowed in" and "who lifts the boom" are different
+   * questions, and conflating them would force every site onto one answer.
+   *
+   *   'camera' — DEFAULT, and what every install did before 2026-08-05. The
+   *              camera fires its own onboard relay on recognition; this app
+   *              only records. Nothing here can veto it, because the camera
+   *              never asks us — which is precisely why 'pass_only' can't work
+   *              in this mode.
+   *   'app'    — the camera's own auto-open has been DISABLED on the device, and
+   *              qparking-local pulses the relay itself once it has decided.
+   *              This is what makes any access rule actually enforceable, and it
+   *              also makes the blacklist bite at entry for the first time.
+   *
+   * 'pass_only' REQUIRES 'app' — the Cameras form enforces that pairing, since
+   * a pass check on a camera that opens its own barrier is decoration.
+   *
+   * ⚠️ Trade-off of 'app': the barrier now depends on this PC. If qparking-local
+   * isn't running, that lane does not open. Under 'camera' the gate keeps working
+   * regardless of what this machine is doing.
+   */
+  barrierControl: 'camera' | 'app';
   /** Webhook secret — cameras POSTing /lpr/event must include this header. */
   webhookSecret: string | null;
   enabled: boolean;
@@ -75,6 +137,16 @@ export interface LprCamera {
   updatedAt: string;
   /** Last connection-test result (ok|err|never). Runtime only — not persisted. */
   online?: 'ok' | 'err' | 'never';
+  /**
+   * A configuration fault that would stop this camera doing its job, computed on
+   * read — see db.describeCameraRisk. Null when the camera is coherent.
+   *
+   * Exists because the dangerous states here are SILENT: a lane whose app-owned
+   * barrier has no credentials looks perfectly normal in the list, right up to
+   * the moment a resident is sitting at a boom that will never lift. Runtime
+   * only, never persisted.
+   */
+  risk?: string | null;
 }
 
 // ─── lanes ───────────────────────────────────────────────────────────────────
@@ -86,7 +158,10 @@ export interface LprCamera {
  *  Direction (entry/exit/dual) is NOT stored on the lane — it's derived from
  *  the directions of the cameras assigned to it (see db.deriveLaneDirection).
  *  The camera is the single source of truth for direction because routing is
- *  keyed to the camera that saw the plate. */
+ *  keyed to the camera that saw the plate. A lane reads as 'dual' when it has
+ *  BOTH an entry and an exit camera — one shared barrier covered from both
+ *  sides. That is the only surviving meaning of 'dual'; cameras themselves are
+ *  strictly entry or exit (see LprCamera.direction). */
 export interface ParkingLane {
   id: number;
   /** Durable cloud identity — survives reinstall/renumber. See PaymentTerminal.externalId. */
@@ -477,13 +552,18 @@ export interface AppSettings {
   faceappApiToken: string;
   /** Optional managed-device id on faceapp side. Leave 0 to use the default. */
   faceappDeviceId: number;
-  /** When ON: an entry-direction camera ALSO handles exits. The first scan
-   *  of a plate opens a session; a second scan of the SAME plate while the
-   *  session is still open closes it (drives terminal payment + gate open).
-   *  Use this at single-lane sites where one camera covers both directions.
-   *  When OFF (default): entry cams only do entries; exits need a separate
-   *  exit-direction or dual camera. */
-  entryCameraHandlesExit: boolean;
+  // REMOVED 2026-08-05: `entryCameraHandlesExit`. It let an entry camera also
+  // close sessions (first read opens, second read of the same plate closes) for a
+  // single shared barrier covered by ONE camera. Retired together with the camera
+  // direction 'dual', which did byte-for-byte the same thing, because that
+  // configuration does not occur in practice — and it could not work properly
+  // anyway: a departing car only enters the camera's frame after it has passed
+  // the barrier, so the second read could record an exit but never authorise one.
+  //
+  // A shared in/out barrier is now modelled as TWO cameras, one facing each way,
+  // which is also what makes the lane derive as 'dual' (see deriveLaneDirection).
+  // Camera direction is therefore the ONLY thing that decides entry-vs-exit
+  // routing — there is no global override any more.
   /** Master switch for the faceapp_main turnstile trigger. When ON, every
    *  successful entry AND every paid exit fires `/api/external/open-gate`
    *  on the configured faceapp instance — matching real-world parking where

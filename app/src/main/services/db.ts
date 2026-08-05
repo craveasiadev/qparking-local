@@ -214,7 +214,22 @@ function applySchema(db: Database.Database) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       lane_id INTEGER,
-      direction TEXT NOT NULL CHECK (direction IN ('entry','exit','dual')) DEFAULT 'entry',
+      -- 'dual' retired 2026-08-05: a camera faces one way (see LprCamera.direction).
+      -- Existing installs keep the older, wider CHECK — it's a permissive superset,
+      -- so tightening it would mean a full table rebuild for no behavioural gain.
+      -- migrateDualCameraDirection() converts any rows that still say 'dual'.
+      direction TEXT NOT NULL CHECK (direction IN ('entry','exit')) DEFAULT 'entry',
+      -- Who this camera admits. 'open' = every plate (the behaviour every
+      -- install had before 2026-08-05); 'pass_only' = a valid season pass or
+      -- nothing. See LprCamera.accessMode. Deliberately NOT CHECK-constrained:
+      -- a future mode must not require a table rebuild on live sites, and the
+      -- flow treats any unknown value as 'open' (fail-open, never fail-shut).
+      access_mode TEXT NOT NULL DEFAULT 'open',
+      -- Who lifts the boom: 'camera' (the device's own relay logic — the
+      -- pre-2026-08-05 behaviour, and the safe default) or 'app' (we pulse it).
+      -- Unconstrained for the same reason as access_mode; unknown reads as
+      -- 'camera', i.e. leave the barrier alone.
+      barrier_control TEXT NOT NULL DEFAULT 'camera',
       host TEXT,
       webhook_secret TEXT,
       enabled INTEGER NOT NULL DEFAULT 1,
@@ -608,7 +623,13 @@ function applySchema(db: Database.Database) {
 	// Idempotent column adds for installs whose `cameras` table was created
 	// before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
 	// the column already exists, so wrap each in its own try/catch.
-	for (const col of ["host TEXT", "device_user TEXT", "device_password TEXT", "device_port INTEGER"]) {
+	// access_mode carries its own DEFAULT so existing rows land on 'open' — i.e.
+	// every camera on every upgraded install keeps behaving exactly as it did.
+	for (const col of [
+		"host TEXT", "device_user TEXT", "device_password TEXT", "device_port INTEGER",
+		"access_mode TEXT NOT NULL DEFAULT 'open'",
+		"barrier_control TEXT NOT NULL DEFAULT 'camera'",
+	]) {
 		try {
 			db.exec(`ALTER TABLE cameras ADD COLUMN ${col}`);
 		} catch {
@@ -917,6 +938,48 @@ function applySchema(db: Database.Database) {
 		}
 		console.error("[db] activity_logs nullable migration failed:", e);
 	}
+
+	migrateDualCameraDirection(db);
+}
+
+/**
+ * 2026-08-05: retire the camera direction 'dual'.
+ *
+ * A camera is aimed down ONE approach — it cannot gate both directions at a
+ * shared barrier, because a departing car only enters frame after it has passed
+ * the barrier. 'dual' therefore promised something the hardware never delivered:
+ * its second read could RECORD an exit but never authorise one.
+ *
+ * Converted to 'entry', which is the half that genuinely worked — a dual camera
+ * did open sessions correctly. The exit half is not carried over anywhere: the
+ * `entryCameraHandlesExit` setting that briefly stood in for it was retired in
+ * the same change (it implemented the identical rule, for the same configuration
+ * that doesn't occur in practice).
+ *
+ * So a site that really did run one camera both ways LOSES its exit handling and
+ * its sessions will stay open. That's why the log line is an ACTION NEEDED rather
+ * than a note — the fix is a second, exit-facing camera on that barrier. It isn't
+ * silent either way: open sessions visibly accumulate on the Sessions page.
+ *
+ * Idempotent: once no row says 'dual' this is a single cheap SELECT and returns.
+ */
+function migrateDualCameraDirection(db: Database.Database): void {
+	try {
+		const dualRows = db.prepare("SELECT id, name FROM cameras WHERE direction = 'dual'").all() as { id: number; name: string }[];
+		if (dualRows.length === 0) return;
+
+		db.exec("UPDATE cameras SET direction = 'entry', updated_at = CURRENT_TIMESTAMP WHERE direction = 'dual'");
+		const names = dualRows.map((r) => `#${r.id} "${r.name}"`).join(", ");
+		console.warn(
+			`[db] retired camera direction 'dual': converted ${dualRows.length} camera(s) to 'entry' — ${names}. ` +
+				`ACTION NEEDED if any of these covered a shared in/out barrier: they no longer close sessions on a ` +
+				`second read, so give that barrier its own exit-facing camera. Until then its sessions will stay open.`,
+		);
+	} catch (e) {
+		// Never block startup on this — a site that can't migrate still runs; its
+		// cameras simply keep a value the flow now treats as 'entry'.
+		console.error("[db] dual-camera migration failed:", e);
+	}
 }
 
 // ─── settings (key-value) ──────────────────────────────────────────────────
@@ -929,7 +992,6 @@ const DEFAULT_SETTINGS: AppSettings = {
 	faceappBaseUrl: "",
 	faceappApiToken: "",
 	faceappDeviceId: 0,
-	entryCameraHandlesExit: false,
 	faceGateEnabled: true,
 	minimumChargeCents: 0,
 	devMode: false,
@@ -1045,6 +1107,14 @@ function rowToCamera(row: any): LprCamera {
 		name: row.name,
 		laneId: row.lane_id,
 		direction: row.direction,
+		// Anything unrecognised (NULL on a row written before the column existed,
+		// a future mode this build doesn't know) reads as 'open'. Fail-OPEN is the
+		// deliberate choice: a corrupt value must never silently lock a site's
+		// residents out of their own building.
+		accessMode: row.access_mode === "pass_only" ? "pass_only" : "open",
+		// Same fail-safe direction as accessMode: anything unrecognised means
+		// "don't touch the barrier", never "start driving it".
+		barrierControl: row.barrier_control === "app" ? "app" : "camera",
 		webhookSecret: row.webhook_secret,
 		host: row.host ?? null,
 		deviceUser: row.device_user ?? null,
@@ -1056,8 +1126,44 @@ function rowToCamera(row: any): LprCamera {
 	};
 }
 
+/**
+ * Is this camera in a state that would stop it working? Returns an
+ * operator-readable reason, or null when it's coherent.
+ *
+ * Every case here is SILENT at runtime — the camera looks fine in the list and
+ * the fault only shows up as a car stuck at a barrier. Worth surfacing wherever
+ * cameras are displayed rather than waiting for the phone call.
+ *
+ * Deliberately NOT a hard block: a camera can be mid-setup, and refusing to load
+ * it would be worse than flagging it. The Cameras form blocks the bad
+ * combinations at save time; this catches anything that got in another way — a
+ * cloud pull that re-created the row on defaults, a hand-edited DB, a restore
+ * from an older backup.
+ */
+export function describeCameraRisk(camera: LprCamera): string | null {
+	const appOwnsBarrier = camera.barrierControl === "app" || camera.accessMode === "pass_only";
+	if (appOwnsBarrier) {
+		const missing = [
+			!camera.host?.trim() && "host",
+			!camera.deviceUser?.trim() && "device username",
+			!camera.devicePassword?.trim() && "device password",
+		].filter(Boolean);
+		if (missing.length > 0) {
+			return `This app is set to open the barrier but cannot reach the camera — missing ${missing.join(", ")}. The gate will not open for anyone until this is fixed.`;
+		}
+	}
+	if (camera.accessMode === "pass_only" && camera.barrierControl !== "app") {
+		// upsertCamera coerces this, so reaching it means the row was written by
+		// something else entirely.
+		return "Set to pass holders only, but the camera opens its own barrier — the pass check cannot actually stop anyone.";
+	}
+	return null;
+}
+
 export function listCameras(): LprCamera[] {
-	return (getDb().prepare("SELECT * FROM cameras ORDER BY id").all() as any[]).map(rowToCamera);
+	return (getDb().prepare("SELECT * FROM cameras ORDER BY id").all() as any[])
+		.map(rowToCamera)
+		.map((c) => ({ ...c, risk: describeCameraRisk(c) }));
 }
 
 export function getCamera(id: number): LprCamera | null {
@@ -1065,16 +1171,31 @@ export function getCamera(id: number): LprCamera | null {
 	return row ? rowToCamera(row) : null;
 }
 
+/**
+ * Normalise barrier_control on write, and enforce the one invariant the pairing
+ * has: 'pass_only' is meaningless unless THIS app owns the barrier, because a
+ * camera opening its own relay never asks us whether the plate has a pass. The
+ * UI blocks that combination too, but this is the backstop — an equipment pull,
+ * a hand-edited row or a future caller must not be able to create a lane that
+ * reports "pass holders only" while waving everyone through.
+ */
+function barrierControlFor(camera: { accessMode?: string; barrierControl?: string }): "camera" | "app" {
+	if (camera.accessMode === "pass_only") return "app";
+	return camera.barrierControl === "app" ? "app" : "camera";
+}
+
 export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> & { id?: number; externalId?: string }): LprCamera {
 	const db = getDb();
 	if (camera.id) {
 		// external_id is immutable device identity — never rewritten on edit.
 		db.prepare(
-			`UPDATE cameras SET name=?, lane_id=?, direction=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE cameras SET name=?, lane_id=?, direction=?, access_mode=?, barrier_control=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		).run(
 			camera.name,
 			camera.laneId,
 			camera.direction,
+			camera.accessMode === "pass_only" ? "pass_only" : "open",
+			barrierControlFor(camera),
 			camera.host,
 			camera.deviceUser,
 			camera.devicePassword,
@@ -1088,13 +1209,15 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 	const externalId = camera.externalId ?? `dev-${randomUUID()}`;
 	const info = db
 		.prepare(
-			`INSERT INTO cameras (external_id, name, lane_id, direction, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, barrier_control, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		)
 		.run(
 			externalId,
 			camera.name,
 			camera.laneId,
 			camera.direction,
+			camera.accessMode === "pass_only" ? "pass_only" : "open",
+			barrierControlFor(camera),
 			camera.host,
 			camera.deviceUser,
 			camera.devicePassword,
@@ -1191,17 +1314,23 @@ export function setLaneCameras(laneId: number, cameraIds: number[]): void {
  * Derive a lane's direction from the cameras assigned to it — the camera is
  * the single source of truth (routing is keyed to the camera that saw the
  * plate, so direction physically belongs to the camera, not the lane).
- *   - all cameras entry-facing          → 'entry'
- *   - all exit-facing                   → 'exit'
- *   - any dual cam, OR both entry+exit  → 'dual'
- *   - no cameras yet                    → null (caller decides the fallback)
+ *   - all cameras entry-facing   → 'entry'
+ *   - all exit-facing            → 'exit'
+ *   - both entry AND exit        → 'dual'
+ *   - no cameras yet             → null (caller decides the fallback)
  * Used for the lane's displayed direction and the cloud equipment push.
+ *
+ * 'dual' survives HERE and only here. It now means exactly one thing: a shared
+ * in/out barrier covered by two cameras, one facing each way — which is the
+ * correct way to build a bidirectional gate, and the replacement for the retired
+ * camera-level 'dual' (see LprCamera.direction). The `dirs.has('dual')` arm was
+ * dropped with that value; the entry+exit test that remains is the real one.
  */
 export function deriveLaneDirection(laneId: number): "entry" | "exit" | "dual" | null {
 	const rows = getDb().prepare("SELECT DISTINCT direction FROM cameras WHERE lane_id = ?").all(laneId) as { direction: string }[];
 	if (rows.length === 0) return null;
 	const dirs = new Set(rows.map((r) => r.direction));
-	if (dirs.has("dual") || (dirs.has("entry") && dirs.has("exit"))) return "dual";
+	if (dirs.has("entry") && dirs.has("exit")) return "dual";
 	if (dirs.has("entry")) return "entry";
 	if (dirs.has("exit")) return "exit";
 	return null;
@@ -1244,7 +1373,10 @@ export interface CloudLaneRow {
 export interface CloudCameraRow {
 	externalId: string;
 	name: string;
-	direction: "entry" | "exit" | "dual";
+	/** Already narrowed by fetchCloudCameras — the cloud still ACCEPTS 'dual'
+	 *  (CameraDeviceController validates `in:entry,exit,dual`), so the pull
+	 *  coerces it before it can reach a local row. */
+	direction: "entry" | "exit";
 	host: string | null;
 	enabled: boolean;
 	laneExternalId: string | null;
@@ -1304,8 +1436,21 @@ export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
 		for (const local of db.prepare("SELECT id, external_id FROM cameras").all() as { id: number; external_id: string }[]) {
 			if (!keep.has(local.external_id)) db.prepare("DELETE FROM cameras WHERE id = ?").run(local.id);
 		}
-		// lane_id left for relinkDevices(); LAN secrets/SDK creds are not on the
-		// cloud, so surviving rows keep theirs and new rows get NULL.
+		// lane_id left for relinkDevices(). The UPDATE deliberately touches only
+		// cloud-owned columns, so a camera present in BOTH keeps every local-only
+		// setting: SDK credentials, webhook secret, access_mode, barrier_control.
+		// That is the normal pull and it is safe.
+		//
+		// A camera the cloud does NOT have is deleted outright (documented,
+		// destructive), taking its local settings with it. If that external_id
+		// later reappears it comes back here as a fresh INSERT on the column
+		// defaults — access_mode 'open', barrier_control 'camera', no credentials.
+		// Those defaults are deliberately the SAFE ones (admit everyone, don't
+		// touch the barrier), but on a site whose cameras have had their own
+		// auto-open disabled, 'camera' means nothing opens the boom. Nothing here
+		// can detect that — the physical device config is invisible to us — so the
+		// mitigation is a health check that flags the state wherever it comes
+		// from: see describeCameraRisk().
 		const upd = db.prepare("UPDATE cameras SET name=?, direction=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?");
 		const ins = db.prepare("INSERT INTO cameras (external_id, name, lane_id, direction, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?)");
 		for (const r of rows) {

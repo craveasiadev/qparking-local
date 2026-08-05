@@ -42,6 +42,10 @@ export function GateView() {
   const isTerminalOffline = !isOpen && reason === 'terminal-offline';
   const isExitWithoutEntry = !isOpen && reason === 'exit-without-entry';
   const isBlacklisted = !isOpen && reason === 'blacklisted';
+  // Pass-only lane, no valid pass. Distinct from 'blacklisted': this driver
+  // isn't banned, they're simply not registered here — so the wording sends
+  // them to the attendant without accusing them of anything.
+  const isNotAuthorised = !isOpen && reason === 'not-authorised';
   const isMisconfig = isNoLane || isNoTerminal || isTerminalOffline;
 
   // Pick a background — each driver-facing state gets its own colour so
@@ -56,6 +60,8 @@ export function GateView() {
     // Near-black: deliberately unlike every other state, so staff can tell a
     // blocked vehicle from an ordinary closed gate at a glance across the lane.
     : isBlacklisted ? 'bg-zinc-900'
+    // Deep red — clearly a refusal, but not the near-black reserved for a ban.
+    : isNotAuthorised ? 'bg-rose-800'
     : isMisconfig ? 'bg-red-700'
     : 'bg-red-600';
 
@@ -67,6 +73,7 @@ export function GateView() {
     : isPleasePay ? 'PLEASE PAY'
     : isRescanBlock ? 'ALREADY INSIDE'
     : isBlacklisted ? 'VEHICLE BLOCKED'
+    : isNotAuthorised ? 'ACCESS DENIED'
     : isExitWithoutEntry ? 'NO ENTRY ON RECORD'
     : isNoLane ? 'CAMERA HAS NO LANE'
     : isNoTerminal ? 'TERMINAL NOT CONFIGURED'
@@ -83,6 +90,7 @@ export function GateView() {
     // Show the operator-entered blacklist reason when there is one, so staff
     // walking over already know what this is about.
     : isBlacklisted ? (event.detail ? `See attendant · ${event.detail}` : 'Please see attendant')
+    : isNotAuthorised ? 'No valid parking pass · Please see attendant'
     : isExitWithoutEntry ? 'See attendant for assistance'
     : isTerminalOffline ? 'Operator: connect terminal in Terminals page'
     : isMisconfig ? 'Operator: check qparking-local settings'
@@ -92,7 +100,7 @@ export function GateView() {
   // triangle, normal closed gets a ban symbol.
   const HeadIcon = isOpen ? Check
     : isPleasePay ? CreditCard
-    : (isMisconfig || isExitWithoutEntry || isBlacklisted) ? AlertTriangle
+    : (isMisconfig || isExitWithoutEntry || isBlacklisted || isNotAuthorised) ? AlertTriangle
     : Ban;
   const DirIcon = event.direction === 'in' ? ArrowDown : event.direction === 'out' ? ArrowUp : Bolt;
 

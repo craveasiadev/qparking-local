@@ -327,13 +327,15 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   }
 
   // Exit-capable lanes for the manual-release gate picker. A lane's direction is
-  // derived from its cameras (the source of truth): a car can leave through an
-  // 'exit' or 'dual' lane. Fall back to all lanes if none qualify, so the
-  // operator is never left with an empty picker.
+  // derived from its cameras (the source of truth): a car can leave through any
+  // lane that has an exit-facing camera — which covers both a dedicated exit
+  // lane and a shared barrier whose lane holds an entry AND an exit camera.
+  // Fall back to all lanes if none qualify, so the operator is never left with
+  // an empty picker.
   const exitLanes = (() => {
     const filtered = lanes.filter((l) => {
       const dirs = new Set(cameras.filter((c) => c.laneId === l.id).map((c) => c.direction));
-      return dirs.has('exit') || dirs.has('dual');
+      return dirs.has('exit');
     });
     return filtered.length > 0 ? filtered : lanes;
   })();

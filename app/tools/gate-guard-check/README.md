@@ -13,7 +13,7 @@ Runs the **real** main-process code against a throwaway SQLite DB. Two groups:
 `settings.exitGracePeriodSeconds` (default 90) existed, was editable in Settings,
 and was **read by nothing**. ANPR cameras routinely report the same plate two or
 three times per pass. On a `dual` camera — or an entry camera with
-`entryCameraHandlesExit` on — the first of those events closes the session, and the
+a shared barrier — the exit camera closes the session, and the
 next one a second later opened a **brand-new entry**: a phantom "car inside" for a
 car that had just driven out. That phantom then blocked the vehicle's real next
 visit with ALREADY INSIDE, and inflated occupancy until someone deleted it by hand.

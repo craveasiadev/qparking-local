@@ -15,6 +15,8 @@ const EMPTY: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> = 
 	name: "",
 	laneId: null,
 	direction: "entry",
+	accessMode: "open",
+	barrierControl: "camera",
 	host: "",
 	deviceUser: "",
 	devicePassword: "",
@@ -32,7 +34,7 @@ export function Cameras() {
 	const [diag, setDiag] = useState<{ port: number; addresses: string[] } | null>(null);
 	const [webhookOpen, setWebhookOpen] = useState(false);
 	const [search, setSearch] = useState("");
-	const [dirFilter, setDirFilter] = useState<"all" | "entry" | "exit" | "dual">("all");
+	const [dirFilter, setDirFilter] = useState<"all" | "entry" | "exit">("all");
 	const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
 
 	const site = useCurrentSite();
@@ -72,8 +74,38 @@ export function Cameras() {
 				return;
 			}
 
+			// Who opens the barrier is DERIVED from the toggle — the form has no
+			// control for it (see the note by the checkbox). It must therefore be
+			// derived on SAVE too, not just for display: a camera saved as
+			// pass_only stores barrier_control='app', and if unticking the toggle
+			// left that value behind, the row would keep claiming this app owns the
+			// barrier with nothing on screen able to change it. That produced a
+			// genuine dead end — the validation below demanded credentials for a
+			// setting the operator could no longer reach, so the camera could not
+			// be saved at all.
+			const barrierControl: LprCamera["barrierControl"] = editing.accessMode === "pass_only" ? "app" : "camera";
+
+			// Opening the relay goes over the camera's SDK, which needs host +
+			// username + password. Saving without them would produce a lane where
+			// every decision succeeds and the gate never moves — nobody gets in,
+			// pass or not. Refuse here rather than let it surface at the barrier.
+			if (barrierControl === "app") {
+				const missing = [
+					!editing.host?.trim() && "host / LAN IP",
+					!editing.deviceUser?.trim() && "device username",
+					!editing.devicePassword?.trim() && "device password",
+				].filter(Boolean);
+				if (missing.length > 0) {
+					setFormError(
+						`"Only Pass Allow" needs this app to open the barrier itself, which requires the camera's ${missing.join(", ")}. ` +
+							`Fill those in, or untick "Only Pass Allow".`,
+					);
+					return;
+				}
+			}
+
 			const isNewCamera = !editing.id;
-			const savedResult = await window.bridge.saveCamera(editing as any);
+			const savedResult = await window.bridge.saveCamera({ ...editing, barrierControl } as any);
 			await window.bridge.insertActivityLog({ 
 				eventKey: "equipment.camera.saved",
 				action: isNewCamera ? "create" : "edit",
@@ -223,7 +255,6 @@ export function Cameras() {
 						<option value="all">All directions</option>
 						<option value="entry">Entry</option>
 						<option value="exit">Exit</option>
-						<option value="dual">Dual</option>
 					</select>
 					<select
 						value={statusFilter}
@@ -335,6 +366,7 @@ function CameraCard({
 }) {
 	const [test, setTest] = useState<{ state: "idle" | "pinging" | "ok" | "err"; text: string | null }>({ state: "idle", text: null });
 	const hasHost = !!(cam.host && cam.host.trim());
+	const hasCreds = hasHost && !!(cam.deviceUser?.trim() && cam.devicePassword?.trim());
 
 	async function runTest() {
 		setTest({ state: "pinging", text: "Pinging…" });
@@ -350,14 +382,55 @@ function CameraCard({
 		}
 	}
 
+	/**
+	 * Pulse this camera's barrier relay — the exact call the live flow makes when
+	 * "Barrier opened by: this app" is set. Proves the host + credentials actually
+	 * work BEFORE a resident is relying on it at 2am.
+	 */
+	async function runBarrierTest() {
+		setTest({ state: "pinging", text: "Opening barrier…" });
+		try {
+			const r = await window.bridge.manualOpenGate({ cameraId: cam.id, laneId: cam.laneId ?? null });
+			setTest(
+				r.ok
+					? { state: "ok", text: r.note ?? "Barrier pulse sent" }
+					: { state: "err", text: "Barrier pulse failed — check host, username and password" },
+			);
+		} catch (e: any) {
+			setTest({ state: "err", text: e?.message ?? "failed" });
+		}
+	}
+
 	return (
 		<div className={`rounded-xl border bg-white overflow-hidden ${cam.enabled ? "border-gray-200" : "border-gray-200 opacity-70"}`}>
+			{/* A misconfigured barrier is invisible until a car is stuck at it, so
+			    the warning goes at the top of the card, not behind a Test click. */}
+			{cam.risk && (
+				<div className="px-4 pt-3 -mb-1">
+					<p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-800">{cam.risk}</p>
+				</div>
+			)}
 			<div className="flex flex-wrap items-start justify-between gap-3 p-4">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2 flex-wrap">
 						<CamIcon size={16} className="text-gray-400 flex-shrink-0" />
 						<h3 className="font-semibold truncate">{cam.name}</h3>
 						<DirectionBadge direction={cam.direction} />
+						{cam.accessMode === "pass_only" && (
+							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200">
+								only pass allow
+							</span>
+						)}
+						{cam.barrierControl === "app" && (
+							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-sky-50 text-sky-700 border-sky-200">
+								app opens barrier
+							</span>
+						)}
+						{cam.risk && (
+							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200">
+								will not open
+							</span>
+						)}
 						{!cam.enabled && (
 							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-gray-100 text-gray-500 border-gray-200">
 								disabled
@@ -386,6 +459,18 @@ function CameraCard({
 						className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-40"
 					>
 						{test.state === "pinging" ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />} Test
+					</button>
+					{/* Needs SDK credentials, not just a host — the relay is driven over
+					    the authenticated device connection, same as the live flow. */}
+					<button
+						onClick={runBarrierTest}
+						disabled={!hasCreds || test.state === "pinging"}
+						title={hasCreds
+							? "Pulse this camera's barrier relay now"
+							: "Set the host, device username and password first"}
+						className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-40"
+					>
+						<KeyRound size={13} /> Open barrier
 					</button>
 					<button onClick={onEdit} className="text-xs font-bold uppercase tracking-wide text-gray-700 hover:text-gray-900 px-2">
 						Edit
@@ -421,10 +506,12 @@ function DirectionBadge({ direction }: { direction: LprCamera["direction"] }) {
 	const map: Record<LprCamera["direction"], string> = {
 		entry: "bg-emerald-50 text-emerald-700 border-emerald-200",
 		exit: "bg-blue-50 text-blue-700 border-blue-200",
-		dual: "bg-amber-50 text-amber-700 border-amber-200",
 	};
+	// A legacy row could still read 'dual' if its migration failed — fall back to
+	// a neutral chip rather than rendering `undefined` into the class list.
+	const cls = map[direction] ?? "bg-gray-100 text-gray-500 border-gray-200";
 	return (
-		<span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${map[direction]}`}>
+		<span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${cls}`}>
 			{direction}
 		</span>
 	);
@@ -482,29 +569,106 @@ function CameraForm({
 		setPingResult(r.ok ? `✓ Reachable · status ${r.status} · ${r.latencyMs}ms` : `✗ ${r.error ?? `status ${r.status}`} · ${r.latencyMs ?? "—"}ms`);
 		setPinging(false);
 	}
+	// The panel is capped to the viewport and laid out as a column: header and
+	// footer stay put, only the FIELDS scroll. Without the cap the panel grew with
+	// its content and pushed Save off-screen on a short window — unrecoverable,
+	// since the footer is the only way to commit the form.
 	return (
-		<div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onCancel}>
-			<div onClick={(e) => e.stopPropagation()} className="w-full max-w-xl bg-white rounded-2xl shadow-2xl overflow-hidden">
-				<header className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+		<div className="fixed inset-0 z-50 bg-black/40 flex items-start sm:items-center justify-center p-4 overflow-y-auto" onClick={onCancel}>
+			<div
+				onClick={(e) => e.stopPropagation()}
+				className="w-full max-w-xl my-auto bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[calc(100vh-2rem)]"
+			>
+				<header className="shrink-0 px-5 py-4 border-b border-gray-200 flex items-center justify-between">
 					<h2 className="text-base font-bold">{value.id ? "Edit" : "Add"} camera</h2>
 					<button onClick={onCancel} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500">
 						<X size={18} />
 					</button>
 				</header>
-				<div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+				{/* min-h-0 is required: a flex child defaults to min-height:auto, which
+				    refuses to shrink below its content and would defeat the cap above. */}
+				<div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-3 content-start">
 					<p className="sm:col-span-2 text-xs text-gray-500">
 						Assign this camera to a lane from the <strong>Lanes</strong> page — a lane owns the cameras that cover it.
 					</p>
 					<Field label="Display name">
 						<input className="input" value={value.name ?? ""} onChange={(e) => set("name", e.target.value)} />
 					</Field>
+					{/* One camera faces ONE way — it reads plates coming toward it. A
+					    shared in/out barrier needs two cameras, one per direction;
+					    the lane then shows as "dual". (The old per-camera "Dual"
+					    option promised something the optics can't do: a departing
+					    car only comes into frame after it has passed the barrier.) */}
 					<Field label="Direction">
 						<select className="input" value={value.direction ?? "entry"} onChange={(e) => set("direction", e.target.value)}>
 							<option value="entry">Entry</option>
 							<option value="exit">Exit</option>
-							<option value="dual">Dual</option>
 						</select>
 					</Field>
+					{/* The whole feature, as one switch. Checking it means: every plate
+					    this camera reads is looked up against the local pass roster, and
+					    the barrier only rises for a plate that holds a valid pass. */}
+					<div className="sm:col-span-2">
+						<label className="flex items-start gap-2.5 rounded-lg border border-gray-200 px-3 py-2.5 cursor-pointer hover:border-gray-400">
+							<input
+								type="checkbox"
+								className="mt-0.5"
+								checked={value.accessMode === "pass_only"}
+								onChange={(e) => set("accessMode", e.target.checked ? "pass_only" : "open")}
+							/>
+							<span>
+								{/* Setup caveats live in the tip rather than a banner: they matter
+								    once, when the lane is first wired up, and a permanent orange
+								    block just adds noise to every later edit. */}
+								<span className="text-sm font-semibold inline-flex items-center gap-1.5">
+									Only Pass Allow
+									<InfoTip title="Before this works" kind="info">
+										Two things must be true or the lane won't open at all:
+										<strong> (1)</strong> the host, username and password below must be filled in — this app
+										opens the barrier itself in this mode;
+										<strong> (2)</strong> the camera's own auto-open must be switched off in its web
+										interface, or it will keep opening for everyone and this setting does nothing.
+										<br />
+										<br />
+										A pass created in the cloud only reaches this box on <strong>Sync now</strong> — sync
+										after issuing one, or the holder will be turned away.
+									</InfoTip>
+								</span>
+								<span className="block text-[11px] text-gray-500 mt-0.5">
+									Open the barrier only for a vehicle holding a <strong>valid season pass</strong>.
+									Expired passes and blacklisted vehicles are refused and shown ACCESS DENIED —
+									staff let them through with <strong>Open barrier</strong> on the Live display.
+								</span>
+							</span>
+						</label>
+					</div>
+					{/* Shown rather than hidden on an exit camera. Hiding the control would
+					    not switch it OFF — a camera ticked while set to Entry and later
+					    flipped to Exit would keep enforcing the rule with nothing on screen
+					    to say so, which is worse than a visible setting someone was warned
+					    about. It is also occasionally the right answer (a shared in/out
+					    barrier, or stopping a tailgater leaving), so removing the option
+					    would cost more than it saves. */}
+					{value.accessMode === "pass_only" && value.direction === "exit" && (
+						<div className="sm:col-span-2 -mt-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+							<strong>Usually not needed on an exit camera.</strong> If entry is already
+							pass-checked, everyone inside holds a pass, so there is nobody to stop on the way out.
+							Turning it on here means a vehicle inside <em>without</em> a valid pass — a tailgater, or a
+							resident whose pass expired while parked — <strong>cannot leave</strong> until staff release
+							it manually. Only enable it if one camera covers both directions, or you specifically want
+							to stop vehicles leaving.
+						</div>
+					)}
+					{/* NOT exposed on the form. Who opens the barrier is DERIVED from the
+					    toggle above, because there is only one sensible answer either way:
+					      Only Pass Allow ON  → we decide, so we must also open (the camera's
+					                            own auto-open has to be off, or the check is
+					                            decoration).
+					      Only Pass Allow OFF → the camera opens its own relay, exactly as
+					                            every install did before this feature.
+					    The column still exists and upsertCamera still honours it, so a site
+					    that ever needs "admit everyone, but the app opens the boom" can have
+					    it re-exposed without a migration. */}
 					{/* Camera LAN IP — all that live video needs. The main process pulls
               rtsp://<host>:8557/h264 and transcodes it for the Live display. */}
 					<Field label="Camera host / LAN IP">
@@ -568,8 +732,10 @@ function CameraForm({
 						</label>
 					</Field>
 				</div>
-				{error && <div className="mx-5 mb-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>}
-				<footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+				{/* Outside the scroll area on purpose: a validation error must be visible
+				    the moment Save is pressed, not hidden above the fold of a long form. */}
+				{error && <div className="shrink-0 mx-5 mb-3 mt-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>}
+				<footer className="shrink-0 px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
 					<button onClick={onCancel} className="text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900 px-3">
 						Cancel
 					</button>

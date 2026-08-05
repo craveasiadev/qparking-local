@@ -69,21 +69,33 @@
     },
     {
       "group": "A · entry",
-      "name": "A8 dual camera, no open session → treated as ENTRY",
+      "name": "A8 shared barrier: entry camera opens the session",
       "pass": true,
       "detail": null
     },
     {
       "group": "A · entry",
-      "name": "A9 dual camera, open session → treated as EXIT",
+      "name": "A9 shared barrier: exit camera closes it",
       "pass": true,
       "detail": null
     },
     {
       "group": "A · entry",
-      "name": "A10 entryCameraHandlesExit: 2nd entry-direction read becomes an EXIT",
+      "name": "A9b …and the lane still derives as dual (entry + exit cameras)",
       "pass": true,
-      "detail": null
+      "detail": "dual"
+    },
+    {
+      "group": "A · entry",
+      "name": "A10 an entry camera never closes a session, however often it re-reads",
+      "pass": true,
+      "detail": "openAfterFirst=true stillInside=true"
+    },
+    {
+      "group": "A · entry",
+      "name": "A10b …and the 2nd read is reported as a duplicate, not an exit",
+      "pass": true,
+      "detail": "[\"AAA0001\",\"AAA0007\"]"
     },
     {
       "group": "A · entry",
@@ -95,7 +107,7 @@
       "group": "A · entry",
       "name": "A12 entry_at is stored as UTC ISO with a Z marker",
       "pass": true,
-      "detail": "2026-08-05T02:50:42.168Z"
+      "detail": "2026-08-05T11:09:59.747Z"
     },
     {
       "group": "B · exit routing & free exits",
@@ -329,7 +341,7 @@
       "group": "C · paid exit & the terminal",
       "name": "C10b …and tells the device to abort the deduction (PayCancel)",
       "pass": true,
-      "detail": "{\"orderId\":\"781a233810ed07e756942e459a517304\",\"host\":\"10.0.0.50\",\"port\":80}"
+      "detail": "{\"orderId\":\"46b95c16bce5d31d1168d4b1d2745697\",\"host\":\"10.0.0.50\",\"port\":80}"
     },
     {
       "group": "C · paid exit & the terminal",
@@ -864,6 +876,24 @@
       "name": "I4 simulateEntryAt honours the blacklist, exactly like the camera path",
       "pass": true,
       "detail": "blacklisted — BAN0004 is blocked (sim ban); no entry recorded. Lift the ban in the cloud to let it in."
+    },
+    {
+      "group": "I · dev simulator & open-session restore",
+      "name": "I4b simulateEntryAt refuses an unregistered plate on an Only Pass Allow lane",
+      "pass": true,
+      "detail": "no valid pass — \"SIM-PASSONLY\" is set to Only Pass Allow and SIMNOPASS has no season pass valid right now, so no entry was recorded. Issue a pass in the cloud and press Sync now, or turn the toggle off to test without it."
+    },
+    {
+      "group": "I · dev simulator & open-session restore",
+      "name": "I4c …and stores NO session for it",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "group": "I · dev simulator & open-session restore",
+      "name": "I4d …but admits a plate that does hold a valid pass",
+      "pass": true,
+      "detail": null
     },
     {
       "group": "I · dev simulator & open-session restore",

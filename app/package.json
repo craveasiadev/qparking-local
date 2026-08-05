@@ -23,6 +23,7 @@
     "test:migration": "npm run build:main && node tools/migration-check/run.mjs",
     "test:fees": "npm run build:main && node tools/fee-gap-check/run.mjs",
     "test": "npm run test:migration && npm run test:fees && npm run test:gate && npm run test:sessions",
+    "find:cameras": "node tools/find-cameras/run.mjs",
     "test:gate": "npm run build:main && node tools/gate-guard-check/run.mjs",
     "test:sessions": "npm run build:main && node tools/session-suite/run.mjs"
   },

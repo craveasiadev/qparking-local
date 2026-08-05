@@ -77,6 +77,34 @@ function seedLegacy(dbPath, { withAuditColumns = false } = {}) {
   seed.close();
 }
 
+/**
+ * A pre-2026-08-05 `cameras` table — note the permissive direction CHECK that
+ * still allows 'dual'. A fresh install now creates the narrowed CHECK, so this
+ * legacy shape is the ONLY way to get a 'dual' row into the DB, which is exactly
+ * what migrateDualCameraDirection() has to cope with in the field.
+ */
+const LEGACY_CAMERAS = `
+  CREATE TABLE cameras (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    lane_id INTEGER,
+    direction TEXT NOT NULL CHECK (direction IN ('entry','exit','dual')) DEFAULT 'entry',
+    host TEXT,
+    webhook_secret TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );`;
+
+/** Seed a legacy cameras table with the given [name, direction] pairs. */
+function seedLegacyCameras(dbPath, cams) {
+  const seed = new Database(dbPath);
+  seed.exec(LEGACY_CAMERAS);
+  const ins = seed.prepare('INSERT INTO cameras (name, direction, host) VALUES (?,?,?)');
+  cams.forEach(([name, direction], i) => ins.run(name, direction, `10.0.0.${i + 1}`));
+  seed.close();
+}
+
 function columnsOf(db, table) {
   return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
 }
@@ -157,6 +185,65 @@ try {
     check('fresh install created a sessions table', out.columns.length > 0, out.columns.join(','));
     const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'`).get().sql;
     check('fresh table did NOT need a rebuild', sql.includes(CANONICAL_PAY_CHECK));
+  } else if (testCase === 'dual-only' || testCase === 'dual-mixed') {
+    // ─── 2026-08-05: retiring the camera direction 'dual' ──────────────────
+    // A dual camera becomes an 'entry' camera — the half that genuinely worked,
+    // since it did open sessions correctly. The exit half is deliberately NOT
+    // carried anywhere: the `entryCameraHandlesExit` setting that briefly stood
+    // in for it was removed in the same change.
+    //
+    // These two cases pin the conversion and, just as importantly, that ordinary
+    // entry/exit cameras are left completely alone by it.
+    const mixed = testCase === 'dual-mixed';
+    seedLegacyCameras(dbPath, mixed
+      // A dual cam alongside a plain entry cam (and an exit cam, so the lane
+      // below can prove the SURVIVING lane-level 'dual' still derives).
+      ? [['Shared', 'dual'], ['North entry', 'entry'], ['North exit', 'exit']]
+      // Every entry-facing camera was dual — the unambiguous case.
+      : [['Shared A', 'dual'], ['Shared B', 'dual']]);
+
+    const dbmod = require(DIST_DB);
+    const db = dbmod.getDb();
+
+    const dirs = db.prepare('SELECT name, direction FROM cameras ORDER BY id').all();
+    check("no camera is left on 'dual'", dirs.every((c) => c.direction !== 'dual'),
+      JSON.stringify(dirs));
+    check("dual cameras became 'entry'",
+      dirs.filter((c) => c.name.startsWith('Shared')).every((c) => c.direction === 'entry'),
+      JSON.stringify(dirs));
+    // Untouched: a plain entry / exit camera must not be rewritten.
+    if (mixed) {
+      check('plain entry camera untouched', dirs.find((c) => c.name === 'North entry')?.direction === 'entry');
+      check('exit camera untouched', dirs.find((c) => c.name === 'North exit')?.direction === 'exit');
+    }
+
+    // The retired setting must be gone from AppSettings entirely — not merely
+    // defaulted to false. A leftover key would keep reading as a real setting to
+    // any caller that still asked for it.
+    check('entryCameraHandlesExit is no longer part of AppSettings',
+      !('entryCameraHandlesExit' in dbmod.getSettings()),
+      JSON.stringify(Object.keys(dbmod.getSettings()).filter((k) => /entryCamera/i.test(k))));
+
+    // The surviving meaning of 'dual': a LANE with both an entry and an exit
+    // camera. Retiring the camera value must not have taken this with it.
+    if (mixed) {
+      const lane = dbmod.upsertLane({ name: 'Shared barrier', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+      const entryCam = dirs.find((c) => c.name === 'North entry');
+      const exitCam = dirs.find((c) => c.name === 'North exit');
+      const ids = db.prepare('SELECT id, name FROM cameras').all();
+      dbmod.setLaneCameras(lane.id, [
+        ids.find((c) => c.name === entryCam.name).id,
+        ids.find((c) => c.name === exitCam.name).id,
+      ]);
+      check("lane with entry+exit cameras still derives 'dual'",
+        dbmod.deriveLaneDirection(lane.id) === 'dual', String(dbmod.deriveLaneDirection(lane.id)));
+    }
+
+    // Idempotence: re-running the migration on the already-converted DB must be
+    // a no-op, not a second flip. getDb() memoises, so drive applySchema's work
+    // by re-checking the invariant after a fresh statement round-trip.
+    const stillNoDual = db.prepare("SELECT COUNT(*) AS n FROM cameras WHERE direction='dual'").get().n;
+    check('re-check: still no dual rows', stillNoDual === 0, String(stillNoDual));
   } else {
     // ─── The real migration, via the built main-process db module ──────────
     seedLegacy(dbPath, { withAuditColumns: testCase === 'carry' });

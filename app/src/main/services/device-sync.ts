@@ -69,7 +69,12 @@ async function fetchCloudCameras(): Promise<CloudCameraRow[]> {
   return (data.data ?? []).map((r: any): CloudCameraRow => ({
     externalId: String(r.external_id),
     name: String(r.name ?? ''),
-    direction: (r.direction ?? 'entry') as CloudCameraRow['direction'],
+    // The cloud's camera_devices.direction still allows 'dual' (its validation
+    // rule is `in:entry,exit,dual`), but this app retired that value — see
+    // LprCamera.direction. Coerce anything that isn't a live direction to
+    // 'entry' so a pull can't reintroduce it, or write a row that fails the
+    // cameras CHECK constraint on a fresh install and aborts the whole pull.
+    direction: r.direction === 'exit' ? 'exit' : 'entry',
     host: r.ip_address ?? null,
     enabled: !!r.is_enabled,
     laneExternalId: r.lane_external_id ?? null,

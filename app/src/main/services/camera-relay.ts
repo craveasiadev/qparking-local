@@ -176,6 +176,56 @@ export function resync() {
   }
 }
 
+/**
+ * Run `fn` against a connected SDK handle for a camera, reusing the warm one
+ * when we have it and otherwise opening a short-lived handle just for this call.
+ *
+ * Extracted from pulseBarrier so the whitelist module (camera-whitelist.ts) can
+ * share the exact same connection strategy instead of duplicating it — one
+ * place that knows how to reach a camera, one place to fix if that changes.
+ *
+ * Never throws: every failure comes back as { ok:false, error }, because a gate
+ * flow must not die on a network hiccup.
+ */
+export function withCameraHandle<T>(
+  cameraId: number,
+  fn: (handle: number, fns: any) => T,
+): { ok: true; value: T; via: 'reused' | 'temp' } | { ok: false; error: string } {
+  if (!ensureLib()) return { ok: false, error: 'sdk_unavailable' };
+
+  const conn = connections.get(cameraId);
+  if (conn && !conn.stopped) {
+    try { return { ok: true, value: fn(conn.handle, fns), via: 'reused' }; }
+    catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  }
+
+  const cam = listCameras().find((c) => c.id === cameraId);
+  if (!cam?.host) return { ok: false, error: 'camera_has_no_host' };
+  const port = Number(cam.devicePort) || 80;
+  let handle = 0;
+  try {
+    handle = fns.Open(cam.host, port, cam.deviceUser ?? '', cam.devicePassword ?? '');
+    if (handle === 0) return { ok: false, error: 'open_failed' };
+    return { ok: true, value: fn(handle, fns), via: 'temp' };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  } finally {
+    if (handle !== 0) {
+      const h = handle;
+      setTimeout(() => { try { fns.Close(h); } catch { /* ignore */ } }, 800);
+    }
+  }
+}
+
+/** Register extra SDK entry points on the shared lib (used by camera-whitelist
+ *  to add the WhiteList* family without loading the DLL a second time). Returns
+ *  null when the SDK isn't available at all. */
+export function extendSdk(register: (lib: any, koffiRef: any) => void): any | null {
+  if (!ensureLib()) return null;
+  try { register(lib, koffi); return fns; }
+  catch (e: any) { log(`extendSdk failed: ${e?.message ?? e}`); return null; }
+}
+
 export interface BarrierResult { ok: boolean; error?: string; via?: 'reused' | 'temp' }
 
 /**

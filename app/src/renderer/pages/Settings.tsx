@@ -409,6 +409,12 @@ export function Settings() {
         <Field label="LPR webhook port">
           <input type="number" className="input" value={settings.lprWebhookPort} onChange={(e) => setSettings({ ...settings, lprWebhookPort: Number(e.target.value) })} />
         </Field>
+        {/* "One camera covers entry and exit" lived here briefly and was removed
+            2026-08-05 along with the camera direction 'dual' — same rule, same
+            configuration, and it never worked properly (a departing car is only in
+            frame after it has passed the barrier). A shared barrier now takes two
+            cameras, one facing each way. Camera direction is the only thing that
+            decides routing. */}
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">

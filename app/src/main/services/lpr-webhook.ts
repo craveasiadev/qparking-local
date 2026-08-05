@@ -36,7 +36,11 @@ export interface PlateEvent {
   confidence?: number;
   imagePath: string | null;
   timestamp: string;
-  direction: 'entry' | 'exit' | 'dual';
+  /** entry | exit only. 'dual' was retired — see LprCamera.direction. Inbound
+   *  payloads carrying it are coerced to the camera's own direction by
+   *  resolveDirection() below, so an old integration can't inject a value the
+   *  flow no longer routes. */
+  direction: 'entry' | 'exit';
   /** DEV/QA only: force the exit moment (fee window + recorded exit_at) to this
    *  ISO instant instead of "now". Set by the Sessions simulator's timed Exit;
    *  undefined for real camera events, so the live flow is unaffected. */
@@ -246,7 +250,7 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     ? await saveImage(plate, extracted.image).catch(() => null)
     : null;
 
-  const direction = (extracted.direction as PlateEvent['direction']) ?? camera.direction;
+  const direction = resolveDirection(extracted.direction, camera);
 
   const event: PlateEvent = {
     cameraId: camera.id,
@@ -262,6 +266,27 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
   res.statusCode = 200;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify({ ok: true, plate, cameraId: camera.id, direction }));
+}
+
+/**
+ * Decide the direction for an inbound event. The payload MAY override the
+ * camera's own direction (custom integrations and the dev simulator rely on
+ * this), but only with a value the flow actually routes.
+ *
+ * Anything else — the retired 'dual', a typo, a vendor field we mis-mapped —
+ * falls back to the camera's configured direction rather than being passed
+ * through. Before this, an unrecognised string reached handlePlateEvent and was
+ * silently treated as 'entry' by its `=== 'exit' ? 'exit' : 'entry'` default,
+ * so a stale integration still POSTing "dual" would have opened entry sessions
+ * on an EXIT camera. Falling back to the camera keeps the operator's own
+ * configuration authoritative.
+ */
+function resolveDirection(supplied: string | undefined, camera: LprCamera): PlateEvent['direction'] {
+  if (supplied === 'entry' || supplied === 'exit') return supplied;
+  if (supplied) {
+    console.warn(`[lpr] camera ${camera.id} sent unsupported direction "${supplied}" — using the camera's configured "${camera.direction}" instead`);
+  }
+  return camera.direction;
 }
 
 /**

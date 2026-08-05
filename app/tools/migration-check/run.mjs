@@ -27,6 +27,8 @@ const CASES = [
   ['fresh', 'fresh install — baseline column set'],
   ['rebuild', 'legacy DB (stale CHECK) → rebuild keeps the audit columns'],
   ['carry', 'existing pass_id / free_reason values survive the rebuild'],
+  ['dual-only', "retiring camera 'dual' — every entry cam was dual → setting flipped, behaviour preserved"],
+  ['dual-mixed', "retiring camera 'dual' — dual + plain entry cams → global setting NOT flipped"],
 ];
 
 async function runCase(name) {

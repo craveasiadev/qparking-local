@@ -15,11 +15,13 @@ const EMPTY: Omit<ParkingLane, 'id' | 'externalId'> = {
 };
 
 /** A lane's direction is derived from its cameras (the single source of
- *  truth) — mirrors db.deriveLaneDirection for the read-only list display. */
+ *  truth) — mirrors db.deriveLaneDirection for the read-only list display.
+ *  'dual' here means the lane has BOTH an entry and an exit camera (one shared
+ *  barrier, covered from both sides). Cameras themselves are never 'dual'. */
 function laneDirectionLabel(cams: LprCamera[]): string {
   if (cams.length === 0) return 'no cameras';
   const dirs = new Set(cams.map((c) => c.direction));
-  if (dirs.has('dual') || (dirs.has('entry') && dirs.has('exit'))) return 'dual';
+  if (dirs.has('entry') && dirs.has('exit')) return 'dual';
   if (dirs.has('entry')) return 'entry';
   if (dirs.has('exit')) return 'exit';
   return '—';
@@ -61,16 +63,16 @@ export function Lanes() {
     setFormError(null);
     if (!editing?.name) { setFormError('Name is required.'); return; }
     // A hidden field must never persist stale data: the rate plan only applies
-    // to entry/dual lanes (it governs the fee), the payment terminal only to
-    // exit/dual lanes (that's where payment is collected). Null whichever the
+    // to an entry lane (it governs the fee), the payment terminal only to an
+    // exit lane (that's where payment is collected). Null whichever the
     // selected camera's direction doesn't use, so the DB can't carry a value
     // the form wouldn't even show.
     const camId = editing.cameraIds?.[0] ?? null;
     const dir = cameras.find((c) => c.id === camId)?.direction ?? null;
     const payload = {
       ...editing,
-      policyId: (dir === 'entry' || dir === 'dual') ? (editing.policyId ?? null) : null,
-      terminalId: (dir === 'exit' || dir === 'dual') ? (editing.terminalId ?? null) : null,
+      policyId: dir === 'entry' ? (editing.policyId ?? null) : null,
+      terminalId: dir === 'exit' ? (editing.terminalId ?? null) : null,
     };
     
     const savedResult = await window.bridge.saveLane(payload as any);
@@ -93,8 +95,8 @@ export function Lanes() {
   // payment-terminal the form exposes (see the save() note above).
   const selectedCameraId = editing?.cameraIds?.[0] ?? null;
   const selectedDir = cameras.find((c) => c.id === selectedCameraId)?.direction ?? null;
-  const showRatePlan = selectedDir === 'entry' || selectedDir === 'dual';
-  const showTerminal = selectedDir === 'exit' || selectedDir === 'dual';
+  const showRatePlan = selectedDir === 'entry';
+  const showTerminal = selectedDir === 'exit';
 
   const q = search.trim().toLowerCase();
   const filterActive = q !== '' || dirFilter !== 'all' || statusFilter !== 'all';
@@ -248,14 +250,19 @@ export function Lanes() {
 
       <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
 
+      {/* Same viewport cap as the Cameras modal — header and footer pinned, only
+          the fields scroll, so Save can never be pushed off a short window. */}
       {editing && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setEditing(null)}>
-          <div onClick={(e) => e.stopPropagation()} className="w-full max-w-xl bg-white rounded-2xl shadow-2xl overflow-hidden">
-            <header className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-start sm:items-center justify-center p-4 overflow-y-auto" onClick={() => setEditing(null)}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-xl my-auto bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[calc(100vh-2rem)]"
+          >
+            <header className="shrink-0 px-5 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-base font-bold">{editing.id ? 'Edit' : 'Add'} lane</h2>
               <button onClick={() => setEditing(null)} className="w-9 h-9 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-500"><X size={18} /></button>
             </header>
-            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-3 content-start">
               <Field label="Display name"><input className="input" value={editing.name ?? ''} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
               {/* One camera per lane. Two cameras on the same lane would both
                   fire a plate event for the same car, forcing dedup guesswork —
@@ -268,7 +275,7 @@ export function Lanes() {
                 <select className="input" value={selectedCameraId ?? ''}
                   onChange={(e) => setEditing({ ...editing, cameraIds: e.target.value ? [Number(e.target.value)] : [] })}>
                   <option value="">— none —</option>
-                  {(['entry', 'exit', 'dual'] as const).map((group) => {
+                  {(['entry', 'exit'] as const).map((group) => {
                     const groupCams = cameras.filter((c) => c.direction === group);
                     if (groupCams.length === 0) return null;
                     return (
@@ -287,7 +294,7 @@ export function Lanes() {
                 {cameras.length === 0 ? (
                   <p className="text-[11px] text-amber-600">No cameras yet — add one on the <strong>Cameras</strong> page first. A lane needs an LPR camera to do anything.</p>
                 ) : (
-                  <p className="text-[11px] text-gray-500">The camera's direction decides the rest: <strong>entry</strong> → set the rate plan; <strong>exit</strong> → set the payment device; <strong>dual</strong> → both.</p>
+                  <p className="text-[11px] text-gray-500">The camera's direction decides the rest: <strong>entry</strong> → set the rate plan; <strong>exit</strong> → set the payment device. For one barrier used both ways, make two lanes — an entry lane and an exit lane — each with its own camera.</p>
                 )}
               </div>
               {showRatePlan && (
@@ -297,7 +304,7 @@ export function Lanes() {
                       (VIP → premium, general → standard). "— site default —"
                       falls back to the plan the cloud flagged as default. The
                       fee is governed by the ENTRY lane's plan, which is why
-                      this only shows for entry/dual cameras. */}
+                      this only shows for an entry camera. */}
                   <select className="input" value={editing.policyId ?? ''} onChange={(e) => setEditing({ ...editing, policyId: e.target.value || null })}>
                     <option value="">— site default —</option>
                     {policies.map((s) => (
@@ -322,9 +329,9 @@ export function Lanes() {
               </Field>
             </div>
             {formError && (
-              <div className="mx-5 mb-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{formError}</div>
+              <div className="shrink-0 mx-5 mb-3 mt-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{formError}</div>
             )}
-            <footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+            <footer className="shrink-0 px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
               <button onClick={() => setEditing(null)} className="text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-900 px-3">Cancel</button>
               <button onClick={save} className="h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide">Save</button>
             </footer>

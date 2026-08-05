@@ -86,7 +86,6 @@ async function main() {
   db.saveSettings({
     qparkingBaseUrl: '', qparkingApiKey: '',       // keep the cloud queue inert
     faceGateEnabled: false, tngEnabled: true,
-    entryCameraHandlesExit: false,
     exitGracePeriodSeconds: 90,
     minimumChargeCents: 0,
     tngAutoRetrigger: false,
@@ -123,7 +122,7 @@ async function main() {
     grace: lane('L-GRACE', 'grace', terminal.id),         // 24h free
     zero: lane('L-ZERO', 'zero', terminal.id),            // rate is RM 0
     none: lane('L-NONE', null, null),                     // no plan at all
-    dual: lane('L-DUAL', 'zero', terminal.id),            // one camera, both ways
+    dual: lane('L-DUAL', 'zero', terminal.id),            // shared barrier: entry + exit cams
     noCam: lane('L-NOCAM', 'charge', terminal.id),        // device but no camera
   };
 
@@ -142,7 +141,12 @@ async function main() {
     zeroOut: cam('C-ZR-OUT', L.zero.id, 'exit', '10.1.0.8'),
     noneIn: cam('C-NONE-IN', L.none.id, 'entry', '10.1.0.9'),
     noneOut: cam('C-NONE-OUT', L.none.id, 'exit', '10.1.0.10'),
-    dual: cam('C-DUAL', L.dual.id, 'dual', '10.1.0.11'),
+    // A shared in/out barrier is TWO cameras on one lane — the camera direction
+    // 'dual' was retired 2026-08-05 (a camera faces one way; a departing car is
+    // only in frame after it has passed the barrier). This pair is what makes
+    // the lane derive as 'dual', which is the surviving meaning of the word.
+    dualIn: cam('C-DUAL-IN', L.dual.id, 'entry', '10.1.0.11'),
+    dualOut: cam('C-DUAL-OUT', L.dual.id, 'exit', '10.1.0.14'),
     orphan: cam('C-ORPHAN', null, 'entry', '10.1.0.12'),   // camera on no lane
     orphanOut: cam('C-ORPHAN-OUT', null, 'exit', '10.1.0.13'),
   };
@@ -257,20 +261,33 @@ async function main() {
   check('A7b …and reports entry-blacklisted with the reason',
     ev.warning.some((w) => w.kind === 'entry-blacklisted' && w.plate === 'BAN0001' && w.reason === 'unpaid fines'));
 
-  read(C.dual.id, 'AAA0006', 'dual');
-  check('A8 dual camera, no open session → treated as ENTRY', inside('AAA0006'));
-  read(C.dual.id, 'AAA0006', 'dual');
+  // A8/A9 used to drive a single 'dual' camera. That direction was retired
+  // 2026-08-05; a shared barrier is now two cameras on one lane, so the same
+  // in-then-out journey is driven through the pair. The routing outcome must be
+  // identical to what the dual camera produced.
+  read(C.dualIn.id, 'AAA0006', 'entry');
+  check('A8 shared barrier: entry camera opens the session', inside('AAA0006'));
+  read(C.dualOut.id, 'AAA0006', 'exit');
   await tick();
-  check('A9 dual camera, open session → treated as EXIT', !inside('AAA0006'));
+  check('A9 shared barrier: exit camera closes it', !inside('AAA0006'));
+  check('A9b …and the lane still derives as dual (entry + exit cameras)',
+    db.deriveLaneDirection(L.dual.id) === 'dual', String(db.deriveLaneDirection(L.dual.id)));
 
-  db.saveSettings({ entryCameraHandlesExit: true });
+  // A10 replaces the old `entryCameraHandlesExit` case (setting removed
+  // 2026-08-05 along with camera direction 'dual'). The rule it now pins is the
+  // opposite one, and it's the reason the setting could go: an ENTRY camera never
+  // closes a session, no matter how many times it reads the same plate. A second
+  // read is a duplicate/re-scan, which the rescan-ignored guard handles.
   read(C.zeroIn.id, 'AAA0007', 'entry');
   const singleCamOpen = inside('AAA0007');
   read(C.zeroIn.id, 'AAA0007', 'entry');
   await tick();
-  check('A10 entryCameraHandlesExit: 2nd entry-direction read becomes an EXIT',
-    singleCamOpen && !inside('AAA0007'));
-  db.saveSettings({ entryCameraHandlesExit: false });
+  check('A10 an entry camera never closes a session, however often it re-reads',
+    singleCamOpen && inside('AAA0007'),
+    `openAfterFirst=${singleCamOpen} stillInside=${inside('AAA0007')}`);
+  check('A10b …and the 2nd read is reported as a duplicate, not an exit',
+    ev.rescan.some((p) => p.plate === 'AAA0007'),
+    JSON.stringify(ev.rescan.map((p) => p.plate)));
 
   read(C.orphan.id, 'AAA0008', 'entry');
   const orphanSess = db.findOpenSessionByPlate('AAA0008');
@@ -797,6 +814,41 @@ async function main() {
   const simBanned = await flow.simulateEntryAt(L.zero.id, 'BAN0004', ENTRY);
   check('I4 simulateEntryAt honours the blacklist, exactly like the camera path',
     simBanned.ok === false && /blacklisted/.test(simBanned.error ?? '') && !inside('BAN0004'), simBanned.error);
+  db.replaceAllBlockedPlates([]);
+
+  // I4b — the DEV Entry button bypasses handleEntry and writes to the DB itself,
+  // so every guard has to be mirrored or it simply doesn't apply. It shipped
+  // without the Only Pass Allow check and cheerfully stored a session for an
+  // unregistered plate on a pass-only lane: the simulator contradicting the rule
+  // it exists to test. Both halves are pinned — refuse without a pass, admit with.
+  // Its own lane: the simulator resolves ONE camera from the lane, so a lane
+  // that already has an ordinary entry camera would answer for that one instead.
+  const simPassLane = db.upsertLane({
+    name: 'L-SIM-PASSONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
+  });
+  const simPassCam = db.upsertCamera({
+    name: 'SIM-PASSONLY', laneId: simPassLane.id, direction: 'entry',
+    accessMode: 'pass_only', barrierControl: 'app',
+    host: '10.9.9.9', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: true,
+  });
+  const simNoPass = await flow.simulateEntryAt(simPassLane.id, 'SIMNOPASS', ENTRY);
+  check('I4b simulateEntryAt refuses an unregistered plate on an Only Pass Allow lane',
+    simNoPass.ok === false && /no valid pass/i.test(simNoPass.error ?? '') && !inside('SIMNOPASS'),
+    simNoPass.error);
+  check('I4c …and stores NO session for it',
+    db.listOpenSessions().every((s) => s.plate !== 'SIMNOPASS'));
+
+  db.replaceAllSeasonPasses([{
+    passId: 'p-sim', plateNumber: 'SIMPASS01', passType: 'resident', status: 'active',
+    startDate: null, endDate: null, isFree: false, spaceNumber: null, fetchedAt: nowIso,
+  }]);
+  const simWithPass = await flow.simulateEntryAt(simPassLane.id, 'SIMPASS01', ENTRY);
+  check('I4d …but admits a plate that does hold a valid pass',
+    simWithPass.ok === true && inside('SIMPASS01'), simWithPass.error);
+  db.replaceAllSeasonPasses([]);
+  db.deleteCamera(simPassCam.id);
+  db.deleteLane(simPassLane.id);
   const banOpen = open('BAN0005', L.zero.id, C.zeroIn.id, ENTRY);
   db.replaceAllBlockedPlates([{ plateNumber: 'BAN0005', vehicleId: 'v-ban-5', reason: 'sim ban 2', fetchedAt: nowIso }]);
   const simBanExit = await flow.simulateExitAt(L.zero.id, 'BAN0005', EXIT);

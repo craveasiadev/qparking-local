@@ -114,22 +114,18 @@ export function startParkingFlow() {
 
 function handlePlateEvent(event: PlateEvent) {
   flog(`plate event: plate=${event.plate} camDirection=${event.direction} cameraId=${event.cameraId}`);
-  // Route by camera direction:
-  //   - dual:  open session present → exit, else entry
-  //   - entry: normally always entry — UNLESS the operator has flipped on
-  //            `entryCameraHandlesExit` in settings (single-lane sites where
-  //            one camera covers both flows), in which case an open session
-  //            for the same plate makes the second scan an exit.
-  //   - exit:  always exit
-  let direction: 'entry' | 'exit' = event.direction === 'exit' ? 'exit' : 'entry';
-  if (event.direction === 'dual') {
-    const open = findOpenSessionByPlate(event.plate);
-    direction = open ? 'exit' : 'entry';
-  } else if (event.direction === 'entry' && getSettings().entryCameraHandlesExit) {
-    const open = findOpenSessionByPlate(event.plate);
-    if (open) direction = 'exit';
-    flog(`single-camera-mode: ${open ? 'open session found → EXIT' : 'no open session → ENTRY'}`);
-  }
+  // Routing is decided by camera direction ALONE: an entry camera does entries,
+  // an exit camera does exits. There is no global override and no third value.
+  //
+  // Two things used to complicate this and both were retired 2026-08-05 — the
+  // camera direction 'dual', and the `entryCameraHandlesExit` setting. They
+  // implemented the identical rule ("open session → exit, else entry") for a
+  // shared barrier covered by ONE camera, a configuration that doesn't occur in
+  // practice and couldn't work properly regardless: a departing car only enters
+  // the camera's frame after it has passed the barrier, so that second read could
+  // record an exit but never authorise one. A shared barrier now takes two
+  // cameras, one facing each way.
+  const direction: 'entry' | 'exit' = event.direction === 'exit' ? 'exit' : 'entry';
 
   // Find the lane for this camera.
   const lane = laneForCamera(event.cameraId);
@@ -164,9 +160,9 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
   }
 
   // ─── Exit re-scan grace ──────────────────────────────────────────────
-  // ANPR cameras routinely report the same plate two or three times per pass. On
-  // a 'dual' camera — or an entry camera with entryCameraHandlesExit on — the
-  // FIRST of those events closes the session, and without this guard the next one
+  // ANPR cameras routinely report the same plate two or three times per pass. At a
+  // shared barrier the exit camera closes the session on its first read, and the
+  // entry camera can then see the SAME departing car — without this guard the next
   // a second later opens a BRAND-NEW entry: a phantom "car inside" for a car that
   // has just driven out, which then blocks its real next visit with ALREADY
   // INSIDE and inflates occupancy.
@@ -218,6 +214,21 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
+  // ─── Pass-only entry ─────────────────────────────────────────────────
+  // On a camera set to 'pass_only', a plate with no currently-valid season pass
+  // gets in NO further than the barrier. Placed here deliberately: AFTER the
+  // blacklist (a banned plate must be reported as banned, not merely
+  // unregistered) and BEFORE createEntrySession, so a refusal leaves nothing to
+  // clean up — same shape as the blacklist guard above, just an allow-list
+  // instead of a deny-list.
+  //
+  // Validity is read from the locally cached roster (no cloud round-trip), so
+  // this keeps working through a WAN outage. The flip side, by design: a pass
+  // issued in the cloud does NOT reach this box until someone presses "Sync
+  // now" — see cloud-sync.ts. On a deny-by-default gate that means a brand-new
+  // resident is refused until the operator syncs.
+  if (!passOnlyGuard(event, 'entry').allowed) return;
+
   const session = createEntrySession(
     event.plate,
     lane?.id ?? null,
@@ -225,12 +236,68 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
     event.imagePath,
   );
 
-  parkingEvents.emit('entry', { session, event });
-  // TODO: pulse gate-relay if lane has gateRelayAddress configured.
+  // `barrier` tells index.ts whether THIS app should pulse the relay.
+  // 'app'    — the camera's auto-open is off, so nothing opens unless we do.
+  //            Applies to pass_only AND to plain admit-everyone cameras whose
+  //            barrier this app owns.
+  // 'camera' — the device opens its own relay; we must NOT pulse as well, or
+  //            every pre-existing site would double-fire on every car.
+  parkingEvents.emit('entry', { session, event, barrier: barrierOwner(event.cameraId) });
+}
+
+/**
+ * Who lifts the boom for this camera — 'app' means we pulse the relay ourselves
+ * once we've decided, 'camera' means the device opens its own and we stay out of
+ * it (the pre-2026-08-05 behaviour, and still the default).
+ *
+ * Independent of the access rule on purpose: a site can have the app drive the
+ * barrier while still admitting everyone, which is the normal setup once the
+ * camera's auto-open has been switched off. 'pass_only' forces 'app' at the DB
+ * layer (see barrierControlFor), so this can't disagree with the access check.
+ */
+function barrierOwner(cameraId: number): 'app' | 'camera' {
+  const camera = getCamera(cameraId);
+  if (!camera) return 'camera';
+  return camera.accessMode === 'pass_only' || camera.barrierControl === 'app' ? 'app' : 'camera';
+}
+
+/**
+ * The one access question a 'pass_only' camera asks, at either end: does this
+ * plate hold a season pass that is valid RIGHT NOW?
+ *
+ * Deliberately does not look at sessions. On a pass-only site the exit decision
+ * is "do you hold a pass?", not "do you have an open session?" — which is what
+ * makes a tailgater unable to leave while a resident whose entry was missed
+ * (misread, camera down) still can.
+ */
+function passOnlyGuard(event: PlateEvent, side: 'entry' | 'exit'): { allowed: boolean } {
+  const camera = getCamera(event.cameraId);
+  if (camera?.accessMode !== 'pass_only') return { allowed: true };
+
+  // No window argument = "valid at this instant" (see findSeasonPassByPlate).
+  const pass = findSeasonPassByPlate(event.plate);
+  if (pass) {
+    flog(`PASS-ONLY ${side}: plate=${event.plate} camera=${camera.id} pass=${pass.passType} id=${pass.passId} valid=${pass.startDate ?? '—'}→${pass.endDate ?? 'forever'} → ALLOWED, app opens the barrier`);
+    return { allowed: true };
+  }
+
+  flog(`PASS-ONLY ${side} REFUSED: plate=${event.plate} camera=${camera.id} holds no pass valid right now → no ${side === 'entry' ? 'session created' : 'exit recorded'}, barrier NOT opened`);
+  parkingEvents.emit('warning', {
+    kind: side === 'entry' ? 'entry-not-authorised' : 'exit-not-authorised',
+    plate: event.plate,
+    cameraId: camera.id,
+    cameraName: camera.name,
+  });
+  return { allowed: false };
 }
 
 async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   const session = findOpenSessionByPlate(event.plate);
+  // Resolved once and attached to every successful outcome below (pass exit,
+  // zero-fee exit, paid exit). Any exit that actually lets the car out has to
+  // carry it, or an app-owned barrier would stay down after a successful
+  // payment — the driver pays and then sits at a closed boom.
+  const barrier = barrierOwner(event.cameraId);
 
   // ─── Blacklist: refuse the exit outright ─────────────────────────────
   // Deliberately does NOTHING except warn: no charge, no gate pulse, and any
@@ -256,6 +323,76 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
       sessionId: session?.id ?? null,
       reason: blockedOnExit.reason ?? null,
       vehicleId: blockedOnExit.vehicleId,
+    });
+    return;
+  }
+
+  // ─── Pass-only exit ──────────────────────────────────────────────────
+  // Symmetric with entry: on a 'pass_only' camera the ONLY question is whether
+  // the plate holds a pass valid right now.
+  //
+  //   valid pass → free exit, barrier opens, session closed if there is one
+  //   no pass    → refused. Nothing recorded, barrier stays down, car waits for
+  //                the operator. That covers the tailgater AND the resident
+  //                whose pass lapsed mid-stay — the latter goes and renews
+  //                rather than being billed as a transient (operator decision,
+  //                2026-08-05).
+  //
+  // Sits ahead of the no-session guard on purpose. A pass holder whose entry was
+  // never recorded (misread, entry camera down, let in manually) must still get
+  // out; requiring an open session would strand them. It also means fee math,
+  // the terminal and the PASS PARTIAL lapse-billing below are never reached on a
+  // pass-only lane — which is what makes "no payment terminal at all" work.
+  const exitCamera = getCamera(event.cameraId);
+  if (exitCamera?.accessMode === 'pass_only') {
+    if (!passOnlyGuard(event, 'exit').allowed) return;
+    const exitPass = findSeasonPassByPlate(event.plate)!;
+    const exitIsoNow = event.exitAtOverride ?? new Date().toISOString();
+
+    if (!session) {
+      // Pass holder with no entry on record. Let them out — we know who they
+      // are — but say so loudly: a run of these means the entry camera is
+      // missing reads, which is worth chasing.
+      flog(`PASS-ONLY exit: plate=${event.plate} has a valid pass but NO open session — opening the barrier anyway (entry was never recorded; check the entry camera). No exit row to write.`);
+      parkingEvents.emit('warning', {
+        kind: 'exit-pass-holder-no-entry',
+        plate: event.plate,
+        cameraId: event.cameraId,
+        passId: exitPass.passId,
+      });
+      parkingEvents.emit('exit-completed', {
+        sessionId: null,
+        outcome: 'free',
+        reason: `pass-${exitPass.passType}`,
+        passId: exitPass.passId,
+        plate: event.plate,
+        barrier,
+        cameraId: event.cameraId,
+      });
+      return;
+    }
+
+    recordExit(session.id, {
+      exitAt: exitIsoNow,
+      exitLaneId: lane?.id ?? null,
+      exitCameraId: event.cameraId,
+      exitImagePath: event.imagePath,
+      durationMinutes: stayDurationMinutes(session.entryAt, exitIsoNow),
+      feeCents: 0,
+      paymentStatus: 'free',
+      terminalTxnId: null,
+      cardScheme: null,
+      paymentTimestamp: null,
+      passId: exitPass.passId,
+      freeReason: `pass-${exitPass.passType}`,
+    });
+    parkingEvents.emit('exit-completed', {
+      sessionId: session.id,
+      outcome: 'free',
+      reason: `pass-${exitPass.passType}`,
+      passId: exitPass.passId,
+      barrier,
+      cameraId: event.cameraId,
     });
     return;
   }
@@ -336,6 +473,8 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
         outcome: 'free',
         reason: `pass-${exitPass.passType}`,
         passId: exitPass.passId,
+        barrier,
+        cameraId: event.cameraId,
       });
       return;
     }
@@ -401,6 +540,8 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
       sessionId: session.id,
       outcome: 'free',
       reason: zeroFeeReason,
+      barrier,
+      cameraId: event.cameraId,
     });
     return;
   }
@@ -561,7 +702,16 @@ async function startTngExitCharge(
       paymentTimestamp,
     });
     w4gLog('recv', `EXIT CHARGE result=PAID · plate=${plate} session=${inflight.sessionId} orderId=${orderId} txn=${txn.id} scheme=${cardScheme} card=${body.cardNo || '-'} appr=${body.apprCode || '-'} — recorded PAID, gate OPENING.`, { plate, sessionId: inflight.sessionId, orderId, txnId: txn.id, cardScheme });
-    parkingEvents.emit('exit-completed', { sessionId: inflight.sessionId, outcome: 'paid', transactionId: txn.id });
+    // Barrier ownership matters most HERE: the driver has just been charged. If
+    // this app owns the boom and we forgot to say so, they'd pay and then sit at
+    // a closed gate.
+    parkingEvents.emit('exit-completed', {
+      sessionId: inflight.sessionId,
+      outcome: 'paid',
+      transactionId: txn.id,
+      barrier: barrierOwner(event.cameraId),
+      cameraId: event.cameraId,
+    });
   } else {
     // Card declined → record the failed attempt but DO NOT close the session.
     // The car is still inside (status stays 'entered'); the driver can retry or
@@ -1235,7 +1385,33 @@ export async function simulateEntryAt(
       error: `blacklisted — ${norm} is blocked${blockedSim.reason ? ` (${blockedSim.reason})` : ''}; no entry recorded. Lift the ban in the cloud to let it in.`,
     };
   }
-  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
+  // Prefer the lane's ENTRY-facing camera. This used to be "any enabled camera
+  // on the lane", which was cosmetic — but the access check below is keyed to
+  // the camera, so on a shared barrier (entry cam + exit cam on one lane) the
+  // wrong pick would answer the wrong question.
+  const laneCams = listCameras().filter((c) => c.laneId === laneId && c.enabled);
+  const cam = laneCams.find((c) => c.direction === 'entry') ?? laneCams[0];
+
+  // ─── Only Pass Allow, same refusal as the camera path ────────────────────
+  // Repeated here for the same reason as the blacklist check above: this helper
+  // bypasses handleEntry and writes straight to the DB, so a guard that isn't
+  // mirrored simply doesn't exist for the simulator. Without it the DEV Entry
+  // button happily stored a session for an unregistered plate on a pass-only
+  // lane — the simulator contradicting the very rule it's meant to be testing.
+  if (cam?.accessMode === 'pass_only' && !findSeasonPassByPlate(norm)) {
+    flog(`DEV SIMULATE ENTRY: plate=${norm} holds no valid pass and camera "${cam.name}" is Only Pass Allow → entry REFUSED, no session created`);
+    parkingEvents.emit('warning', {
+      kind: 'entry-not-authorised',
+      plate: norm,
+      cameraId: cam.id,
+      cameraName: cam.name,
+    });
+    return {
+      ok: false,
+      error: `no valid pass — "${cam.name}" is set to Only Pass Allow and ${norm} has no season pass valid right now, so no entry was recorded. Issue a pass in the cloud and press Sync now, or turn the toggle off to test without it.`,
+    };
+  }
+
   // Simulator entries carry NO capture image — they're synthetic test records,
   // not a real plate read, so a live-feed snapshot would be misleading.
   const imagePath = null;
