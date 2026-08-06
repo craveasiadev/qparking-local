@@ -192,8 +192,8 @@ export async function syncRatePolicies(): Promise<SyncResult> {
 
 function mapApiRowToSeasonPass(seasonPassRow: any, fetchedAt: string): SeasonPass {
 	return {
-		passId: seasonPassRow.pass_id,
-		plateNumber: seasonPassRow.plate_number,
+		passId: seasonPassRow.id,
+		plateNumber: seasonPassRow.vehicle.plate_number,
 		passType: seasonPassRow.pass_type,
 		status: seasonPassRow.status,
 		startDate: seasonPassRow.start_date ?? null,
@@ -220,7 +220,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const fetchedAt = new Date().toISOString();
 
 		const seasonPasses = seasonPassRows
-			.filter((seasonPassRow: any) => seasonPassRow.plate_number)
+			.filter((seasonPassRow: any) => seasonPassRow.vehicle?.plate_number)
 			.map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
@@ -579,10 +579,10 @@ export async function syncParkingSpaces(): Promise<SyncResult> {
 	if (!cloud) return NOT_CONFIGURED;
 	try {
 		const { data: responseBody } = await cloud.get<CloudListBody>("/parking-spaces");
-		const parkingparkingSpaceRows = responseBody.data ?? [];
+		const parkingSpaceRows = responseBody.data ?? [];
 		const fetchedAt = new Date().toISOString();
 
-		const parkingSpaces = parkingparkingSpaceRows.map((parkingparkingSpaceRow: any) => mapApiRowToParkingSpace(parkingparkingSpaceRow, fetchedAt));
+		const parkingSpaces = parkingSpaceRows.map((parkingSpaceRow: any) => mapApiRowToParkingSpace(parkingSpaceRow, fetchedAt));
 
 		replaceParkingSpaces(parkingSpaces);
 		return { ok: true, fetched: parkingSpaces.length };
