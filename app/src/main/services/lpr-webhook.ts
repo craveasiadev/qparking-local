@@ -124,6 +124,20 @@ function handleLiveStream(cameraId: number, req: http.IncomingMessage, res: http
 let server: http.Server | null = null;
 let activePort = 0;
 
+// ─── rejected-webhook reporting throttle ────────────────────────────────────
+// One audit row per camera per window. A camera with a stale secret re-posts on
+// every single vehicle pass, so this is the difference between "a warning you
+// can see" and "an Activity Log with nothing else left in it".
+const REJECT_REPORT_WINDOW_MS = 10 * 60_000;
+const lastRejectReportAt = new Map<number, number>();
+
+function shouldReportRejection(cameraId: number): boolean {
+  const last = lastRejectReportAt.get(cameraId) ?? 0;
+  if (Date.now() - last < REJECT_REPORT_WINDOW_MS) return false;
+  lastRejectReportAt.set(cameraId, Date.now());
+  return true;
+}
+
 export function startLprServer(port: number) {
   stopLprServer();
   activePort = port;
@@ -153,6 +167,15 @@ export function startLprServer(port: number) {
     } else {
       console.error(`[lpr] server error: ${err?.message ?? err}`);
     }
+    // Say it where an operator will actually find it. This is the app's most
+    // deceptive failure mode: nothing crashes, every screen looks healthy, and
+    // not one car is recorded because no plate event can reach the process. A
+    // console warning nobody reads is not a report. index.ts writes the row.
+    lprEvents.emit('listener-error', {
+      port,
+      code: err?.code ?? null,
+      message: err?.message ?? String(err),
+    });
     // Discard the crashed server so subsequent startLprServer() calls can
     // retry cleanly. Don't rethrow — that's what causes the app-crash dialog.
     try { server?.close(); } catch { /* ignore */ }
@@ -221,6 +244,20 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
   if (camera.webhookSecret) {
     const supplied = req.headers['x-webhook-secret'];
     if (supplied !== camera.webhookSecret) {
+      // Worth an audit row — it's either a camera whose secret was rotated on one
+      // side only (its reads are being dropped) or something on the LAN probing
+      // the port. THROTTLED per camera: a misconfigured camera retries on every
+      // pass, and a flood would bury the log it's trying to warn you through.
+      if (shouldReportRejection(camera.id)) {
+        lprEvents.emit('webhook-rejected', {
+          cameraId: camera.id,
+          cameraName: camera.name,
+          plate: extracted.plate,
+          remoteIp,
+          reason: supplied ? 'wrong_secret' : 'missing_secret_header',
+          throttleMinutes: REJECT_REPORT_WINDOW_MS / 60_000,
+        });
+      }
       res.statusCode = 401; res.end(JSON.stringify({ error: 'bad_secret' })); return;
     }
   }

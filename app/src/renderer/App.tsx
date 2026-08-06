@@ -273,6 +273,19 @@ export function App() {
       const next = !devMode;
       setDevMode(next);
       window.bridge.saveSettings({ devMode: next }).catch(() => null);
+      // Audited: dev mode unlocks the session simulator, which writes real
+      // session + transaction rows. Someone reviewing "why is there an entry
+      // stamped 3am" needs to see that the gesture was used.
+      window.bridge.insertActivityLog({
+        eventKey: 'config.dev_mode.toggled',
+        action: 'edit',
+        category: 'config',
+        severity: 'medium',
+        outcome: 'ok',
+        resourceType: 'app_settings',
+        description: `Dev mode ${next ? 'ENABLED' : 'disabled'}${next ? ' — the session simulator is now available on the Sessions page' : ''}`,
+        changes: { devMode: next },
+      }).catch(() => null);
       setDevHint(next ? 'Dev mode ON' : 'Dev mode OFF');
       window.setTimeout(() => setDevHint(null), 2500);
     }

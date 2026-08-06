@@ -761,6 +761,16 @@ function maybeAutoRetrigger(
   if (attempts >= MAX_AUTO_RETRIGGERS) {
     w4gLog('error', `AUTO-RETRIGGER stopped · ${tag} — hit the ${MAX_AUTO_RETRIGGERS}-attempt cap; awaiting manual release/retrigger.`, { sessionId: prev.sessionId, attempts });
     autoRetriggerCounts.delete(prev.sessionId);
+    // The give-up moment: from here nothing recovers on its own, so it belongs in
+    // the Activity Log (index.ts writes the row). The individual attempts stay in
+    // the W4G log only — 3 rows per stuck car would bury everything else.
+    parkingEvents.emit('warning', {
+      kind: 'exit-auto-retrigger-capped',
+      sessionId: prev.sessionId,
+      plate: prev.plate,
+      laneId: lane.id,
+      attempts,
+    });
     return;
   }
 

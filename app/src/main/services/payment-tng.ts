@@ -244,6 +244,10 @@ export function startW4gServer(): void {
             : ` Pick a different port in the callback-ports list.`)
         : '';
       w4gLog('error', `Listener failed to bind 0.0.0.0:${port}: ${e.message}.${hint}`, { code: e.code, port });
+      // Into the audit trail too: with no listener there is no PayResult path, so
+      // every paid exit refuses at the barrier (gate.exit.refused) and the cause
+      // is otherwise only visible in the W4G panel of whoever was watching.
+      w4gEvents.emit('listener-error', { port, code: e.code ?? null, message: e.message, hint: hint.trim() || null });
     });
     servers.push(srv);
   }

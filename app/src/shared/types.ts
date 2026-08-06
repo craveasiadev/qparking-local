@@ -88,13 +88,44 @@ export interface DeviceSyncPreview {
 	toAdd: number;
 }
 
+/**
+ * The vocabulary the cloud will accept for a pushed audit row.
+ *
+ * These MUST mirror qparking's `App\Enum\ActivityLog\{Action,Category,ResourceType}`.
+ * They're unions rather than plain strings because the ingest endpoint maps every
+ * incoming row onto those enums and REJECTS what it can't map — and for months
+ * two writers here quietly emitted values that don't exist there
+ * ('manual_open', 'app_settings' before it was added), which used to fail the
+ * whole batch and blocked this box's entire audit trail from ever reaching the
+ * cloud. A compile error is the right place to find that out.
+ *
+ * Adding a value here means adding the matching case in the cloud enum first.
+ */
+export type ActivityLogAction =
+	| "create" | "edit" | "delete" | "approve" | "reject" | "status_change"
+	| "login" | "logout" | "export" | "access"
+	| "entry" | "exit" | "payment" | "manual_release";
+
+export type ActivityLogCategory =
+	| "parking" | "payment" | "gate" | "session"
+	| "config" | "device" | "sync" | "lifecycle" | "security";
+
+export type ActivityLogResourceType =
+	| "adjustment" | "refund" | "role" | "impersonation"
+	| "gate_open_command" | "camera_device" | "local_lane" | "local_terminal"
+	| "parking_record" | "rate_policy" | "transaction" | "vehicle" | "app_settings";
+
+/** Free-text on the wire (a plain 16-char column), but keep to this set so the
+ *  Activity Log page's outcome badge and filters stay meaningful. */
+export type ActivityLogOutcome = "ok" | "failed" | "blocked" | "declined" | "timeout" | "skipped";
+
 export interface ActivityLogPayload {
 	eventKey: string;
-	action: string;
-	category: string;
+	action: ActivityLogAction;
+	category: ActivityLogCategory;
 	severity?: ActivityLog["severity"];
-	outcome?: string | null;
-	resourceType?: string | null;
+	outcome?: ActivityLogOutcome | null;
+	resourceType?: ActivityLogResourceType | null;
 	resourceId?: string | null;
 	correlationId?: string | null;
 	description?: string | null;

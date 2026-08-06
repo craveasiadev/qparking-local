@@ -31,6 +31,7 @@ import {
 	setBoundSiteId,
 	bindSiteApiKey,
 	updateActivityLogs,
+	markActivityLogsPushFailed,
 	listActivityLogs,
 } from "./db";
 import { EventEmitter } from "node:events";
@@ -230,9 +231,27 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 	}
 }
 
+/**
+ * Mirror the combined audit trail down from the cloud — PUSH FIRST, then pull.
+ *
+ * The pull is a replace-all (`replaceAllActivityLogs`), and the cloud's set is
+ * the only thing it writes. Any local row the cloud hasn't acked yet is
+ * therefore invisible to the pull, and pulling first would drop it: manual
+ * releases, blacklist refusals and session edits would vanish the moment
+ * someone pressed "Sync now" before "Push to cloud". Delivering them first means
+ * they come straight back down as part of the cloud set.
+ *
+ * A failed push does NOT fail this sync: the cloud-owned mirrors (bans, passes)
+ * still need to reach the barrier, the rows are preserved locally either way,
+ * and the reason is stamped per-row for the Activity Log page to show.
+ */
 export async function syncActivityLogs(): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
+	const push = await pushActivityLogsToCloud();
+	if (!push.ok) {
+		console.warn(`[cloud-sync] activity-log push before pull failed (${push.error ?? "unknown"}); unpushed local rows are preserved`);
+	}
 	try {
 		const { data: responseBody } = await cloud.get<CloudListBody>("/activity-logs");
 		const activityLogRows = responseBody.data ?? [];
@@ -246,13 +265,48 @@ export async function syncActivityLogs(): Promise<SyncResult> {
 	}
 }
 
-export async function pushActivityLogsToCloud(): Promise<SyncResult> {
+/**
+ * Deliver local-origin rows to the cloud audit trail. Called two ways now — the
+ * Activity Log page's "Push to cloud" button AND syncActivityLogs() ahead of its
+ * pull — so concurrent callers share ONE in-flight push. Two overlapping pushes
+ * would both read the same pending set and send it twice, and the cloud's
+ * /activity-logs/sync re-uses the local row's id, so the second delivery
+ * collides on the primary key and 500s a batch that had already landed.
+ */
+let activityPushInFlight: Promise<SyncResult> | null = null;
+
+export function pushActivityLogsToCloud(): Promise<SyncResult> {
+	if (activityPushInFlight) return activityPushInFlight;
+	const push = pushActivityLogsOnce();
+	activityPushInFlight = push;
+	void push.catch(() => null).then(() => {
+		if (activityPushInFlight === push) activityPushInFlight = null;
+	});
+	return push;
+}
+
+async function pushActivityLogsOnce(): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
 
 	// Only ever push local-origin rows the cloud hasn't acked yet — rows
 	// mirrored down FROM the cloud (source='cloud') must never be sent back.
-	const pending = listActivityLogs().filter((log) => log.source === "local" && !log.pushedToCloud);
+	const unacked = listActivityLogs().filter((log) => log.source === "local" && !log.pushedToCloud);
+
+	// The ingest endpoint requires each row's siteId to match the site the API key
+	// belongs to, so a row written while this box was unbound (an app.started at
+	// first launch, or anything logged before the first successful syncSite) can
+	// NEVER be accepted. Hold them back instead of re-offering them on every sync
+	// forever, and say so on the row.
+	const boundSiteId = getBoundSiteId();
+	const pending = unacked.filter((log) => !!log.siteId && log.siteId === boundSiteId);
+	const unattributable = unacked.filter((log) => !pending.includes(log));
+	if (unattributable.length) {
+		markActivityLogsPushFailed(
+			unattributable.map((log) => log.id),
+			boundSiteId ? "logged_before_this_site_was_bound" : "box_not_bound_to_a_site_yet",
+		);
+	}
 	if (!pending.length) return { ok: true, fetched: 0 };
 
 	try {
@@ -261,11 +315,34 @@ export async function pushActivityLogsToCloud(): Promise<SyncResult> {
 
 		const activityLogs = activityLogRows.map((activityLogRow: any) => mapApiRowToActivityLogs(activityLogRow));
 		updateActivityLogs(activityLogs);
+		// The cloud accepts a batch row-by-row and returns only what it stored
+		// (rejects come back under `skipped`). Anything it didn't ack stays
+		// pending — stamp WHY, or an unmappable row sits at "Not pushed yet"
+		// forever with no clue and gets re-sent on every single sync.
+		const acked = new Set(activityLogs.map((log: ActivityLog) => log.id));
+		const rejected = pending.filter((log) => !acked.has(log.id));
+		if (rejected.length) {
+			const reasons = new Map<string, string>(
+				((responseBody as any).skipped ?? [])
+					.filter((entry: any) => entry?.id)
+					.map((entry: any) => [String(entry.id), String(entry.reason ?? "rejected_by_cloud")]),
+			);
+			for (const log of rejected) {
+				markActivityLogsPushFailed([log.id], reasons.get(log.id) ?? "rejected_by_cloud");
+			}
+			console.warn(`[cloud-sync] ${rejected.length} activity row(s) rejected by the cloud: ${rejected.map((log) => `${log.eventKey ?? "—"} (${reasons.get(log.id) ?? "no reason given"})`).join("; ")}`);
+		}
 		return { ok: true, fetched: activityLogs.length };
 	} catch (error) {
 		// 404 means an older qparking SaaS without the endpoint — gracefully no-op.
 		if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
-		return toFailedSyncResult(error);
+		const failed = toFailedSyncResult(error);
+		// Stamp the reason on the rows themselves. /activity-logs/sync is
+		// all-or-nothing (one DB transaction server-side), so every row in the
+		// batch is still pending — the operator sees WHY on each one instead of a
+		// permanent, unexplained "Not pushed yet".
+		markActivityLogsPushFailed(pending.map((log) => log.id), failed.error ?? "push_failed");
+		return failed;
 	}
 }
 

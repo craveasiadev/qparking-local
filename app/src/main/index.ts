@@ -11,7 +11,7 @@ import './tz';
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
-import type { ActivityLogPayload } from '../shared/types';
+import type { ActivityLogPayload, ActivityLogResourceType } from '../shared/types';
 
 // ─── userData isolation (dev vs packaged) ──────────────────────────────────
 // In packaged builds Electron derives userData from package.json's productName.
@@ -142,7 +142,28 @@ app.on('second-instance', () => { showWindow(); });
 app.whenReady().then(async () => {
   getDb(); // open the DB up-front so the schema is applied before anything queries it.
 
+  // Wire the event fan-out FIRST. It used to run near the end of boot, after the
+  // listeners had already been started — so a listener that failed to bind at
+  // boot (the most likely moment for it) emitted its failure into an empty room
+  // and the audit row was lost. Registering listeners touches nothing but
+  // EventEmitters; sendToRenderer already no-ops until the window exists.
+  wireRendererEvents();
+
   const settings = getSettings();
+  // Bookend for the log: every restart is visible, which is what makes a GAP in
+  // the trail readable ("the box was down", not "nothing happened"), and pins
+  // the running build — the counterpart to app.update.applied.
+  audit({
+    eventKey: 'app.started',
+    action: 'access',
+    category: 'lifecycle',
+    severity: 'low',
+    outcome: 'ok',
+    resourceType: 'app_settings',
+    description: `qparking-local ${app.getVersion()} started (${IS_DEV_MODE ? 'dev' : 'packaged'})`
+      + ` · LPR port ${settings.lprWebhookPort} · TNG ${settings.tngEnabled ? 'on' : 'off'}`,
+    changes: { version: app.getVersion(), dev: IS_DEV_MODE, lprPort: settings.lprWebhookPort, tngEnabled: !!settings.tngEnabled },
+  });
   // Dev and packaged builds both bind the operator-configured LPR port
   // (default 6001) so a camera pointed at 6001 works the same either way.
   // If a packaged install is already running when you start `npm run dev`,
@@ -174,9 +195,6 @@ app.whenReady().then(async () => {
   // onboard relay instantly.
   startRtspGrabbers();
   startCameraRelay();
-
-  // Stream parking + lpr events to renderer.
-  wireRendererEvents();
 
   createWindow();
   createTray();
@@ -261,6 +279,61 @@ function pulseAppOwnedBarrier(payload: any, side: 'entry' | 'exit'): void {
       : `Barrier pulse FAILED on ${side} (camera ${cameraId}): ${relay.error ?? 'unknown'} — the driver is authorised but the gate did not move. Check the camera's host / username / password.`,
     payload: { cameraId, side, relay },
   });
+  // Only the FAILURE is audited. A successful pulse is already implied by the
+  // session.entry / session.exit row it accompanies, whereas a failed one is the
+  // gap between "the app authorised this car" and "the car could actually move"
+  // — and on a paid exit, the driver has already been charged.
+  if (relay.ok) return;
+  audit({
+    eventKey: 'gate.barrier.pulse_failed',
+    action: side === 'entry' ? 'entry' : 'exit',
+    category: 'gate',
+    severity: 'critical',
+    outcome: 'failed',
+    resourceType: 'camera_device',
+    resourceId: String(cameraId),
+    description: `Barrier did NOT open for an authorised ${side} on "${getCameraName(cameraId)}" — ${relay.error ?? 'unknown relay error'}.`
+      + (side === 'exit' ? ' The driver has already paid and is sitting at a closed boom.' : ' The driver was admitted but the boom stayed down.')
+      + " Check the camera's host / username / password.",
+    changes: { cameraId, side, relayError: relay.error ?? null },
+  });
+}
+
+/** Camera name for an audit description, falling back to its id. */
+function getCameraName(cameraId: number): string {
+  return listCameras().find((camera) => camera.id === cameraId)?.name ?? `camera ${cameraId}`;
+}
+
+/**
+ * Write one row to the local Activity Log from the main process.
+ *
+ * Wrapped for two reasons: the bound site id is the same on every row (nobody
+ * should have to remember to pass it), and an audit write must NEVER be able to
+ * break the flow that triggered it — a car at a barrier matters more than its
+ * paperwork. Field vocabulary is constrained by the cloud's enums (see
+ * Enum\ActivityLog\{Action,Category,Severity,ResourceType}): a value they can't
+ * map gets the row rejected on push, so stick to the documented sets.
+ */
+function audit(payload: Omit<ActivityLogPayload, 'siteId'>): void {
+  try {
+    insertActivityLog({ ...payload, siteId: getBoundSiteId() });
+  } catch (err) {
+    console.error(`[activity-log] failed to record ${payload.eventKey}`, err);
+  }
+}
+
+/** RM-formatted fee for audit descriptions — cents are the storage unit, ringgit
+ *  is what an operator reading the log expects to see. */
+function rm(cents: number | null | undefined): string {
+  return `RM ${((cents ?? 0) / 100).toFixed(2)}`;
+}
+
+/** Equipment page's plural device type → the cloud's ResourceType vocabulary. */
+function deviceResourceType(type: DeviceType): ActivityLogResourceType {
+  const byType: Record<DeviceType, ActivityLogResourceType> = {
+    cameras: 'camera_device', lanes: 'local_lane', terminals: 'local_terminal',
+  };
+  return byType[type] ?? 'app_settings';
 }
 
 function wireRendererEvents() {
@@ -301,6 +374,21 @@ function wireRendererEvents() {
     // window shows WELCOME, matching how real LPR-driven parks behave.
     // openFaceGate() respects the master `faceGateEnabled` toggle, so this
     // is a no-op when the operator has turned that off.
+    // Audit the entry HERE, on the box, at the moment the barrier goes up. The
+    // cloud used to be the only writer of this row (on the pushed record), which
+    // meant a WAN outage or a not-yet-synced box had no entry history at all.
+    const entryLane = p?.session?.entryLaneId ? getLane(p.session.entryLaneId) : null;
+    audit({
+      eventKey: 'session.entry',
+      action: 'entry',
+      category: 'session',
+      severity: 'high',
+      outcome: 'ok',
+      resourceType: 'parking_record',
+      resourceId: p?.session?.id != null ? String(p.session.id) : null,
+      description: `Entry · ${p?.session?.plate ?? '?'}${entryLane ? ` · ${entryLane.name}` : ''}`,
+      changes: { entryAt: p?.session?.entryAt ?? null, laneId: p?.session?.entryLaneId ?? null, cameraId: p?.event?.cameraId ?? null },
+    });
     openFaceGate({ plate: p?.session?.plate ?? undefined, reason: 'qparking-entry' })
       .then((r) => sendToRenderer('log', { terminalId: 0, direction: r.ok ? 'info' : 'error', message: 'face-gate open (entry)', payload: r }))
       .catch(() => null);
@@ -374,26 +462,20 @@ function wireRendererEvents() {
       });
       // Audit trail: a refused gate attempt is exactly what the Activity Log
       // exists for — without this row the ban fires invisibly (gate screen +
-      // device log only) and the operator can't review attempts after the
-      // fact. try/catch so an audit-write hiccup can never break gate flow.
-      try {
-        const isEntry = kind === 'entry-blacklisted';
-        insertActivityLog({
-          eventKey: isEntry ? 'gate.entry.blacklisted' : 'gate.exit.blacklisted',
-          action: isEntry ? 'entry' : 'exit',
-          category: 'gate',
-          severity: 'high',
-          outcome: 'blocked',
-          siteId: getBoundSiteId(),
-          resourceType: 'vehicle',
-          resourceId: p?.vehicleId != null ? String(p.vehicleId) : (p?.plate ?? null),
-          description: `Blacklisted plate ${p?.plate ?? '?'} ${isEntry
-            ? 'tried to enter — refused (no session created, barrier not opened)'
-            : 'tried to exit — refused, car held at barrier'}${p?.reason ? ` · reason: ${p.reason}` : ''}`,
-        });
-      } catch (err) {
-        console.error('[activity-log] failed to record blacklist refusal', err);
-      }
+      // device log only) and the operator can't review attempts after the fact.
+      const isEntry = kind === 'entry-blacklisted';
+      audit({
+        eventKey: isEntry ? 'gate.entry.blacklisted' : 'gate.exit.blacklisted',
+        action: isEntry ? 'entry' : 'exit',
+        category: 'gate',
+        severity: 'high',
+        outcome: 'blocked',
+        resourceType: 'vehicle',
+        resourceId: p?.vehicleId != null ? String(p.vehicleId) : (p?.plate ?? null),
+        description: `Blacklisted plate ${p?.plate ?? '?'} ${isEntry
+          ? 'tried to enter — refused (no session created, barrier not opened)'
+          : 'tried to exit — refused, car held at barrier'}${p?.reason ? ` · reason: ${p.reason}` : ''}`,
+      });
     } else if (kind === 'entry-not-authorised' || kind === 'exit-not-authorised') {
       // Pass-only lane, plate holds no valid pass. Same treatment as a blacklist
       // refusal — long hold, because nothing recovers automatically and the
@@ -412,21 +494,16 @@ function wireRendererEvents() {
         message: `NOT AUTHORISED · ${p?.plate} has no valid pass — ${isEntry ? 'entry' : 'exit'} refused at "${p?.cameraName ?? `camera ${p?.cameraId}`}". Barrier stayed closed; operator must handle this manually.`,
         payload: p,
       });
-      try {
-        insertActivityLog({
-          eventKey: isEntry ? 'gate.entry.not_authorised' : 'gate.exit.not_authorised',
-          action: isEntry ? 'entry' : 'exit',
-          category: 'gate',
-          severity: 'medium',
-          outcome: 'blocked',
-          siteId: getBoundSiteId(),
-          resourceType: 'vehicle',
-          resourceId: p?.plate ?? null,
-          description: `${p?.plate ?? '?'} tried to ${isEntry ? 'enter' : 'exit'} a pass-only lane without a valid pass — refused, barrier not opened`,
-        });
-      } catch (err) {
-        console.error('[activity-log] failed to record pass-only refusal', err);
-      }
+      audit({
+        eventKey: isEntry ? 'gate.entry.not_authorised' : 'gate.exit.not_authorised',
+        action: isEntry ? 'entry' : 'exit',
+        category: 'gate',
+        severity: 'medium',
+        outcome: 'blocked',
+        resourceType: 'vehicle',
+        resourceId: p?.plate ?? null,
+        description: `${p?.plate ?? '?'} tried to ${isEntry ? 'enter' : 'exit'} a pass-only lane without a valid pass — refused, barrier not opened`,
+      });
     } else if (kind === 'exit-pass-holder-no-entry') {
       // Let out on the strength of the pass, but recorded: a run of these means
       // the ENTRY camera is dropping reads, which is worth chasing.
@@ -436,41 +513,114 @@ function wireRendererEvents() {
         message: `${p?.plate} exited a pass-only lane with a valid pass but NO entry on record — barrier opened. Check the entry camera is reading reliably.`,
         payload: p,
       });
-      try {
-        insertActivityLog({
-          eventKey: 'gate.exit.pass_holder_no_entry',
-          action: 'exit',
-          category: 'gate',
-          severity: 'medium',
-          outcome: 'ok',
-          siteId: getBoundSiteId(),
-          resourceType: 'vehicle',
-          resourceId: p?.plate ?? null,
-          description: `${p?.plate ?? '?'} left a pass-only lane on pass ${p?.passId ?? '?'} with no entry recorded — released, no session to close`,
-        });
-      } catch (err) {
-        console.error('[activity-log] failed to record pass-holder exit', err);
-      }
+      audit({
+        eventKey: 'gate.exit.pass_holder_no_entry',
+        action: 'exit',
+        category: 'gate',
+        severity: 'medium',
+        outcome: 'ok',
+        resourceType: 'vehicle',
+        resourceId: p?.plate ?? null,
+        description: `${p?.plate ?? '?'} left a pass-only lane on pass ${p?.passId ?? '?'} with no entry recorded — released, no session to close`,
+      });
     } else if (kind === 'exit-without-entry') {
       sendGateEvent({
         state: 'closed', plate: p?.plate, direction: 'out',
         reason: 'exit-without-entry', holdMs: 4_000
       });
-    } else if (kind === 'exit-no-lane') {
-      sendGateEvent({ state: 'closed', direction: 'out', reason: 'no-lane', holdMs: 5_000 });
-    } else if (kind === 'exit-no-terminal' || kind === 'exit-terminal-disabled' || kind === 'exit-tng-not-configured') {
-      sendGateEvent({ state: 'closed', direction: 'out', reason: 'no-terminal', holdMs: 5_000 });
-    } else if (kind === 'exit-terminal-offline') {
-      sendGateEvent({ state: 'closed', direction: 'out', reason: 'terminal-offline', holdMs: 5_000 });
+      audit({
+        eventKey: 'gate.exit.no_entry',
+        action: 'exit',
+        category: 'gate',
+        severity: 'medium',
+        outcome: 'blocked',
+        resourceType: 'vehicle',
+        resourceId: p?.plate ?? null,
+        description: `${p?.plate ?? '?'} tried to exit with no open session — nothing to charge, barrier not opened. Either the entry read was missed or the plate was misread.`,
+      });
+    } else if (kind === 'exit-no-lane'
+      || kind === 'exit-no-terminal'
+      || kind === 'exit-terminal-disabled'
+      || kind === 'exit-tng-not-configured'
+      || kind === 'exit-terminal-offline') {
+      // ─── the car is at the barrier and CANNOT be charged ────────────────
+      // Every one of these leaves a driver stuck at a closed boom with an open
+      // session, and until now not one of them was recorded anywhere the
+      // operator could find later: gate screen (4-5s) + device log only. They
+      // are all the same story — "this lane could not take the money" — so they
+      // share one event key and name the specific cause in the description.
+      const isNoLane = kind === 'exit-no-lane';
+      sendGateEvent({
+        state: 'closed', direction: 'out',
+        reason: isNoLane ? 'no-lane' : kind === 'exit-terminal-offline' ? 'terminal-offline' : 'no-terminal',
+        holdMs: 5_000,
+      });
+      const cause = {
+        'exit-no-lane': 'the exit camera is not assigned to any lane',
+        'exit-no-terminal': 'the lane has no payment terminal wired to it',
+        'exit-terminal-disabled': 'the lane\'s payment terminal is switched off',
+        'exit-tng-not-configured': `no PayResult listener is running${p?.reason ? ` (${p.reason})` : ''} — no charge was attempted, so no money could be taken and lost`,
+        'exit-terminal-offline': 'the payment terminal did not answer',
+      }[kind] ?? kind;
+      audit({
+        eventKey: 'gate.exit.refused',
+        action: 'exit',
+        category: 'gate',
+        // Not 'high': the car is stuck AND the session stays open, so occupancy
+        // and the next driver in that lane are both affected until staff act.
+        severity: 'critical',
+        outcome: 'blocked',
+        resourceType: 'parking_record',
+        resourceId: p?.sessionId != null ? String(p.sessionId) : null,
+        description: `Exit refused — ${cause}. Car held at the barrier with its session still open; needs a manual release or a fixed lane setup.`,
+        changes: { kind, laneId: p?.laneId ?? null, terminalId: p?.terminalId ?? null },
+      });
+    } else if (kind === 'exit-charge-crashed') {
+      // An exception escaped the charge helper. Distinct from a decline or a
+      // timeout: this is OUR bug, not the driver's card or the device.
+      audit({
+        eventKey: 'payment.charge_crashed',
+        action: 'payment',
+        category: 'payment',
+        severity: 'critical',
+        outcome: 'failed',
+        resourceType: 'parking_record',
+        resourceId: p?.sessionId != null ? String(p.sessionId) : null,
+        description: `Exit charge crashed mid-flight — ${p?.message ?? 'unknown error'}. Session left open; verify at the device whether the driver was actually deducted before retriggering.`,
+      });
+    } else if (kind === 'exit-auto-retrigger-capped') {
+      audit({
+        eventKey: 'payment.auto_retrigger_capped',
+        action: 'payment',
+        category: 'payment',
+        severity: 'high',
+        outcome: 'failed',
+        resourceType: 'parking_record',
+        resourceId: p?.sessionId != null ? String(p.sessionId) : null,
+        description: `Gave up re-arming the terminal after ${p?.attempts ?? '?'} automatic attempts — ${p?.plate ?? 'the car'} is still at the barrier awaiting a manual release or retrigger.`,
+      });
     } else if (kind === 'exit-timeout') {
       // The charge attempt timed out — car stays inside (session 'entered').
       // Push the failed attempt to the ledger so the cloud sees the decline/
       // stuck transaction; the operator retriggers or manually releases.
-      if (p?.sessionId && p?.transactionId) {
-        const session = getSessionById(p.sessionId);
-        const txn = getTransactionById(p.transactionId);
-        if (session && txn) enqueueTransaction(session, txn);
-      }
+      const session = p?.sessionId ? getSessionById(p.sessionId) : null;
+      const txn = p?.transactionId ? getTransactionById(p.transactionId) : null;
+      if (session && txn) enqueueTransaction(session, txn);
+      // A timeout is the one payment outcome that can mean money moved WITHOUT
+      // us recording it (tap succeeded, PayResult callback lost), so it gets its
+      // own row rather than sharing the decline's — and it says so out loud.
+      audit({
+        eventKey: 'payment.timeout',
+        action: 'payment',
+        category: 'payment',
+        severity: 'critical',
+        outcome: 'timeout',
+        resourceType: 'transaction',
+        resourceId: p?.transactionId != null ? String(p.transactionId) : null,
+        correlationId: txn?.orderId ?? null,
+        description: `No response from the terminal for ${session?.plate ?? 'a car'} · ${rm(txn?.amountCents)} — attempt marked failed, barrier stayed closed. If the card WAS deducted, the callback was lost: check the device before charging again.`,
+        changes: { sessionId: p?.sessionId ?? null, orderId: txn?.orderId ?? null, amountCents: txn?.amountCents ?? null },
+      });
     }
   });
   parkingEvents.on('exit-declined', (p: any) => {
@@ -478,16 +628,35 @@ function wireRendererEvents() {
     // the decline on the gate screen and push the failed transaction to the
     // ledger. The barrier stays CLOSED — operator retriggers or releases.
     const session = p?.sessionId ? getSessionById(p.sessionId) : null;
-    if (session && p?.transactionId) {
-      const txn = getTransactionById(p.transactionId);
-      if (txn) enqueueTransaction(session, txn);
-    }
+    const txn = p?.transactionId ? getTransactionById(p.transactionId) : null;
+    if (session && txn) enqueueTransaction(session, txn);
     sendGateEvent({
       state: 'closed',
       plate: session?.plate,
       direction: 'out',
       reason: 'declined',
       holdMs: 5_000,
+    });
+    // A decline had NO local row: the cloud writes one when the pushed
+    // transaction lands, so the operator couldn't see it until the next
+    // mirror-down (boot / "Sync now"). Refusing a driver at a barrier has to be
+    // in the log the moment it happens, offline included.
+    audit({
+      eventKey: 'payment.declined',
+      action: 'payment',
+      category: 'payment',
+      severity: 'high',
+      outcome: 'declined',
+      resourceType: 'transaction',
+      resourceId: p?.transactionId != null ? String(p.transactionId) : null,
+      correlationId: txn?.cardNumber ?? txn?.orderId ?? null,
+      description: `Card declined for ${session?.plate ?? 'a car'} · ${rm(txn?.amountCents)}${txn?.paymentMethod ? ` · ${txn.paymentMethod}` : ''} — no money taken, barrier stayed closed, session still open.`,
+      changes: {
+        sessionId: p?.sessionId ?? null,
+        orderId: txn?.orderId ?? null,
+        amountCents: txn?.amountCents ?? null,
+        card: txn?.cardNumber ?? null,
+      },
     });
   });
   parkingEvents.on('exit-completed', (p: any) => {
@@ -498,12 +667,51 @@ function wireRendererEvents() {
     // push the payment transaction to the ledger if this exit carried one
     // (free / pass exits have no transaction).
     if (session) enqueueExit(session);
-    if (session && p?.transactionId) {
-      const txn = getTransactionById(p.transactionId);
-      if (txn) enqueueTransaction(session, txn);
-    }
+    const exitTxn = p?.transactionId ? getTransactionById(p.transactionId) : null;
+    if (session && exitTxn) enqueueTransaction(session, exitTxn);
     const allowed = ['paid', 'free', 'manual_release'].includes(p?.outcome);
     if (!allowed) return;
+    // A paid exit gets TWO rows on purpose: the money (payment.paid, category
+    // 'payment') and the car leaving (session.exit, category 'session'). They
+    // answer different questions — "what did we take today" vs "who left when" —
+    // and a free / pass exit has only the second.
+    if (p?.outcome === 'paid') {
+      audit({
+        eventKey: 'payment.paid',
+        action: 'payment',
+        category: 'payment',
+        severity: 'low',
+        outcome: 'ok',
+        resourceType: 'transaction',
+        resourceId: p?.transactionId != null ? String(p.transactionId) : null,
+        correlationId: exitTxn?.cardNumber ?? exitTxn?.orderId ?? null,
+        description: `Paid · ${session?.plate ?? p?.plate ?? '?'} · ${rm(exitTxn?.amountCents ?? session?.feeCents)}${exitTxn?.paymentMethod ? ` · ${exitTxn.paymentMethod}` : ''}${exitTxn?.apprCode ? ` · appr ${exitTxn.apprCode}` : ''}`,
+        changes: {
+          sessionId: p?.sessionId ?? null,
+          orderId: exitTxn?.orderId ?? null,
+          amountCents: exitTxn?.amountCents ?? null,
+          card: exitTxn?.cardNumber ?? null,
+        },
+      });
+    }
+    audit({
+      eventKey: 'session.exit',
+      action: 'exit',
+      category: 'session',
+      severity: 'high',
+      outcome: 'ok',
+      resourceType: 'parking_record',
+      resourceId: p?.sessionId != null ? String(p.sessionId) : null,
+      description: `Exit · ${session?.plate ?? p?.plate ?? '?'} · ${p?.outcome}${p?.reason ? ` (${p.reason})` : ''} · ${rm(session?.feeCents)}${session?.durationMinutes != null ? ` · ${session.durationMinutes} min` : ''}`
+        + (p?.sessionId ? '' : ' · no entry on record, nothing to close'),
+      changes: {
+        outcome: p?.outcome ?? null,
+        reason: p?.reason ?? null,
+        feeCents: session?.feeCents ?? null,
+        durationMinutes: session?.durationMinutes ?? null,
+        passId: p?.passId ?? null,
+      },
+    });
     const laneName = session?.exitLaneId ? getLane(session.exitLaneId)?.name : undefined;
     sendGateEvent({
       state: 'open',
@@ -539,6 +747,90 @@ function wireRendererEvents() {
   // W4G TNG activity → renderer log stream (so the Settings test panel +
   // bottom log strip can show outbound / inbound / errors live).
   w4gEvents.on('log', (entry: any) => sendToRenderer('log', { terminalId: -1, ...entry, source: 'w4g' }));
+
+  // ─── infrastructure failures that used to be console-only ─────────────────
+  // These three share a shape: nothing crashes, every screen looks healthy, and
+  // the app has quietly stopped doing its job. They belong in the operator's
+  // Activity Log, not in a terminal nobody has open.
+
+  // No LPR listener = no plate events = not one car recorded, anywhere.
+  lprEvents.on('listener-error', (p: any) => {
+    audit({
+      eventKey: 'device.lpr.listener_failed',
+      action: 'edit',
+      category: 'device',
+      severity: 'critical',
+      outcome: 'failed',
+      resourceType: 'app_settings',
+      description: `LPR webhook listener could NOT bind port ${p?.port ?? '?'} (${p?.code ?? 'error'}: ${p?.message ?? '?'}).`
+        + ' No camera event can reach this app until it is fixed — entries and exits are silently NOT being recorded.'
+        + (p?.code === 'EADDRINUSE' ? ' Another qparking-local is probably already running (check for the packaged portable).' : ''),
+      changes: { port: p?.port ?? null, code: p?.code ?? null },
+    });
+  });
+
+  // A camera whose reads are being thrown away on a secret mismatch — or
+  // something on the LAN posting at the webhook. Throttled at the emitter (one
+  // row per camera per 10 min) because a stale-secret camera retries every pass.
+  lprEvents.on('webhook-rejected', (p: any) => {
+    audit({
+      eventKey: 'security.webhook.rejected',
+      action: 'access',
+      category: 'security',
+      severity: 'high',
+      outcome: 'blocked',
+      resourceType: 'camera_device',
+      resourceId: p?.cameraId != null ? String(p.cameraId) : null,
+      description: `Webhook REJECTED from "${p?.cameraName ?? `camera ${p?.cameraId}`}" (${p?.remoteIp ?? 'unknown IP'}) — ${p?.reason === 'missing_secret_header' ? 'no X-Webhook-Secret header sent' : 'wrong X-Webhook-Secret'}.`
+        + ` Its plate reads are being DISCARDED${p?.plate ? ` (latest: ${p.plate})` : ''}. Re-enter the secret on the camera, or clear it on the camera record.`
+        + ` Further rejections from this camera are muted for ${p?.throttleMinutes ?? 10} minutes.`,
+      changes: { cameraId: p?.cameraId ?? null, remoteIp: p?.remoteIp ?? null, reason: p?.reason ?? null },
+    });
+  });
+
+  // No PayResult listener = no exit can be charged; every paid exit refuses.
+  w4gEvents.on('listener-error', (p: any) => {
+    audit({
+      eventKey: 'device.tng.listener_failed',
+      action: 'edit',
+      category: 'device',
+      severity: 'critical',
+      outcome: 'failed',
+      resourceType: 'local_terminal',
+      description: `TNG PayResult listener could NOT bind port ${p?.port ?? '?'} (${p?.code ?? 'error'}: ${p?.message ?? '?'}).`
+        + ' With no callback path, every paid exit is refused before any money can move.'
+        + (p?.hint ? ` ${p.hint}` : ''),
+      changes: { port: p?.port ?? null, code: p?.code ?? null },
+    });
+  });
+
+  // A PayResult with no order waiting for it. The driver almost certainly WAS
+  // deducted — there is just no attempt on our side to attach it to, so it can
+  // never reach the ledger by itself. Highest-consequence row in the app.
+  w4gEvents.on('orphan-result', (body: any) => {
+    const approved = body?.state === '0';
+    audit({
+      eventKey: 'payment.orphan_result',
+      action: 'payment',
+      category: 'payment',
+      severity: approved ? 'critical' : 'medium',
+      outcome: 'failed',
+      resourceType: 'transaction',
+      correlationId: body?.orderId ?? null,
+      description: approved
+        ? `UNMATCHED APPROVED PAYMENT · order ${body?.orderId ?? '?'} · card ${body?.cardNo || '-'} · appr ${body?.apprCode || '-'}`
+          + ' — the device reports a successful deduction for an order this app is no longer waiting on (late callback after a timeout/cancel, or a charge fired from outside the app).'
+          + ' The money is NOT in the ledger and no session was closed by it. Reconcile against the device before refunding or re-charging.'
+        : `Unmatched declined PayResult · order ${body?.orderId ?? '?'} — stale callback for an order this app already gave up on. No money moved.`,
+      changes: {
+        orderId: body?.orderId ?? null,
+        state: body?.state ?? null,
+        card: body?.cardNo ?? null,
+        apprCode: body?.apprCode ?? null,
+        payTime: body?.payTime ?? null,
+      },
+    });
+  });
 }
 
 function sendToRenderer(channel: string, payload: unknown) {
@@ -658,10 +950,45 @@ ipcMain.handle('transactions:list-page', (_e, opts: { limit: number; offset: num
 
 // Manual retrigger — synthesizes an exit LPR event for a session so the
 // normal parking-flow can drive the terminal for a stuck / mis-read exit.
-ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number, laneId?: number | null) => retriggerSessionExit(sessionId, laneId));
+//
+// Audited: this asks a driver to tap their card again, which is a money-moving
+// operator decision. The flow's own rows then record what came back (paid /
+// declined / timeout), so this row deliberately only says "staff asked for it".
+ipcMain.handle('sessions:retrigger-payment', (_e, sessionId: number, laneId?: number | null) => {
+  const result = retriggerSessionExit(sessionId, laneId);
+  const session = getSessionById(sessionId);
+  audit({
+    eventKey: 'session.payment_retriggered',
+    action: 'payment',
+    category: 'payment',
+    severity: 'medium',
+    outcome: result.ok ? 'ok' : 'failed',
+    resourceType: 'parking_record',
+    resourceId: String(sessionId),
+    description: result.ok
+      ? `Operator retriggered the exit charge for ${session?.plate ?? `session #${sessionId}`}${laneId != null ? ` at lane ${getLane(laneId)?.name ?? laneId}` : ''} — terminal re-armed for another tap.`
+      : `Operator retrigger REFUSED for ${session?.plate ?? `session #${sessionId}`} — ${result.error ?? 'unknown reason'}`,
+  });
+  return result;
+});
 // Live-display "retrigger payment" — operator types the plate they can read off
 // the feed; we find that car's open session and re-run its exit-payment flow.
-ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string, laneId?: number | null) => retriggerSessionExitByPlate(plate, laneId));
+ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string, laneId?: number | null) => {
+  const result = retriggerSessionExitByPlate(plate, laneId);
+  audit({
+    eventKey: 'session.payment_retriggered',
+    action: 'payment',
+    category: 'payment',
+    severity: 'medium',
+    outcome: result.ok ? 'ok' : 'failed',
+    resourceType: 'parking_record',
+    resourceId: null,
+    description: result.ok
+      ? `Operator retriggered the exit charge by plate "${plate}"${laneId != null ? ` at lane ${getLane(laneId)?.name ?? laneId}` : ''} — terminal re-armed for another tap.`
+      : `Operator retrigger by plate "${plate}" REFUSED — ${result.error ?? 'unknown reason'}`,
+  });
+  return result;
+});
 ipcMain.handle('sessions:delete', (_e, id: number) => {
   // Capture session BEFORE deleting so we have lane/plate/entryAt for the
   // qparking sync payload — otherwise the row is gone before we enqueue.
@@ -939,10 +1266,28 @@ ipcMain.handle('site:preview-rebind', async (_e, input: { baseUrl: string; apiKe
 // is NOT auto-pushed — after a rebind the operator decides per device page
 // whether to Push this box's equipment up or Pull the new site's down.
 ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }) => {
+  const previousId = getBoundSiteId();
+  const previousName = previousId ? getSite(previousId)?.name ?? null : null;
   saveSettings({ qparkingBaseUrl: input.baseUrl, qparkingApiKey: input.apiKey });
   resetLocalDataForRebind({ wipeEquipment: !!input.wipeEquipment });
   const pull = await syncAll();               // syncSite adopts + binds the new site
   const site = getCurrentSite();
+  // The single most destructive thing an operator can do on this box — it wipes
+  // the old site's local data — and it went completely unrecorded. Written AFTER
+  // the pull on purpose: the wipe clears activity_logs, and syncAll's mirror-down
+  // would replace anything written before it.
+  audit({
+    eventKey: 'config.site.rebound',
+    action: 'edit',
+    category: 'config',
+    severity: 'critical',
+    outcome: 'ok',
+    resourceType: 'app_settings',
+    resourceId: site?.id ?? null,
+    description: `Box re-provisioned to site "${site?.name ?? '?'}"${previousName ? ` (was "${previousName}")` : ' (first binding)'}`
+      + ` · local sessions/transactions/activity wiped${input.wipeEquipment ? ', equipment wiped too' : ', equipment kept'}`,
+    changes: { previousSiteId: previousId, newSiteId: site?.id ?? null, wipeEquipment: !!input.wipeEquipment },
+  });
   return {
     ok: true,
     boundSite: site ? { id: site.id, name: site.name } : null,
@@ -981,6 +1326,24 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
       host: opts?.host,
       port: opts?.port,
     });
+    // A test PayRequest is a REAL request at a REAL device: if someone taps, they
+    // are really deducted, against no parking session. That has to be in the
+    // audit trail — otherwise a genuine deduction exists with no record on this
+    // box explaining where it came from.
+    audit({
+      eventKey: 'device.tng.test_pay_request',
+      action: 'payment',
+      category: 'device',
+      severity: 'medium',
+      outcome: body.state === '0' ? 'ok' : 'failed',
+      resourceType: 'local_terminal',
+      correlationId: orderId,
+      description: `TNG test charge from the Settings panel · ${rm(opts?.payAmount ?? 100)} · order ${orderId}`
+        + ` · device ${opts?.host ?? 'settings default'}${opts?.port ? `:${opts.port}` : ''}`
+        + ` · result state=${body.state}${body.cardNo ? ` card ${body.cardNo}` : ''}`
+        + (body.state === '0' ? ' — A CARD WAS ACTUALLY CHARGED (no parking session attached).' : ''),
+      changes: { orderId, payAmountCents: opts?.payAmount ?? 100, resultState: body.state, cardNo: body.cardNo ?? null },
+    });
     return {
       ok: body.state === '0',
       orderId,
@@ -992,6 +1355,16 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
       apprCode: body.apprCode,
     };
   } catch (e: any) {
+    audit({
+      eventKey: 'device.tng.test_pay_request',
+      action: 'payment',
+      category: 'device',
+      severity: 'medium',
+      outcome: 'failed',
+      resourceType: 'local_terminal',
+      correlationId: orderId,
+      description: `TNG test charge from the Settings panel FAILED · order ${orderId} · ${e?.message ?? String(e)}`,
+    });
     return { ok: false, orderId, error: e?.message ?? String(e) };
   }
 });
@@ -1005,12 +1378,37 @@ ipcMain.handle('app-update:download', async (_e, opts: { variant: 'portable' | '
     onProgress: (p) => sendToRenderer('app-update-progress', p),
   });
 });
-ipcMain.handle('app-update:apply', (_e, opts: { path: string }) => applyUpdate(opts));
+ipcMain.handle('app-update:apply', (_e, opts: { path: string }) => {
+  // Logged BEFORE applying: this call relaunches the app, so a row written after
+  // it may never happen. Every parking-flow log line is stamped with the build
+  // version, so knowing exactly when the build changed is what lets an operator
+  // tie "it started misbehaving around 3pm" to an update.
+  audit({
+    eventKey: 'app.update.applied',
+    action: 'edit',
+    category: 'lifecycle',
+    severity: 'high',
+    outcome: 'ok',
+    resourceType: 'app_settings',
+    description: `Applying a downloaded update from ${opts?.path ?? '?'} · leaving version ${app.getVersion()} — the app restarts now.`,
+  });
+  return applyUpdate(opts);
+});
 
 ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string, target?: { host?: string; port?: number }) => {
   if (!orderId) return { ok: false, error: 'orderId_required' };
   try {
     const ack = await tngPayCancel(orderId, target);
+    audit({
+      eventKey: 'device.tng.test_pay_cancel',
+      action: 'payment',
+      category: 'device',
+      severity: 'low',
+      outcome: ack.state === 0 ? 'ok' : 'failed',
+      resourceType: 'local_terminal',
+      correlationId: orderId,
+      description: `TNG test PayCancel sent for order ${orderId} · device answered state=${ack.state}`,
+    });
     return { ok: ack.state === 0, deviceState: ack.state };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? String(e) };
@@ -1040,6 +1438,28 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
   let face: { ok: boolean; status?: number; error?: string } | null = null;
   try { face = await openFaceGate({ reason: `${reason}:${laneName}` }); }
   catch (e: any) { face = { ok: false, error: e?.message ?? String(e) }; }
+  // Audited HERE rather than in the pages that call it, so every caller is
+  // covered by construction — the Live-display tile used to write this row
+  // itself, which meant the identical action from the Cameras page ("test
+  // barrier", which really does open the boom) recorded nothing at all.
+  //
+  // The manual-release path is exempt: session.manual_release already records
+  // that decision, and this would be a second row for the same operator action.
+  if (reason !== 'manual-release') {
+    audit({
+      eventKey: 'gate.manual.opened',
+      action: 'access',
+      category: 'gate',
+      severity: 'high',
+      outcome: relay.ok ? 'ok' : 'failed',
+      resourceType: 'local_lane',
+      resourceId: lane?.id != null ? String(lane.id) : null,
+      description: `Barrier opened by hand · ${laneName}${camera ? ` · ${camera.name}` : ' · no camera resolved'}`
+        + (relay.ok ? ' — relay pulsed' : ` — relay FAILED: ${relay.error ?? 'unknown'}`)
+        + (face?.ok ? ' · face-gate opened' : ''),
+      changes: { laneId: lane?.id ?? null, cameraId: camera?.id ?? null, reason, relayError: relay.ok ? null : relay.error ?? null },
+    });
+  }
   return {
     ok: true,
     note: `Barrier opened for ${laneName}`
@@ -1056,6 +1476,15 @@ ipcMain.handle('sync:all-tables', async () => {
   // Pull-only: cloud-owned config (site / policies / passes / spaces). Equipment
   // (cameras / lanes / terminals) is NO LONGER pushed here — it syncs manually,
   // per type, from each device page via the Push/Pull-to-cloud buttons.
+  // Deliberately NOT audited. A sync is the one event that cannot log itself
+  // cleanly: syncAll() pushes pending activity rows BEFORE it pulls, so a row
+  // written here always misses that push and sits at "Not pushed yet" until the
+  // NEXT sync — which writes another one. The pending count would never reach
+  // zero, and the log would fill with its own bookkeeping.
+  //
+  // The outcome is already visible where it belongs: the header's "last synced"
+  // stamp (deliberately NOT refreshed on a failed pull, see stampPullOutcome)
+  // and the per-mirror report the Settings page renders from these results.
   return await syncAll();
 });
 
@@ -1067,12 +1496,40 @@ ipcMain.handle('sync:cloud-pull-state', () => getCloudPullState());
 ipcMain.handle('devices:preview-sync', (_e, type: DeviceType, direction: 'push' | 'pull') =>
   previewDeviceSync(type, direction));
 
-ipcMain.handle('devices:push-cloud', (_e, type: DeviceType) => pushDevicesToCloud(type));
+ipcMain.handle('devices:push-cloud', async (_e, type: DeviceType) => {
+  const result = await pushDevicesToCloud(type);
+  audit({
+    eventKey: 'config.devices.pushed',
+    action: 'edit',
+    category: 'device',
+    severity: 'medium',
+    outcome: result.ok ? 'ok' : 'failed',
+    resourceType: deviceResourceType(type),
+    description: result.ok
+      ? `Pushed this box's ${type} list to the cloud · ${result.items?.length ?? 0} sent${result.removed ? `, ${result.removed} soft-deleted in the cloud` : ''}`
+      : `Push of the ${type} list to the cloud FAILED — ${result.error ?? 'unknown error'}`,
+  });
+  return result;
+});
 
 ipcMain.handle('devices:pull-cloud', async (_e, type: DeviceType) => {
   const result = await pullDevicesFromCloud(type);
   // A pull rewrites local camera/lane rows and their links — refresh the
   // capture pipelines so grabbers/relay track the new set.
   if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); }
+  // A pull REPLACES this box's equipment config. Without a row, "who changed the
+  // camera wiring?" had no answer — the per-device save rows only cover edits
+  // made on the device pages themselves.
+  audit({
+    eventKey: 'config.devices.pulled',
+    action: 'edit',
+    category: 'device',
+    severity: 'high',
+    outcome: result.ok ? 'ok' : 'failed',
+    resourceType: deviceResourceType(type),
+    description: result.ok
+      ? `Replaced this box's ${type} list with the cloud's · ${result.applied ?? 0} row(s) applied`
+      : `Pull of the ${type} list from the cloud FAILED — ${result.error ?? 'unknown error'}`,
+  });
   return result;
 });

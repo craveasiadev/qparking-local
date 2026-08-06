@@ -2857,18 +2857,29 @@ export function listActivityLogs(): ActivityLog[] {
 }
 
 /**
- * Replace the entire cached activity-log set. Mirror-down from qparking SaaS
- * for the local Activity Log page — the cloud is the source of truth for the
- * combined audit trail (it already holds the local events that were pushed
- * up), so we wipe and re-insert on each sync. Rows land with
- * pushed_to_cloud = 1 because they originate FROM the cloud; the outbound push
- * queue must never try to send them back.
+ * Replace the cached activity-log set. Mirror-down from qparking SaaS for the
+ * local Activity Log page — the cloud is the source of truth for the combined
+ * audit trail (it already holds the local events that were pushed up), so we
+ * wipe and re-insert on each sync. Rows land with pushed_to_cloud = 1 because
+ * they originate FROM the cloud; the outbound push queue must never try to send
+ * them back.
+ *
+ * ONE exception is deliberately kept: local rows the cloud has NOT acked yet
+ * (source='local' AND pushed_to_cloud=0) survive the wipe. They exist nowhere
+ * else — deleting them would destroy the only copy of a manual release, a
+ * blacklist refusal or a session edit whose push hadn't landed. syncActivityLogs()
+ * pushes them before pulling, so in the normal case there are none left to
+ * preserve; this is the safety net for when that push fails (offline / 4xx).
+ *
+ * Because a push can succeed server-side but lose its response (timeout), a
+ * preserved row CAN come back down in the cloud set under the same id — hence
+ * INSERT OR REPLACE: the cloud's copy wins and the row flips to pushed.
  */
 export function replaceAllActivityLogs(activityLogs: ActivityLog[]): void {
 	const db = getDb();
 	const dbTransaction = db.transaction(() => {
-		db.prepare("DELETE FROM activity_logs").run();
-		const insert = db.prepare(`INSERT INTO activity_logs (
+		db.prepare("DELETE FROM activity_logs WHERE NOT (source = 'local' AND pushed_to_cloud = 0)").run();
+		const insert = db.prepare(`INSERT OR REPLACE INTO activity_logs (
         id, event_key, action, category, severity, outcome,
         resource_type, resource_id, correlation_id, description, changes,
         source, actor_name, site_id, occurred_at, created_at,
@@ -2908,6 +2919,23 @@ export function updateActivityLogs(activityLogs: ActivityLog[]): void {
 		});
 	});
 
+	dbTransaction();
+}
+
+/**
+ * Record WHY a row couldn't be delivered, on the rows that were in the failed
+ * batch. Without this the Activity Log page can only say "Not pushed yet" — the
+ * reason (offline, 400 site mismatch, bad action enum) stayed in a SyncResult
+ * nobody looked at, so an undeliverable row looked merely un-synced-yet forever.
+ * Cleared again by updateActivityLogs() on the next successful push.
+ */
+export function markActivityLogsPushFailed(ids: string[], error: string): void {
+	if (!ids.length) return;
+	const db = getDb();
+	const update = db.prepare(`UPDATE activity_logs SET sync_error = ? WHERE id = ? AND pushed_to_cloud = 0`);
+	const dbTransaction = db.transaction(() => {
+		for (const id of ids) update.run(error, id);
+	});
 	dbTransaction();
 }
 

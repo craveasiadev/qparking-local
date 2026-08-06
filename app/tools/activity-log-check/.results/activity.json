@@ -1,0 +1,66 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "a fresh local row starts unpushed",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mirror-down PRESERVES the unpushed local row",
+      "pass": true,
+      "detail": "rows now: session.manual_release, session.entry"
+    },
+    {
+      "name": "…and still brings the cloud row down",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "an acked row is marked pushed",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mirror-down DROPS a row the cloud already has (no orphan copy)",
+      "pass": true,
+      "detail": "an acked local row must come back from the cloud set, not linger locally"
+    },
+    {
+      "name": "mirror-down absorbs an id collision instead of throwing",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "…and the collided row flips to pushed (the cloud has it)",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "…exactly once",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "a rejected row carries the cloud's reason",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "…and is still pending, not silently acked",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "a pushed row cannot be stamped with a push error",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "listActivityLogs stays newest-first",
+      "pass": true,
+      "detail": null
+    }
+  ],
+  "error": null
+}

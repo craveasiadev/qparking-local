@@ -170,21 +170,13 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     try {
       const r = await window.bridge.simulateExit(lid, plate.trim(), toIso(exitLocal));
       if (!r?.ok) push('warn', `✗ exit: ${r?.error ?? 'failed'}`);
-      else {
-        // The exit outcome (paid / declined / free) arrives async on the
-        // 'session' event stream — this row records that the exit was
-        // triggered; the cloud's session.exit.recorded row carries the result.
-        await window.bridge.insertActivityLog({
-          eventKey: 'session.exit',
-          action: 'exit',
-          category: 'session',
-          severity: 'high',
-          siteId: site?.id ?? null,
-          outcome: 'ok',
-          resourceType: 'parking_record',
-          description: `Exit · ${plate.trim().toUpperCase()} · stamped ${fmtDateTime(toIso(exitLocal))}`,
-        });
-      }
+      else push('out', `Exit fired — ${fmtDateTime(toIso(exitLocal))} (lane ${lid})`);
+      // No audit write here, unlike fireEntry above. A simulated exit drives the
+      // REAL flow, so the main process logs the outcome itself — session.exit on a
+      // paid/free exit, payment.declined / gate.exit.refused when it fails. A row
+      // for "the button was pressed" only ever duplicated that. (fireEntry does
+      // need its own: simulateEntryAt writes the session directly without going
+      // through the flow, so nothing else records a simulated entry.)
     } finally { setBusy(null); }
   }
 
