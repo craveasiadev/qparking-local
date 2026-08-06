@@ -216,6 +216,17 @@ export interface BridgeApi {
 		rows: Array<ParkingSession & { livePreviewFeeCents?: number | null }>;
 		counts: { open: number; total: number };
 	}>;
+	/** How many sessions qparking SaaS is missing, or holding a stale copy of
+	 *  (never delivered, or changed locally since it was last acknowledged). */
+	countUnsyncedSessions(): Promise<number>;
+	/** Re-enqueue every one of those and drain the queue now. `remaining` is the
+	 *  count still unacknowledged afterwards — non-zero means the cloud refused
+	 *  or was unreachable, and each session carries its own error. */
+	pushUnsyncedSessions(): Promise<{
+		queued: number;
+		remaining: number;
+		status: SyncStatus;
+	}>;
 	/** Manually retrigger the exit payment flow for a stuck session. Fires
 	 *  the terminal (ECPI initCard + W4G PayRequest race) using the lane +
 	 *  terminal wired to the session's lane. Returns immediately; the actual

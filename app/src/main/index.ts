@@ -88,6 +88,7 @@ import {
   listLanes, upsertLane, deleteLane, getLane, setLaneCameras,
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
   countSessions, listSessionsPage, deleteSession,
+  listSessionsNeedingCloudPush, countSessionsNeedingCloudPush,
   updateSessionFields,
   getTransactionById, getOpenTransactionForSession, updateTransaction,
   listTransactionsPage, countTransactions,
@@ -1125,6 +1126,30 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   // Push the edit to qparking SaaS via the retry queue.
   if (working) enqueueUpdate(working);
   return working;
+});
+
+// ─── session → cloud delivery (Sessions page) ───────────────────────────────
+// How many sessions the cloud doesn't have, or doesn't have the current version
+// of. Drives the page's "Push to cloud (N)" badge.
+ipcMain.handle('sessions:unsynced-count', () => countSessionsNeedingCloudPush());
+
+// Re-enqueue every session the cloud is missing or holding stale, then drain.
+// The queue is still the delivery mechanism (persistent, retrying) — this only
+// decides WHAT goes into it, from the sessions' own watermark rather than from
+// whatever happened to be enqueued at the time.
+ipcMain.handle('sessions:push-unsynced', async () => {
+  const pending = listSessionsNeedingCloudPush();
+  for (const session of pending) {
+    // An open session posts as an entry; a closed one posts its exit (which the
+    // cloud upsert treats as closing the same record).
+    if (session.exitAt) enqueueExit(session);
+    else enqueueEntry(session);
+  }
+  const status = await drainNow();
+  // Not audited, per the same rule as the mirror pull: a sync action is
+  // bookkeeping, and the outcome is already on the row itself (each session's
+  // Synced / Not-synced badge and its cloud_sync_error).
+  return { queued: pending.length, remaining: countSessionsNeedingCloudPush(), status };
 });
 
 // Sync queue inspection + manual controls (Dashboard panel uses these).

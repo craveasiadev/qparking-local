@@ -219,6 +219,23 @@ export interface ParkingSession {
   freeReason: string | null;
   /** Optional notes (manual release reason, etc). */
   notes: string | null;
+  /** Local change counter — bumped by every mutation (exit recorded, edit,
+   *  manual release). Paired with `cloudSyncedRev` it says whether qparking SaaS
+   *  holds the CURRENT version, which a boolean "pushed" flag cannot: a session
+   *  mutates several times over its life, whereas an activity-log row is written
+   *  once. Revisions rather than timestamps because SQLite's clock is too coarse
+   *  — a change in the same tick as an acknowledgement compared equal. */
+  rev: number;
+  /** The `rev` qparking SaaS has acknowledged. Null = never delivered; anything
+   *  below `rev` means the cloud copy is stale. */
+  cloudSyncedRev: number | null;
+  /** When that acknowledgement happened (display, and a backstop comparison
+   *  against `updatedAt`). */
+  cloudSyncedAt: string | null;
+  /** Why the last delivery attempt for this session failed. Cleared on success.
+   *  Never accompanied by clearing cloudSyncedAt — a failed RE-push must not make
+   *  an already-delivered session look absent. */
+  cloudSyncError: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -479,6 +496,14 @@ export interface SyncQueueRow {
   status: 'pending' | 'failed';
   lastError: string | null;
   nextAttemptAt: string;
+  /** The session this push describes, when it describes one (null for
+   *  transaction pushes and for a delete, whose session is already gone). Lets a
+   *  successful drain stamp that session's cloud watermark. */
+  sessionId: number | null;
+  /** The session's `rev` at the moment this row was queued — the payload is a
+   *  snapshot, so this is the revision the cloud will be holding once it lands.
+   *  Also the dedupe key: an identical pending push collapses onto it. */
+  sessionRev: number | null;
   createdAt: string;
   updatedAt: string;
 }

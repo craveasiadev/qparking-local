@@ -49,6 +49,10 @@ const api: BridgeApi = {
     exitTo?: string | null;
     paymentStatus?: string | null;
   }) => ipcRenderer.invoke('sessions:page', opts),
+  /** How many sessions qparking SaaS is missing, or holding a stale copy of. */
+  countUnsyncedSessions: () => ipcRenderer.invoke('sessions:unsynced-count'),
+  /** Re-enqueue every session the cloud is missing / holding stale, then drain. */
+  pushUnsyncedSessions: () => ipcRenderer.invoke('sessions:push-unsynced'),
   /** Manually retrigger the exit-payment flow for a session — used by the
    *  Sessions page when the exit LPR misread the plate or the operator
    *  needs to close a stuck session by asking the driver to tap again. */

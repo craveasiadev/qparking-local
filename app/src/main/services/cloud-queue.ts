@@ -102,15 +102,24 @@ function readImageAsBase64(imagePath: string | null | undefined): string | null 
 }
 
 /**
- * Resolve the cloud "site_id" (really the rate-policy scope key) for a session.
- * The cloud correlates entry↔exit by (site_id + plate_number), so this MUST be
- * ENTRY-lane-first and resolved identically for entry/exit/update/delete — even
- * when the car exits through a different lane whose rate plan differs — or the
- * exit lands under a different scope and never closes the open entry record.
+ * Rate-policy scope key, sent as the payload's legacy `site_id` field.
  *
- * Falls back to the exit lane's policy, then the site-default policy, mirroring
- * how local pricing (parking-flow.handleExit) resolves the rate. This is why a
- * lane without its own policy still syncs instead of being silently dropped.
+ * ⚠️ INFORMATIONAL ONLY — it must never gate a push. The current cloud endpoint
+ * (ParkingRecordController::upsert) neither validates nor reads `site_id`: it
+ * takes the site from the bearer token and correlates by (token site + plate +
+ * exit_time IS NULL). It is kept in the payload solely so an older backend that
+ * did read it still behaves.
+ *
+ * This used to return null → every enqueue helper returned early with a
+ * console.warn → the session was NEVER queued and NEVER reached the cloud, with
+ * nothing anywhere recording the loss. On a box whose lanes carry no rate policy
+ * and which has no site-default policy — a completely ordinary setup, and the
+ * state of the test box on 2026-08-06 — that silently discarded EVERY session.
+ * Resolved best-effort now: present when a policy exists, absent when not.
+ *
+ * ENTRY-lane-first, then the exit lane, then the site default — mirroring how
+ * local pricing (parking-flow.handleExit) resolves the rate, so the two can't
+ * disagree about which plan a stay belongs to.
  */
 function resolveScopeId(session: ParkingSession): string | null {
   const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
@@ -121,32 +130,28 @@ function resolveScopeId(session: ParkingSession): string | null {
     ?? null;
 }
 
+/** The legacy `site_id` field, omitted entirely when no policy resolves. */
+function scopeField(session: ParkingSession): { site_id?: string } {
+  const siteId = resolveScopeId(session);
+  return siteId ? { site_id: siteId } : {};
+}
+
 /**
  * Public enqueue helpers. parking-flow / IPC handlers call these instead of
  * fetching directly so retries are guaranteed.
  */
 export function enqueueEntry(session: ParkingSession): void {
-  const siteId = resolveScopeId(session);
-  if (!siteId) {
-    console.warn(`[cloud-queue] no rate policy or site default for entry plate=${session.plate}; not syncing`);
-    return;
-  }
   const entryImage = readImageAsBase64(session.entryImagePath);
   enqueueSync('session.entry', {
-    site_id: siteId,
+    ...scopeField(session),
     plate_number: session.plate,
     entry_time: session.entryAt,
     ...(entryImage ? { entry_image_base64: entryImage } : {}),
-  });
+  }, session.id, session.rev);
   scheduleDrain();
 }
 
 export function enqueueExit(session: ParkingSession): void {
-  const siteId = resolveScopeId(session);
-  if (!siteId) {
-    console.warn(`[cloud-queue] no rate policy or site default for exit plate=${session.plate}; not syncing`);
-    return;
-  }
   // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
   // and the freshly-captured exit image. Cloud upsert is idempotent per column
   // so re-uploading the entry image is safe. Payment outcome is NOT sent here —
@@ -154,45 +159,46 @@ export function enqueueExit(session: ParkingSession): void {
   const entryImage = readImageAsBase64(session.entryImagePath);
   const exitImage  = readImageAsBase64(session.exitImagePath);
   enqueueSync('session.exit', {
-    site_id: siteId,
+    ...scopeField(session),
     plate_number: session.plate,
     entry_time: session.entryAt,
     exit_time: session.exitAt,
     fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
     duration_minutes: session.durationMinutes ?? 0,
     status: session.status,
+    // Why this exit cost nothing ('pass-monthly' / 'within-grace' / 'rate-zero' /
+    // 'no-policy'). Without it the cloud's Parking Activity page can only say
+    // "free", and a legitimate pass exit is indistinguishable from a
+    // misconfigured RM0 rate plan — the one distinction revenue assurance needs.
+    free_reason: session.freeReason ?? null,
     ...(entryImage ? { entry_image_base64: entryImage } : {}),
     ...(exitImage  ? { exit_image_base64:  exitImage  } : {}),
-  });
+  }, session.id, session.rev);
   scheduleDrain();
 }
 
 export function enqueueUpdate(session: ParkingSession): void {
-  const siteId = resolveScopeId(session);
-  if (!siteId) {
-    console.warn(`[cloud-queue] no rate policy or site default for update plate=${session.plate}; not syncing`);
-    return;
-  }
   // The same upsertParkingRecord endpoint handles updates — re-posting an
   // open entry refreshes it; posting with an exit_time closes it. So an
   // edit can re-use the entry / exit shapes depending on whether exitAt
   // is set.
   if (session.exitAt) {
     enqueueSync('session.update', {
-      site_id: siteId,
+      ...scopeField(session),
       plate_number: session.plate,
       entry_time: session.entryAt,
       exit_time: session.exitAt,
       fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
       duration_minutes: session.durationMinutes ?? 0,
       status: session.status,
-    });
+      free_reason: session.freeReason ?? null,
+    }, session.id, session.rev);
   } else {
     enqueueSync('session.update', {
-      site_id: siteId,
+      ...scopeField(session),
       plate_number: session.plate,
       entry_time: session.entryAt,
-    });
+    }, session.id, session.rev);
   }
   scheduleDrain();
 }
@@ -225,13 +231,10 @@ export function enqueueTransaction(session: ParkingSession, txn: Transaction): v
 }
 
 export function enqueueDelete(session: ParkingSession): void {
-  const siteId = resolveScopeId(session);
-  if (!siteId) {
-    console.warn(`[cloud-queue] no rate policy or site default for delete plate=${session.plate}; not syncing`);
-    return;
-  }
+  // No session id attached: the row is being deleted locally, so there is nothing
+  // left to stamp a sync watermark on by the time this drains.
   enqueueSync('session.delete', {
-    site_id: siteId,
+    ...scopeField(session),
     plate_number: session.plate,
     entry_time: session.entryAt,
   });

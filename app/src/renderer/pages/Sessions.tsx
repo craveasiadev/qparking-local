@@ -3,7 +3,7 @@ import {
   Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
   Trash2, Loader2,
   Image as ImageIcon, Zap, ArrowDown, ArrowUp, MapPin,
-  LogIn, LogOut, Clock, Banknote,
+  LogIn, LogOut, Clock, Banknote, CloudUpload, CloudOff,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
@@ -279,6 +279,9 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [pageLoading, setPageLoading] = useState(false);
+  // Sessions qparking cloud is missing or holding an out-of-date copy of.
+  const [unsyncedCount, setUnsyncedCount] = useState(0);
+  const [pushResult, setPushResult] = useState<{ ok: boolean; text: string } | null>(null);
   const site = useCurrentSite();
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
@@ -333,12 +336,38 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   })();
 
   const [runRefresh, refreshing] = useAsyncAction(async () => {
-    await Promise.all([fetchPage(), fetchAux()]);
+    await Promise.all([fetchPage(), fetchAux(), fetchUnsyncedCount()]);
   });
 
-  useEffect(() => { void fetchPage(); void fetchAux(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, pager.page, debouncedPlateSearch, startDate, endDate, statusFilter]);
+  // How many sessions the cloud is missing / holding stale. Read from the
+  // sessions' own watermark, so it stays honest whether a row was never queued,
+  // was queued and failed, or was delivered and then edited here.
+  async function fetchUnsyncedCount() {
+    setUnsyncedCount(await window.bridge.countUnsyncedSessions());
+  }
+
+  const [runPushUnsynced, pushing] = useAsyncAction(async () => {
+    const r = await window.bridge.pushUnsyncedSessions();
+    setPushResult(
+      r.queued === 0
+        ? { ok: true, text: 'Nothing to push — qparking cloud already has every session on this box.' }
+        : r.remaining === 0
+          ? { ok: true, text: `Pushed ${r.queued} session${r.queued === 1 ? '' : 's'} — all acknowledged by qparking cloud. They now appear on its Parking Activity page.` }
+          : {
+              ok: false,
+              text: `Queued ${r.queued} session${r.queued === 1 ? '' : 's'}, but ${r.remaining} still isn't acknowledged`
+                + `${r.status?.lastError ? ` — last error: ${r.status.lastError}` : ''}. `
+                + 'They stay queued and retry automatically; open a row to see its own error.',
+            },
+    );
+    await Promise.all([fetchPage(), fetchUnsyncedCount()]);
+  });
+
+  useEffect(() => { void fetchPage(); void fetchAux(); void fetchUnsyncedCount(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, pager.page, debouncedPlateSearch, startDate, endDate, statusFilter]);
   useEffect(() => {
-    const off = window.bridge.onEvent('session', () => { void fetchPage(); });
+    // Every gate event changes the sync backlog too (a new entry starts life
+    // unsynced), so keep the badge in step with the table.
+    const off = window.bridge.onEvent('session', () => { void fetchPage(); void fetchUnsyncedCount(); });
     return off;
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [tab, pager.page, debouncedPlateSearch, startDate, endDate, statusFilter]);
@@ -402,15 +431,36 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">Every parking entry/exit recorded by this server.</p>
         </div>
-        <button
-          onClick={() => runRefresh()}
-          disabled={refreshing}
-          className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide disabled:opacity-50 self-start sm:self-auto"
-        >
-          {refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            onClick={() => runPushUnsynced()}
+            disabled={pushing}
+            title="Send every session qparking cloud is missing (or holding an out-of-date copy of) to its Parking Activity page"
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50"
+          >
+            <CloudUpload size={13} className={pushing ? 'animate-pulse' : ''} />
+            {pushing ? 'Pushing…' : `Push to cloud${unsyncedCount ? ` (${unsyncedCount})` : ''}`}
+          </button>
+          <button
+            onClick={() => runRefresh()}
+            disabled={refreshing}
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide disabled:opacity-50"
+          >
+            {refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            Refresh
+          </button>
+        </div>
       </header>
+
+      {pushResult && (
+        <div className={`mb-3 flex items-start gap-2 rounded-lg border px-4 py-3 text-sm ${
+          pushResult.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'
+        }`}>
+          <CloudUpload size={15} className="mt-0.5 flex-shrink-0" />
+          <p className="flex-1">{pushResult.text}</p>
+          <button onClick={() => setPushResult(null)} className="flex-shrink-0 opacity-70 hover:opacity-100"><X size={15} /></button>
+        </div>
+      )}
 
       {/* Filters — one row: plate search + entry-date range + payment-status
           dropdown, with a result count + active-filter chips underneath. Mirrors
@@ -499,6 +549,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                 <th className="text-right px-3 py-2.5 font-bold">Duration</th>
                 <th className="text-left px-3 py-2.5 font-bold">Payment</th>
                 <th className="text-left px-3 py-2.5 font-bold">Space</th>
+                <th className="text-left px-3 py-2.5 font-bold">Cloud</th>
               </tr>
             </thead>
             <tbody>
@@ -521,11 +572,12 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
                     <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
                     <td className="px-3 py-2"><PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} /></td>
                     <td className="px-3 py-2 text-xs text-gray-600"><span className="text-gray-400">—</span></td>
+                    <td className="px-3 py-2"><CloudSyncCell session={s} /></td>
                   </tr>
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={7} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
+                <tr><td colSpan={8} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
               )}
             </tbody>
           </table>
@@ -546,7 +598,10 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
               className="rounded-xl border border-gray-200 bg-white p-3 cursor-pointer active:bg-gray-50">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono font-bold text-base tracking-wider">{s.plate}</span>
-                <PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} />
+                <div className="flex items-center gap-1.5">
+                  <CloudSyncCell session={s} />
+                  <PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} />
+                </div>
               </div>
               <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
                 <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
@@ -631,6 +686,46 @@ function OnSiteBadge() {
   return (
     <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold uppercase px-2 py-0.5">
       On site
+    </span>
+  );
+}
+
+/**
+ * Whether qparking cloud has THIS version of the session.
+ *
+ * Three states, not two, because "delivered" isn't permanent: a session that
+ * reached the cloud and was then exited / edited / released here is stale up
+ * there until the next push. The local change counter (`rev`) against the
+ * acknowledged one (`cloudSyncedRev`) is what separates those — a boolean flag
+ * could only ever say "was pushed once".
+ */
+function cloudSyncState(session: ParkingSession): 'synced' | 'stale' | 'never' {
+  if (session.cloudSyncedRev == null || !session.cloudSyncedAt) return 'never';
+  const changedSince = session.rev > session.cloudSyncedRev || session.updatedAt > session.cloudSyncedAt;
+  return changedSince ? 'stale' : 'synced';
+}
+
+function CloudSyncCell({ session }: { session: ParkingSession }) {
+  const state = cloudSyncState(session);
+  const base = 'inline-flex items-center gap-1 rounded-full border text-[10px] font-bold uppercase px-2 py-0.5';
+  if (state === 'synced') {
+    return (
+      <span className={`${base} bg-emerald-50 text-emerald-700 border-emerald-200`} title={`Delivered to qparking cloud at ${session.cloudSyncedAt}`}>
+        <CloudUpload size={10} /> Synced
+      </span>
+    );
+  }
+  const title = session.cloudSyncError
+    ? `Last attempt failed: ${session.cloudSyncError}`
+    : state === 'stale'
+      ? 'Delivered once, then changed on this box — the cloud copy is out of date'
+      : 'Never delivered to qparking cloud';
+  return (
+    <span
+      className={`${base} ${session.cloudSyncError ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-800 border-amber-200'}`}
+      title={title}
+    >
+      <CloudOff size={10} /> {state === 'stale' ? 'Stale' : 'Not synced'}
     </span>
   );
 }

@@ -275,10 +275,26 @@ function applySchema(db: Database.Database) {
       free_reason TEXT,
       terminal_txn_id TEXT,
       notes TEXT,
+      -- Cloud delivery watermark. A session mutates repeatedly (entry → exit →
+      -- edit → release), so "is the cloud's copy current?" needs more than a
+      -- boolean 'pushed' flag: rev counts local changes, cloud_synced_rev is
+      -- the rev qparking SaaS has acknowledged, and anything greater is a stale
+      -- cloud copy. Revisions, not timestamps: SQLite's clock is too coarse — an
+      -- edit landing in the same tick as an acknowledgement compared EQUAL and so
+      -- read as already-synced. cloud_synced_at is kept for display (and as a
+      -- backstop comparison), cloud_sync_error holds the last failure reason.
+      rev INTEGER NOT NULL DEFAULT 0,
+      cloud_synced_rev INTEGER,
+      cloud_synced_at TEXT,
+      cloud_sync_error TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_plate_open ON sessions (plate) WHERE exit_at IS NULL;
+    -- NOTE: no index on cloud_synced_at here. This block runs against a database
+    -- that may predate the column (CREATE TABLE IF NOT EXISTS no-ops on an
+    -- existing table), and indexing a column that isn't there yet throws and takes
+    -- the whole schema exec with it. It's created after the ALTERs below instead.
     CREATE INDEX IF NOT EXISTS idx_sessions_entry_at ON sessions (entry_at DESC);
 
     -- Payment ledger. One row per payment attempt against a session; the
@@ -642,13 +658,34 @@ function applySchema(db: Database.Database) {
 	// pass exit, a grace exit and a misconfigured RM0 rate plan all used to land
 	// as payment_status='free' with nothing to tell them apart, so "why did this
 	// car leave without paying?" was unanswerable after the fact.
-	for (const col of ["card_scheme TEXT", "payment_timestamp TEXT", "pass_id TEXT", "free_reason TEXT"]) {
+	// cloud_synced_at / cloud_sync_error (2026-08-06) make cloud delivery
+	// answerable per session. Existing rows land with NULL = "not known to be in
+	// the cloud", which is the honest starting point: before this column the box
+	// could silently drop every session (see cloud-queue.resolveScopeId) with no
+	// way to tell. They surface as "Not synced" and one push settles them.
+	for (const col of [
+		"card_scheme TEXT", "payment_timestamp TEXT", "pass_id TEXT", "free_reason TEXT",
+		"rev INTEGER NOT NULL DEFAULT 0", "cloud_synced_rev INTEGER",
+		"cloud_synced_at TEXT", "cloud_sync_error TEXT",
+	]) {
 		try {
 			db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
 		} catch {
 			/* already there */
 		}
 	}
+	// Ties a queue row to the session it describes, so a successful drain can
+	// stamp that session's watermark before the row is deleted.
+	for (const col of ["session_id INTEGER", "session_rev INTEGER"]) {
+		try {
+			db.exec(`ALTER TABLE sync_queue ADD COLUMN ${col}`);
+		} catch {
+			/* already there */
+		}
+	}
+	// Safe only now that the column is guaranteed to exist — see the note in the
+	// CREATE TABLE block above. Backs the Sessions page's "needs pushing" count.
+	db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_cloud_sync ON sessions (cloud_synced_at)");
 	// 2026-07-17: split the car's journey (sessions.status) out of the payment
 	// outcome (now the transactions table; payment_status kept as a mirror). Add
 	// the column then backfill it from existing rows — done ONCE (the ADD throws
@@ -870,13 +907,18 @@ function applySchema(db: Database.Database) {
         card_scheme TEXT,
         payment_timestamp TEXT,
         notes TEXT,
+        rev INTEGER NOT NULL DEFAULT 0,
+        cloud_synced_rev INTEGER,
+        cloud_synced_at TEXT,
+        cloud_sync_error TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`);
 			db.exec(`INSERT INTO sessions_rebuild
         (id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
          exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
-         status, payment_status, pass_id, free_reason, terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at)
+         status, payment_status, pass_id, free_reason, terminal_txn_id, card_scheme, payment_timestamp, notes,
+         rev, cloud_synced_rev, cloud_synced_at, cloud_sync_error, created_at, updated_at)
         SELECT
          id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
          exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
@@ -889,12 +931,14 @@ function applySchema(db: Database.Database) {
            ELSE 'pending'
          END,
          pass_id, free_reason,
-         terminal_txn_id, card_scheme, payment_timestamp, notes, created_at, updated_at
+         terminal_txn_id, card_scheme, payment_timestamp, notes,
+         rev, cloud_synced_rev, cloud_synced_at, cloud_sync_error, created_at, updated_at
         FROM sessions`);
 			db.exec("DROP TABLE sessions");
 			db.exec("ALTER TABLE sessions_rebuild RENAME TO sessions");
 			db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_plate_open ON sessions (plate) WHERE exit_at IS NULL");
 			db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_entry_at ON sessions (entry_at DESC)");
+			db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_cloud_sync ON sessions (cloud_synced_at)");
 			db.exec("COMMIT");
 			console.log("[db] rebuilt sessions table to refresh stale payment_status CHECK");
 		}
@@ -1474,6 +1518,19 @@ export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
 
 // ─── sessions ──────────────────────────────────────────────────────────────
 
+/**
+ * `sessions.updated_at` / `cloud_synced_at` in MILLISECOND precision.
+ *
+ * CURRENT_TIMESTAMP resolves to whole seconds, and these two columns are
+ * COMPARED against each other to decide whether the cloud is holding a stale copy
+ * ("changed since it was acknowledged"). At one-second resolution an edit landing
+ * in the same second as the acknowledgement produced two equal strings — so the
+ * change read as already-synced and was never re-pushed. Same basis as
+ * CURRENT_TIMESTAMP (UTC), and lexicographically ordered against the
+ * second-precision values older rows already hold.
+ */
+const NOW_MS_SQL = "strftime('%Y-%m-%d %H:%M:%f','now')";
+
 function rowToSession(row: any): ParkingSession {
 	return {
 		id: row.id,
@@ -1496,6 +1553,10 @@ function rowToSession(row: any): ParkingSession {
 		passId: row.pass_id ?? null,
 		freeReason: row.free_reason ?? null,
 		notes: row.notes,
+		rev: row.rev ?? 0,
+		cloudSyncedRev: row.cloud_synced_rev ?? null,
+		cloudSyncedAt: row.cloud_synced_at ?? null,
+		cloudSyncError: row.cloud_sync_error ?? null,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -1627,7 +1688,7 @@ export function recordExit(
 ): ParkingSession | null {
 	getDb()
 		.prepare(
-			`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, pass_id=?, free_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, pass_id=?, free_reason=?, rev=rev+1, updated_at=${NOW_MS_SQL} WHERE id=?`,
 		)
 		.run(
 			patch.exitAt,
@@ -1662,7 +1723,7 @@ export function manualReleaseSession(sessionId: number, reason: string): { sessi
 	const now = new Date().toISOString();
 	const info = getDb()
 		.prepare(
-			`UPDATE sessions SET exit_at=?, status='manual_release', payment_status='manual_release', notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND exit_at IS NULL`,
+			`UPDATE sessions SET exit_at=?, status='manual_release', payment_status='manual_release', notes=?, rev=rev+1, updated_at=${NOW_MS_SQL} WHERE id=? AND exit_at IS NULL`,
 		)
 		.run(now, reason, sessionId);
 	return { session: getSessionById(sessionId), changed: info.changes > 0 };
@@ -1725,7 +1786,8 @@ export function updateSessionFields(
 		vals.push(patch.notes);
 	}
 	if (sets.length === 0) return getSessionById(sessionId);
-	sets.push("updated_at = CURRENT_TIMESTAMP");
+	sets.push("rev = rev + 1");
+	sets.push(`updated_at = ${NOW_MS_SQL}`);
 	vals.push(sessionId);
 	getDb()
 		.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`)
@@ -2049,13 +2111,40 @@ function rowToSync(row: any): SyncQueueRow {
 		status: row.status,
 		lastError: row.last_error,
 		nextAttemptAt: row.next_attempt_at,
+		sessionId: row.session_id ?? null,
+		sessionRev: row.session_rev ?? null,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
 }
 
-export function enqueueSync(op: SyncOp, payload: Record<string, unknown>): number {
-	const info = getDb().prepare(`INSERT INTO sync_queue (op, payload) VALUES (?, ?)`).run(op, JSON.stringify(payload));
+/**
+ * Queue one outbound push. `sessionId` links the row back to the session it
+ * describes so the drain can stamp that session's sync watermark on success —
+ * without it, "is this session in the cloud?" is unanswerable the moment the
+ * queue row is deleted (which is exactly what success does).
+ */
+export function enqueueSync(op: SyncOp, payload: Record<string, unknown>, sessionId?: number | null, sessionRev?: number | null): number {
+	const db = getDb();
+
+	// Collapse an identical pending push instead of stacking another copy.
+	//
+	// Same op + same session + same REVISION means the same payload, so a second
+	// row is pure duplicated upload — and a session carrying two plate captures is
+	// ~800KB a go. Pressing "Push to cloud" four times used to queue four of them.
+	//
+	// Keyed on the revision, so a genuine change still queues its own row: a
+	// session that was edited has a higher rev and must be pushed again.
+	if (sessionId != null && sessionRev != null) {
+		const existing = db
+			.prepare(`SELECT id FROM sync_queue WHERE status = 'pending' AND op = ? AND session_id = ? AND session_rev = ? LIMIT 1`)
+			.get(op, sessionId, sessionRev) as { id: number } | undefined;
+		if (existing) return existing.id;
+	}
+
+	const info = db
+		.prepare(`INSERT INTO sync_queue (op, payload, session_id, session_rev) VALUES (?, ?, ?, ?)`)
+		.run(op, JSON.stringify(payload), sessionId ?? null, sessionRev ?? null);
 	return Number(info.lastInsertRowid);
 }
 
@@ -2066,20 +2155,89 @@ export function listDueSync(now = new Date().toISOString(), limit = 25): SyncQue
 }
 
 export function markSyncOk(id: number): void {
-	getDb().prepare(`DELETE FROM sync_queue WHERE id = ?`).run(id);
+	const db = getDb();
+	const tx = db.transaction(() => {
+		// Stamp the session BEFORE the queue row is deleted — it carries the only
+		// link back.
+		//
+		// The acknowledged revision is the one SNAPSHOTTED WHEN THIS ROW WAS
+		// QUEUED, not the session's current rev: the payload is a snapshot too, so
+		// if the session changed while this push was in flight, the cloud has the
+		// older version and must still be told about the newer one. Stamping the
+		// current rev here would mark that change as delivered when it wasn't.
+		const row = db.prepare(`SELECT session_id, session_rev, op FROM sync_queue WHERE id = ?`).get(id) as any;
+		if (row?.session_id != null && String(row.op).startsWith("session.")) {
+			db.prepare(`UPDATE sessions SET cloud_synced_rev = ?, cloud_synced_at = ${NOW_MS_SQL}, cloud_sync_error = NULL WHERE id = ?`)
+				.run(row.session_rev ?? 0, row.session_id);
+		}
+		db.prepare(`DELETE FROM sync_queue WHERE id = ?`).run(id);
+	});
+	tx();
 }
 
 export function markSyncRetry(id: number, error: string, delayMs: number): void {
 	const next = new Date(Date.now() + delayMs).toISOString();
-	getDb()
-		.prepare(`UPDATE sync_queue SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-		.run(error, next, id);
+	const db = getDb();
+	const tx = db.transaction(() => {
+		db.prepare(`UPDATE sync_queue SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+			.run(error, next, id);
+		stampSessionSyncError(id, error);
+	});
+	tx();
 }
 
 export function markSyncFailed(id: number, error: string): void {
-	getDb()
-		.prepare(`UPDATE sync_queue SET status = 'failed', last_error = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-		.run(error, id);
+	const db = getDb();
+	const tx = db.transaction(() => {
+		db.prepare(`UPDATE sync_queue SET status = 'failed', last_error = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+			.run(error, id);
+		stampSessionSyncError(id, error);
+	});
+	tx();
+}
+
+/**
+ * Copy a queue row's failure onto its session, so the Sessions page can say WHY a
+ * row isn't in the cloud instead of only that it isn't. Deliberately does NOT
+ * touch cloud_synced_at: a failed re-push of an already-synced session must not
+ * make it look like it was never there.
+ */
+function stampSessionSyncError(queueId: number, error: string): void {
+	const db = getDb();
+	const row = db.prepare(`SELECT session_id, op FROM sync_queue WHERE id = ?`).get(queueId) as any;
+	if (row?.session_id == null || !String(row.op).startsWith("session.")) return;
+	db.prepare(`UPDATE sessions SET cloud_sync_error = ? WHERE id = ?`).run(error, row.session_id);
+}
+
+/**
+ * Sessions the cloud does not have, or does not have the CURRENT version of.
+ *
+ *   cloud_synced_rev IS NULL      → never acknowledged
+ *   rev > cloud_synced_rev        → acknowledged, then changed here (stale copy)
+ *   updated_at > cloud_synced_at  → backstop, for a mutation path that bumped
+ *                                   updated_at but forgot `rev = rev + 1`
+ *
+ * A plain boolean "pushed" flag can only express the first case. The second is
+ * the normal life of a session — entry, then exit, then maybe an edit or a
+ * release — which is why this is a watermark and not a flag. (An activity-log row
+ * is written once and never changes, so a flag is right for that table.)
+ */
+const NEEDS_CLOUD_PUSH_SQL = `cloud_synced_rev IS NULL
+     OR rev > cloud_synced_rev
+     OR cloud_synced_at IS NULL
+     OR updated_at > cloud_synced_at`;
+
+export function listSessionsNeedingCloudPush(limit = 5000): ParkingSession[] {
+	return (
+		getDb()
+			.prepare(`SELECT * FROM sessions WHERE ${NEEDS_CLOUD_PUSH_SQL} ORDER BY entry_at ASC LIMIT ?`)
+			.all(limit) as any[]
+	).map(rowToSession);
+}
+
+/** How many sessions are waiting to reach the cloud (drives the page's badge). */
+export function countSessionsNeedingCloudPush(): number {
+	return (getDb().prepare(`SELECT COUNT(*) as c FROM sessions WHERE ${NEEDS_CLOUD_PUSH_SQL}`).get() as any).c as number;
 }
 
 export function syncQueueStats(): { pending: number; failed: number; oldestPending: string | null } {
