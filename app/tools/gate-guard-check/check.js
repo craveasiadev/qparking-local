@@ -573,14 +573,36 @@ try {
   });
   const wlExternal = db.getCamera(wlCam.id).externalId;
 
-  // Same external_id present → UPDATE path, settings must survive untouched.
+  // access_mode now travels WITH the cloud row (2026-08-06), so a pull applies
+  // whatever the cloud says rather than leaving the local value alone.
   db.reconcileCamerasFromCloud([
-    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', host: '10.0.0.40', enabled: true, laneExternalId: null },
+    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
   ]);
   const afterUpdate = db.listCameras().find((c) => c.externalId === wlExternal);
-  check('cloud pull (update path): access mode + barrier control survive',
+  check('cloud pull: access mode is restored from the cloud row',
     afterUpdate?.accessMode === 'pass_only' && afterUpdate?.barrierControl === 'app',
     JSON.stringify({ a: afterUpdate?.accessMode, b: afterUpdate?.barrierControl }));
+  check('cloud pull: LAN-only credentials survive the update path',
+    afterUpdate?.deviceUser === 'admin' && afterUpdate?.devicePassword === 's3cret',
+    JSON.stringify({ u: afterUpdate?.deviceUser }));
+
+  // The cloud turning it OFF must turn it off locally too — otherwise the mirror
+  // is one-way and a lane could never be un-restricted from the portal.
+  db.reconcileCamerasFromCloud([
+    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'open', host: '10.0.0.40', enabled: true, laneExternalId: null },
+  ]);
+  const afterOff = db.listCameras().find((c) => c.externalId === wlExternal);
+  check('cloud pull: access mode OFF in the cloud clears it locally',
+    afterOff?.accessMode === 'open' && afterOff?.barrierControl === 'camera',
+    JSON.stringify({ a: afterOff?.accessMode, b: afterOff?.barrierControl }));
+
+  // barrier_control is derived, never mirrored — a cloud row carries no such
+  // field, so it must always follow the access mode it arrived with.
+  db.reconcileCamerasFromCloud([
+    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
+  ]);
+  check('cloud pull: barrier control is re-derived, not mirrored',
+    db.listCameras().find((c) => c.externalId === wlExternal)?.barrierControl === 'app');
 
   // A camera the cloud does NOT list is DELETED — documented, destructive, and
   // it takes the local-only settings with it. Pin the honest behaviour: the row
@@ -589,17 +611,32 @@ try {
   check('cloud pull: a camera absent from the cloud is deleted outright',
     !db.listCameras().some((c) => c.externalId === wlExternal));
 
-  // …and if that external_id later returns it is a FRESH row on the column
-  // defaults. Those defaults are the safe ones — admit everyone, leave the
-  // barrier alone — so the failure mode is "acts like it did before this
-  // feature existed", never "claims to check passes but doesn't".
+  // …and if that external_id later returns, access_mode comes back FROM THE
+  // CLOUD (that's what mirroring bought us) — but the LAN-only credentials do
+  // not, because they never left this box. A pass-only camera therefore returns
+  // restricted-but-unreachable, which describeCameraRisk() is there to flag
+  // rather than let it fail silently at the barrier.
   db.reconcileCamerasFromCloud([
-    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', host: '10.0.0.40', enabled: true, laneExternalId: null },
+    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
   ]);
   const afterReinsert = db.listCameras().find((c) => c.externalId === wlExternal);
-  check('cloud pull: a re-created camera lands on the SAFE defaults',
-    afterReinsert?.accessMode === 'open' && afterReinsert?.barrierControl === 'camera',
+  check('cloud pull: a re-created camera gets its access mode back from the cloud',
+    afterReinsert?.accessMode === 'pass_only' && afterReinsert?.barrierControl === 'app',
     JSON.stringify({ a: afterReinsert?.accessMode, b: afterReinsert?.barrierControl }));
+  check('cloud pull: …but NOT the LAN-only credentials, and the risk is flagged',
+    !afterReinsert?.deviceUser && !!afterReinsert?.risk,
+    JSON.stringify({ u: afterReinsert?.deviceUser, risk: afterReinsert?.risk }));
+
+  // A camera the cloud introduces that this box has never seen, with no
+  // access_mode on the row (an older SaaS), must land on the SAFE default.
+  db.reconcileCamerasFromCloud([
+    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
+    { externalId: 'legacy-cam', name: 'LEGACY', direction: 'exit', host: '10.0.0.41', enabled: true, laneExternalId: null },
+  ]);
+  const legacy = db.listCameras().find((c) => c.externalId === 'legacy-cam');
+  check('cloud pull: a row with no access_mode defaults to open (fail-open)',
+    legacy?.accessMode === 'open' && legacy?.barrierControl === 'camera',
+    JSON.stringify({ a: legacy?.accessMode, b: legacy?.barrierControl }));
 
   out.ok = out.checks.every((c) => c.pass);
 } catch (e) {

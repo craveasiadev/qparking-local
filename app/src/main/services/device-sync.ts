@@ -69,12 +69,15 @@ async function fetchCloudCameras(): Promise<CloudCameraRow[]> {
   return (data.data ?? []).map((r: any): CloudCameraRow => ({
     externalId: String(r.external_id),
     name: String(r.name ?? ''),
-    // The cloud's camera_devices.direction still allows 'dual' (its validation
-    // rule is `in:entry,exit,dual`), but this app retired that value — see
-    // LprCamera.direction. Coerce anything that isn't a live direction to
-    // 'entry' so a pull can't reintroduce it, or write a row that fails the
-    // cameras CHECK constraint on a fresh install and aborts the whole pull.
+    // Coerce rather than trust. The cloud dropped 'dual' from its validation at
+    // the same time this app retired it, but rows written BEFORE that can still
+    // carry it — and an unrecognised value would fail the cameras CHECK
+    // constraint on a fresh install, aborting the entire pull.
     direction: r.direction === 'exit' ? 'exit' : 'entry',
+    // Same fail-open rule the local rowToCamera applies: anything that isn't
+    // exactly 'pass_only' reads as 'open'. A cloud row that predates the column
+    // therefore admits everyone rather than locking a site out.
+    accessMode: r.access_mode === 'pass_only' ? 'pass_only' : 'open',
     host: r.ip_address ?? null,
     enabled: !!r.is_enabled,
     laneExternalId: r.lane_external_id ?? null,

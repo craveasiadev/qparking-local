@@ -1373,10 +1373,12 @@ export interface CloudLaneRow {
 export interface CloudCameraRow {
 	externalId: string;
 	name: string;
-	/** Already narrowed by fetchCloudCameras — the cloud still ACCEPTS 'dual'
-	 *  (CameraDeviceController validates `in:entry,exit,dual`), so the pull
-	 *  coerces it before it can reach a local row. */
+	/** Already narrowed by fetchCloudCameras — rows written before the cloud
+	 *  dropped 'dual' can still carry it, so the pull coerces first. */
 	direction: "entry" | "exit";
+	/** "Only Pass Allow", mirrored through the cloud since 2026-08-06. Narrowed
+	 *  by fetchCloudCameras; absent on rows older than the column → 'open'. */
+	accessMode: "open" | "pass_only";
 	host: string | null;
 	enabled: boolean;
 	laneExternalId: string | null;
@@ -1436,26 +1438,34 @@ export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
 		for (const local of db.prepare("SELECT id, external_id FROM cameras").all() as { id: number; external_id: string }[]) {
 			if (!keep.has(local.external_id)) db.prepare("DELETE FROM cameras WHERE id = ?").run(local.id);
 		}
-		// lane_id left for relinkDevices(). The UPDATE deliberately touches only
-		// cloud-owned columns, so a camera present in BOTH keeps every local-only
-		// setting: SDK credentials, webhook secret, access_mode, barrier_control.
-		// That is the normal pull and it is safe.
+		// lane_id left for relinkDevices(). access_mode now travels with the cloud
+		// row (2026-08-06), so a pull RESTORES it exactly like name/direction/host
+		// — that is the point of mirroring it. The SDK credentials and webhook
+		// secret are still LAN-only and never leave this box, so a surviving row
+		// keeps its own and a re-created one comes back without them.
+		//
+		// barrier_control is DERIVED here rather than mirrored: 'pass_only' implies
+		// this app opens the barrier, anything else leaves the camera to open its
+		// own. Same rule as barrierControlFor() on the write path. Deriving keeps
+		// one source of truth — a mirrored second column could disagree with the
+		// access mode it is supposed to follow.
 		//
 		// A camera the cloud does NOT have is deleted outright (documented,
-		// destructive), taking its local settings with it. If that external_id
-		// later reappears it comes back here as a fresh INSERT on the column
-		// defaults — access_mode 'open', barrier_control 'camera', no credentials.
-		// Those defaults are deliberately the SAFE ones (admit everyone, don't
-		// touch the barrier), but on a site whose cameras have had their own
-		// auto-open disabled, 'camera' means nothing opens the boom. Nothing here
-		// can detect that — the physical device config is invisible to us — so the
-		// mitigation is a health check that flags the state wherever it comes
-		// from: see describeCameraRisk().
-		const upd = db.prepare("UPDATE cameras SET name=?, direction=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?");
-		const ins = db.prepare("INSERT INTO cameras (external_id, name, lane_id, direction, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?)");
+		// destructive). If that external_id later reappears it comes back as a
+		// fresh INSERT — access_mode restored from the cloud, but WITHOUT its
+		// credentials, so a pass-only camera would be flagged by
+		// describeCameraRisk() until they are re-entered.
+		const upd = db.prepare(
+			"UPDATE cameras SET name=?, direction=?, access_mode=?, barrier_control=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?",
+		);
+		const ins = db.prepare(
+			"INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, barrier_control, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?,?,?)",
+		);
 		for (const r of rows) {
-			if (upd.run(r.name, r.direction, r.host, r.enabled ? 1 : 0, r.laneExternalId, r.externalId).changes === 0) {
-				ins.run(r.externalId, r.name, r.direction, r.host, r.enabled ? 1 : 0, r.laneExternalId);
+			const accessMode = r.accessMode === "pass_only" ? "pass_only" : "open";
+			const barrierControl = accessMode === "pass_only" ? "app" : "camera";
+			if (upd.run(r.name, r.direction, accessMode, barrierControl, r.host, r.enabled ? 1 : 0, r.laneExternalId, r.externalId).changes === 0) {
+				ins.run(r.externalId, r.name, r.direction, accessMode, barrierControl, r.host, r.enabled ? 1 : 0, r.laneExternalId);
 			}
 		}
 	});

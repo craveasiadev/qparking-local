@@ -107,7 +107,7 @@
       "group": "A · entry",
       "name": "A12 entry_at is stored as UTC ISO with a Z marker",
       "pass": true,
-      "detail": "2026-08-05T11:09:59.747Z"
+      "detail": "2026-08-06T00:23:50.606Z"
     },
     {
       "group": "B · exit routing & free exits",
@@ -341,7 +341,7 @@
       "group": "C · paid exit & the terminal",
       "name": "C10b …and tells the device to abort the deduction (PayCancel)",
       "pass": true,
-      "detail": "{\"orderId\":\"46b95c16bce5d31d1168d4b1d2745697\",\"host\":\"10.0.0.50\",\"port\":80}"
+      "detail": "{\"orderId\":\"f9f9f1e35a195c9bf3349fe06dfa59ec\",\"host\":\"10.0.0.50\",\"port\":80}"
     },
     {
       "group": "C · paid exit & the terminal",
