@@ -29,11 +29,8 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
       external_id: camera.externalId, // durable identity, stable across reinstalls
       name: camera.name,
       direction: camera.direction,
-      // "Only Pass Allow". Mirrored so the setting survives a Push and comes
-      // back on a Pull like every other camera field. Its companion
-      // `barrierControl` is NOT sent — it's derived from this ('pass_only'
-      // implies the app opens the barrier), so a second mirrored column could
-      // only ever drift out of step with this one.
+      // "Only Pass Allow" — governs who is let IN. Mirrored so the setting
+      // survives a Push and comes back on a Pull like every other camera field.
       access_mode: camera.accessMode,
       host: camera.host,
       enabled: camera.enabled,

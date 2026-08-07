@@ -85,7 +85,7 @@ async function main() {
   // ─── site fixtures ──────────────────────────────────────────────────────
   db.saveSettings({
     qparkingBaseUrl: '', qparkingApiKey: '',       // keep the cloud queue inert
-    faceGateEnabled: false, tngEnabled: true,
+    tngEnabled: true,
     exitGracePeriodSeconds: 90,
     minimumChargeCents: 0,
     tngAutoRetrigger: false,
@@ -801,41 +801,56 @@ async function main() {
   // ══════════════════════════════════════════════════════════════════════
   G('I · dev simulator & open-session restore');
   // ══════════════════════════════════════════════════════════════════════
-  const simEntry = await flow.simulateEntryAt(L.zero.id, 'III0001', ENTRY);
+  // The simulator is NOT a separate code path any more (2026-08-07). Both
+  // helpers emit the exact PlateEvent the LPR webhook emits and return as soon
+  // as it is dispatched, so a parking DECISION is never reported through the
+  // return value — it is observed on the DB and the 'warning' channel, exactly
+  // as it would be for a real car. `ok:false` now means only "bad simulator
+  // input" (unknown lane, unparseable time, no camera to route through).
+  //
+  // That equivalence is the point: the old helpers wrote to the DB themselves
+  // and re-implemented the guards, so they drifted — most visibly, a simulated
+  // entry never pulsed the barrier.
+  await flow.simulateEntryAt(L.zero.id, 'III0001', ENTRY);
+  await tick(12);
+  const simSession = db.findOpenSessionByPlate('III0001');
   check('I1 simulateEntryAt opens a session stamped with the chosen entry time',
-    simEntry.ok && db.getSessionById(simEntry.sessionId)?.entryAt === ENTRY,
-    db.getSessionById(simEntry.sessionId)?.entryAt);
-  check('I2 simulateEntryAt refuses a plate that is already inside',
-    /already_inside/.test((await flow.simulateEntryAt(L.zero.id, 'III0001', ENTRY)).error ?? ''));
+    simSession?.entryAt === ENTRY, simSession?.entryAt);
+  check('I1b …via the real entry event, so the barrier is pulsed like a live read',
+    ev.entry.some((e) => e.session?.plate === 'III0001'));
+
+  const beforeRescan = db.listOpenSessions().filter((s) => s.plate === 'III0001').length;
+  await flow.simulateEntryAt(L.zero.id, 'III0001', ENTRY);
+  await tick(12);
+  check('I2 a plate already inside does not open a second session',
+    db.listOpenSessions().filter((s) => s.plate === 'III0001').length === beforeRescan
+    && ev.rescan.some((r) => r.plate === 'III0001'));
   check('I3 simulateEntryAt refuses an invalid entry time',
     (await flow.simulateEntryAt(L.zero.id, 'III0002', 'not-a-date')).error === 'invalid_entry_time');
 
   db.replaceAllBlockedPlates([{ plateNumber: 'BAN0004', vehicleId: 'v-ban-4', reason: 'sim ban', fetchedAt: nowIso }]);
-  const simBanned = await flow.simulateEntryAt(L.zero.id, 'BAN0004', ENTRY);
+  await flow.simulateEntryAt(L.zero.id, 'BAN0004', ENTRY);
+  await tick(12);
   check('I4 simulateEntryAt honours the blacklist, exactly like the camera path',
-    simBanned.ok === false && /blacklisted/.test(simBanned.error ?? '') && !inside('BAN0004'), simBanned.error);
+    !inside('BAN0004') && warnedFor('entry-blacklisted', 'BAN0004'));
   db.replaceAllBlockedPlates([]);
 
-  // I4b — the DEV Entry button bypasses handleEntry and writes to the DB itself,
-  // so every guard has to be mirrored or it simply doesn't apply. It shipped
-  // without the Only Pass Allow check and cheerfully stored a session for an
-  // unregistered plate on a pass-only lane: the simulator contradicting the rule
-  // it exists to test. Both halves are pinned — refuse without a pass, admit with.
-  // Its own lane: the simulator resolves ONE camera from the lane, so a lane
-  // that already has an ordinary entry camera would answer for that one instead.
+  // I4b — Only Pass Allow must bite for a simulated read too. Its own lane: the
+  // simulator resolves the ENTRY-facing camera on the lane, so a lane that
+  // already has an ordinary entry camera would answer for that one instead.
   const simPassLane = db.upsertLane({
     name: 'L-SIM-PASSONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
   });
   const simPassCam = db.upsertCamera({
     name: 'SIM-PASSONLY', laneId: simPassLane.id, direction: 'entry',
-    accessMode: 'pass_only', barrierControl: 'app',
+    accessMode: 'pass_only',
     host: '10.9.9.9', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
     webhookSecret: null, enabled: true,
   });
-  const simNoPass = await flow.simulateEntryAt(simPassLane.id, 'SIMNOPASS', ENTRY);
+  await flow.simulateEntryAt(simPassLane.id, 'SIMNOPASS', ENTRY);
+  await tick(12);
   check('I4b simulateEntryAt refuses an unregistered plate on an Only Pass Allow lane',
-    simNoPass.ok === false && /no valid pass/i.test(simNoPass.error ?? '') && !inside('SIMNOPASS'),
-    simNoPass.error);
+    !inside('SIMNOPASS') && warnedFor('entry-not-authorised', 'SIMNOPASS'));
   check('I4c …and stores NO session for it',
     db.listOpenSessions().every((s) => s.plate !== 'SIMNOPASS'));
 
@@ -843,29 +858,32 @@ async function main() {
     passId: 'p-sim', plateNumber: 'SIMPASS01', passType: 'resident', status: 'active',
     startDate: null, endDate: null, isFree: false, spaceNumber: null, fetchedAt: nowIso,
   }]);
-  const simWithPass = await flow.simulateEntryAt(simPassLane.id, 'SIMPASS01', ENTRY);
-  check('I4d …but admits a plate that does hold a valid pass',
-    simWithPass.ok === true && inside('SIMPASS01'), simWithPass.error);
+  await flow.simulateEntryAt(simPassLane.id, 'SIMPASS01', ENTRY);
+  await tick(12);
+  check('I4d …but admits a plate that does hold a valid pass', inside('SIMPASS01'));
   db.replaceAllSeasonPasses([]);
   db.deleteCamera(simPassCam.id);
   db.deleteLane(simPassLane.id);
+
   const banOpen = open('BAN0005', L.zero.id, C.zeroIn.id, ENTRY);
   db.replaceAllBlockedPlates([{ plateNumber: 'BAN0005', vehicleId: 'v-ban-5', reason: 'sim ban 2', fetchedAt: nowIso }]);
-  const simBanExit = await flow.simulateExitAt(L.zero.id, 'BAN0005', EXIT);
+  await flow.simulateExitAt(L.zero.id, 'BAN0005', EXIT);
+  await tick(12);
   check('I5 simulateExitAt refuses a banned plate before anything else',
-    simBanExit.ok === false && /blacklisted/.test(simBanExit.error ?? '')
-    && db.getSessionById(banOpen.id).status === 'entered', simBanExit.error);
+    db.getSessionById(banOpen.id).status === 'entered' && warnedFor('exit-blacklisted', 'BAN0005'));
   db.replaceAllBlockedPlates([]);
 
-  check('I6 simulateExitAt needs an open session first',
-    /no_open_session/.test((await flow.simulateExitAt(L.zero.id, 'III0003', EXIT)).error ?? ''));
+  await flow.simulateExitAt(L.zero.id, 'III0003', EXIT);
+  await tick(12);
+  check('I6 an exit for a plate with no open session reports exit-without-entry',
+    warnedFor('exit-without-entry', 'III0003'));
 
   const simExit = await flow.simulateExitAt(L.zero.id, 'III0001', EXIT);
   await tick(12);
   check('I7 simulateExitAt prices and closes the stay at the chosen instant',
-    simExit.ok && db.getSessionById(simEntry.sessionId)?.exitAt === EXIT
-    && db.getSessionById(simEntry.sessionId)?.durationMinutes === 240,
-    `${db.getSessionById(simEntry.sessionId)?.exitAt}/${db.getSessionById(simEntry.sessionId)?.durationMinutes}`);
+    simExit.ok && db.getSessionById(simSession.id)?.exitAt === EXIT
+    && db.getSessionById(simSession.id)?.durationMinutes === 240,
+    `${db.getSessionById(simSession.id)?.exitAt}/${db.getSessionById(simSession.id)?.durationMinutes}`);
 
   // Restore path: a rebound box pulls the cloud's open records so cars that
   // drove in before the wipe can still exit.

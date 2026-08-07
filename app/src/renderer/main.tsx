@@ -1,24 +1,21 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
-import { GateView } from './GateView';
 import { SiteProvider } from '../context/SiteContext';
 import './index.css';
 
 /**
- * Same renderer bundle is used by two windows:
- *  - main window → full app (sidebar + pages)
- *  - gate-simulator window → minimal red/green panel (?view=gate)
+ * Single renderer entrypoint — the main window (sidebar + pages).
  *
- * Picking by querystring keeps the bundle to one Vite build with no extra
- * entrypoint config.
+ * The old `?view=gate` branch rendered a full-screen red/green "GATE CLOSED"
+ * simulator window. Removed 2026-08-07: the barrier is real hardware driven by
+ * the camera's IO relay, so a second always-on-top window popping up on every
+ * pulse was pure noise.
  */
-const view = new URLSearchParams(location.search).get('view');
-
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <SiteProvider>
-      {view === 'gate' ? <GateView /> : <App />}
+      <App />
     </SiteProvider>
   </React.StrictMode>,
 );

@@ -381,9 +381,9 @@ export interface BridgeApi {
 	/** LPR listener health — bound port, LAN addresses cameras can reach, camera count. */
 	diagnoseLpr(): Promise<{ port: number; addresses: string[]; cameras: number }>;
 
-	// Gate simulator
-	/** Operator "open barrier" for a lane/camera from the Live display —
-	 *  raises the gate (simulator + face turnstile). */
+	// Barrier
+	/** Operator "open barrier" for a lane/camera — pulses that camera's onboard
+	 *  IO relay unconditionally. `ok` reflects whether the relay actually fired. */
 	manualOpenGate(opts: { cameraId?: number | null; laneId?: number | null }): Promise<{ ok: boolean; note?: string }>;
 
 	listActivityLogs(): Promise<ActivityLog[]>;
@@ -474,7 +474,7 @@ export interface BridgeApi {
 
 	// Stream events to renderer (returns an unsubscribe fn)
 	onEvent(
-		channel: "session" | "log" | "plate-detected" | "gate-state" | "sync-status" | "cloud-pull" | "parking-flow-log" | "app-update-progress",
+		channel: "session" | "log" | "plate-detected" | "sync-status" | "cloud-pull" | "parking-flow-log" | "app-update-progress",
 		cb: (payload: unknown) => void,
 	): () => void;
 }

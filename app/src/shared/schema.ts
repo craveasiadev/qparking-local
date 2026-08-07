@@ -107,29 +107,19 @@ export interface LprCamera {
    * vehicle, pass or not) can be added later without a second migration.
    */
   accessMode: 'open' | 'pass_only';
-  /**
-   * WHO physically opens the barrier for this camera. Deliberately separate from
-   * `accessMode`: "who is allowed in" and "who lifts the boom" are different
-   * questions, and conflating them would force every site onto one answer.
-   *
-   *   'camera' — DEFAULT, and what every install did before 2026-08-05. The
-   *              camera fires its own onboard relay on recognition; this app
-   *              only records. Nothing here can veto it, because the camera
-   *              never asks us — which is precisely why 'pass_only' can't work
-   *              in this mode.
-   *   'app'    — the camera's own auto-open has been DISABLED on the device, and
-   *              qparking-local pulses the relay itself once it has decided.
-   *              This is what makes any access rule actually enforceable, and it
-   *              also makes the blacklist bite at entry for the first time.
-   *
-   * 'pass_only' REQUIRES 'app' — the Cameras form enforces that pairing, since
-   * a pass check on a camera that opens its own barrier is decoration.
-   *
-   * ⚠️ Trade-off of 'app': the barrier now depends on this PC. If qparking-local
-   * isn't running, that lane does not open. Under 'camera' the gate keeps working
-   * regardless of what this machine is doing.
-   */
-  barrierControl: 'camera' | 'app';
+  // REMOVED 2026-08-07: `barrierControl` ('camera' | 'app'). It chose who
+  // physically lifted the boom, and defaulted to 'camera' — meaning this app
+  // recorded the session and pulsed nothing, so the gate never moved unless the
+  // device's own auto-open did it. That default is what "the barrier trigger
+  // doesn't work" actually was.
+  //
+  // qparking-local now ALWAYS opens the barrier for a car it has authorised: it
+  // receives the plate event, checks blacklist → pass → fee, and pulses the
+  // camera's IO relay. A site whose camera firmware also auto-opens switches
+  // that off on the device.
+  //
+  // ⚠️ The trade-off this makes site-wide: the barrier depends on this PC. If
+  // qparking-local isn't running, the lane does not open.
   /** Webhook secret — cameras POSTing /lpr/event must include this header. */
   webhookSecret: string | null;
   enabled: boolean;
@@ -567,16 +557,34 @@ export interface AppSettings {
   qparkingApiKey: string;
   /** Local HTTP port for LPR camera webhooks. */
   lprWebhookPort: number;
-  /** Auto-release gate after this many seconds of waiting at exit if payment doesn't complete. */
+  /**
+   * How long after a car EXITS to keep ignoring fresh entry reads of the same
+   * plate. Default 60s; 0 disables the guard entirely.
+   *
+   * ANPR cameras report the same plate two or three times per pass. At a shared
+   * barrier the exit camera closes the session on its first read, and an entry
+   * camera can then see the SAME departing car — without this window that second
+   * read opens a brand-new entry: a phantom "car inside" for a car that has just
+   * driven out, which then blocks its real next visit with ALREADY INSIDE and
+   * inflates occupancy. Enforced in parking-flow's handleEntry.
+   *
+   * A window this long is safe because re-entering within it is physically
+   * implausible at a barrier — and it is operator-tunable for sites where it
+   * isn't (a short-stay drop-off loop, say).
+   *
+   * NOT an auto-release timer. It has nothing to do with payment: a car whose
+   * charge fails stays put until it is paid or staff release it. The old doc
+   * comment here claimed otherwise for a long time and it was never true.
+   */
   exitGracePeriodSeconds: number;
-  /** Face-auth gate integration (faceapp_main /api/external/open-gate). When
-   *  configured, qparking-local fires this URL after every paid exit so the
-   *  turnstile barrier opens at the same time the receipt prints. */
-  faceappBaseUrl: string;
-  /** Bearer token expected by faceapp's /api/external/open-gate. */
-  faceappApiToken: string;
-  /** Optional managed-device id on faceapp side. Leave 0 to use the default. */
-  faceappDeviceId: number;
+  // REMOVED 2026-08-07: `faceappBaseUrl`, `faceappApiToken`, `faceappDeviceId`
+  // and `faceGateEnabled` — the face-auth turnstile bridge (faceapp_main
+  // /api/external/open-gate). This is a parking app: a barrier is raised by
+  // pulsing the LPR camera's onboard IO relay (see camera-relay.ts), and drivers
+  // stay in their cars, so there was never a face to authenticate. Settings are
+  // key-value and getSettings() only reads keys present in DEFAULT_SETTINGS, so
+  // any rows left in an existing DB are simply ignored.
+  //
   // REMOVED 2026-08-05: `entryCameraHandlesExit`. It let an entry camera also
   // close sessions (first read opens, second read of the same plate closes) for a
   // single shared barrier covered by ONE camera. Retired together with the camera
@@ -589,12 +597,6 @@ export interface AppSettings {
   // which is also what makes the lane derive as 'dual' (see deriveLaneDirection).
   // Camera direction is therefore the ONLY thing that decides entry-vs-exit
   // routing — there is no global override any more.
-  /** Master switch for the faceapp_main turnstile trigger. When ON, every
-   *  successful entry AND every paid exit fires `/api/external/open-gate`
-   *  on the configured faceapp instance — matching real-world parking where
-   *  the LPR-driven barrier and the face-auth turnstile open together.
-   *  When OFF, no faceapp calls are made even if URL/token are filled in. */
-  faceGateEnabled: boolean;
   /** Override for the computed fee — if the policy-based calculation would
    *  return less than this value (in cents), use this instead. 0 disables
    *  the override. Useful when testing the EMV terminal flow without having

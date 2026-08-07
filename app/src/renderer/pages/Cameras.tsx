@@ -16,7 +16,6 @@ const EMPTY: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> = 
 	laneId: null,
 	direction: "entry",
 	accessMode: "open",
-	barrierControl: "camera",
 	host: "",
 	deviceUser: "",
 	devicePassword: "",
@@ -74,38 +73,26 @@ export function Cameras() {
 				return;
 			}
 
-			// Who opens the barrier is DERIVED from the toggle — the form has no
-			// control for it (see the note by the checkbox). It must therefore be
-			// derived on SAVE too, not just for display: a camera saved as
-			// pass_only stores barrier_control='app', and if unticking the toggle
-			// left that value behind, the row would keep claiming this app owns the
-			// barrier with nothing on screen able to change it. That produced a
-			// genuine dead end — the validation below demanded credentials for a
-			// setting the operator could no longer reach, so the camera could not
-			// be saved at all.
-			const barrierControl: LprCamera["barrierControl"] = editing.accessMode === "pass_only" ? "app" : "camera";
-
-			// Opening the relay goes over the camera's SDK, which needs host +
-			// username + password. Saving without them would produce a lane where
-			// every decision succeeds and the gate never moves — nobody gets in,
-			// pass or not. Refuse here rather than let it surface at the barrier.
-			if (barrierControl === "app") {
-				const missing = [
-					!editing.host?.trim() && "host / LAN IP",
-					!editing.deviceUser?.trim() && "device username",
-					!editing.devicePassword?.trim() && "device password",
-				].filter(Boolean);
-				if (missing.length > 0) {
-					setFormError(
-						`"Only Pass Allow" needs this app to open the barrier itself, which requires the camera's ${missing.join(", ")}. ` +
-							`Fill those in, or untick "Only Pass Allow".`,
-					);
-					return;
-				}
+			// This app opens the barrier for every car it authorises, and that goes
+			// over the camera's SDK — which needs host + username + password.
+			// Saving without them would produce a lane where every decision
+			// succeeds and the gate never moves. Refuse here rather than let it
+			// surface at the barrier with a car sitting at it.
+			const missing = [
+				!editing.host?.trim() && "host / LAN IP",
+				!editing.deviceUser?.trim() && "device username",
+				!editing.devicePassword?.trim() && "device password",
+			].filter(Boolean);
+			if (missing.length > 0) {
+				setFormError(
+					`This app opens the barrier itself, which needs the camera's ${missing.join(", ")}. ` +
+						`Fill those in — without them the plate is read and the session recorded, but the boom never moves.`,
+				);
+				return;
 			}
 
 			const isNewCamera = !editing.id;
-			const savedResult = await window.bridge.saveCamera({ ...editing, barrierControl } as any);
+			const savedResult = await window.bridge.saveCamera(editing as any);
 			await window.bridge.insertActivityLog({ 
 				eventKey: "equipment.camera.saved",
 				action: isNewCamera ? "create" : "edit",
@@ -421,11 +408,6 @@ function CameraCard({
 								only pass allow
 							</span>
 						)}
-						{cam.barrierControl === "app" && (
-							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-sky-50 text-sky-700 border-sky-200">
-								app opens barrier
-							</span>
-						)}
 						{cam.risk && (
 							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200">
 								will not open
@@ -623,11 +605,8 @@ function CameraForm({
 								<span className="text-sm font-semibold inline-flex items-center gap-1.5">
 									Only Pass Allow
 									<InfoTip title="Before this works" kind="info">
-										Two things must be true or the lane won't open at all:
-										<strong> (1)</strong> the host, username and password below must be filled in — this app
-										opens the barrier itself in this mode;
-										<strong> (2)</strong> the camera's own auto-open must be switched off in its web
-										interface, or it will keep opening for everyone and this setting does nothing.
+										The camera's own auto-open must be switched off in its web interface, or it
+										will keep opening for everyone and this setting does nothing.
 										<br />
 										<br />
 										A pass created in the cloud only reaches this box on <strong>Sync now</strong> — sync
@@ -635,40 +614,25 @@ function CameraForm({
 									</InfoTip>
 								</span>
 								<span className="block text-[11px] text-gray-500 mt-0.5">
-									Open the barrier only for a vehicle holding a <strong>valid season pass</strong>.
-									Expired passes and blacklisted vehicles are refused and shown ACCESS DENIED —
+									Let a vehicle <strong>in</strong> only if it holds a <strong>valid season pass</strong>.
+									With this off, every vehicle is admitted. Refused vehicles are shown ACCESS DENIED —
 									staff let them through with <strong>Open barrier</strong> on the Live display.
 								</span>
 							</span>
 						</label>
 					</div>
-					{/* Shown rather than hidden on an exit camera. Hiding the control would
-					    not switch it OFF — a camera ticked while set to Entry and later
-					    flipped to Exit would keep enforcing the rule with nothing on screen
-					    to say so, which is worse than a visible setting someone was warned
-					    about. It is also occasionally the right answer (a shared in/out
-					    barrier, or stopping a tailgater leaving), so removing the option
-					    would cost more than it saves. */}
+					{/* This setting governs ENTRY only — the exit flow never reads it (it
+					    asks "does this vehicle hold a pass?" regardless, then prices the
+					    stay). Say so on an exit camera rather than hiding the control,
+					    which would leave a ticked box invisible after a direction change. */}
 					{value.accessMode === "pass_only" && value.direction === "exit" && (
 						<div className="sm:col-span-2 -mt-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
-							<strong>Usually not needed on an exit camera.</strong> If entry is already
-							pass-checked, everyone inside holds a pass, so there is nobody to stop on the way out.
-							Turning it on here means a vehicle inside <em>without</em> a valid pass — a tailgater, or a
-							resident whose pass expired while parked — <strong>cannot leave</strong> until staff release
-							it manually. Only enable it if one camera covers both directions, or you specifically want
-							to stop vehicles leaving.
+							<strong>Has no effect on an exit camera.</strong> This setting only decides who is let
+							<em> in</em>. On the way out every vehicle is checked for a pass anyway — pass holders
+							exit free, everyone else is priced and charged — so leaving it ticked here changes
+							nothing. Set it on the <strong>entry</strong> camera instead.
 						</div>
 					)}
-					{/* NOT exposed on the form. Who opens the barrier is DERIVED from the
-					    toggle above, because there is only one sensible answer either way:
-					      Only Pass Allow ON  → we decide, so we must also open (the camera's
-					                            own auto-open has to be off, or the check is
-					                            decoration).
-					      Only Pass Allow OFF → the camera opens its own relay, exactly as
-					                            every install did before this feature.
-					    The column still exists and upsertCamera still honours it, so a site
-					    that ever needs "admit everyone, but the app opens the boom" can have
-					    it re-exposed without a migration. */}
 					{/* Camera LAN IP — all that live video needs. The main process pulls
               rtsp://<host>:8557/h264 and transcodes it for the Live display. */}
 					<Field label="Camera host / LAN IP">

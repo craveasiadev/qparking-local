@@ -36,7 +36,7 @@ try {
   // payment device. We only care about whether a session row gets created.
   db.saveSettings({
     qparkingBaseUrl: '', qparkingApiKey: '',
-    faceGateEnabled: false, tngEnabled: false,
+    tngEnabled: false,
     exitGracePeriodSeconds: 90,
   });
 
@@ -357,8 +357,8 @@ try {
   // 1. Resident with a valid open-ended pass → in.
   readOn(poIn.id, 'RES0001', 'entry');
   check('pass-only: valid pass is admitted', isInside('RES0001'));
-  check('pass-only: …and the APP is marked as barrier owner',
-    entries.some((e) => e.session?.plate === 'RES0001' && e.barrier === 'app'));
+  check('pass-only: …and the entry event fires, so the barrier opens',
+    entries.some((e) => e.session?.plate === 'RES0001'));
 
   // 2. Unregistered vehicle → refused outright. THE point of the feature.
   readOn(poIn.id, 'NOPASS01', 'entry');
@@ -382,127 +382,122 @@ try {
   // 5. Exit: the pass holder leaves free, with no terminal wired to the lane.
   readOn(poOut.id, 'RES0001', 'exit');
   await new Promise((r) => setTimeout(r, 30));
-  check('pass-only exit: session closed', !isInside('RES0001'));
-  check('pass-only exit: free, credited to the pass, no terminal involved',
-    completed.some((c) => c.passId === 'p-res' && c.outcome === 'free' && c.barrier === 'app')
+  check('exit with a pass: session closed', !isInside('RES0001'));
+  check('exit with a pass: free, credited to the pass, no terminal involved',
+    completed.some((c) => c.passId === 'p-res' && c.outcome === 'free')
     && !warned.some((w) => w.kind === 'exit-no-terminal' && w.plate === 'RES0001'));
 
-  // 6. Exit with no pass → refused. Covers the tailgater and the lapsed
-  //    resident alike: nothing recorded, barrier down, operator handles it.
+  // 6. Exit with NO pass, on a pass-only camera. Since 2026-08-07 the exit flow
+  //    ignores accessMode entirely: everyone may leave, pass holders free and
+  //    everyone else priced. So this is NOT refused — it is charged like any
+  //    transient. (It used to be held at the barrier, which stranded a tailgater
+  //    AND a resident whose pass lapsed mid-stay.)
+  //    This lane has no terminal wired, so a non-zero fee reports exit-no-terminal;
+  //    what matters here is that the pass check, not the camera mode, decided it.
   const ghost = db.createEntrySession('GHOST01', poLane.id, poIn.id, null);
   readOn(poOut.id, 'GHOST01', 'exit');
   await new Promise((r) => setTimeout(r, 30));
-  check('pass-only exit: no pass → refused', !!db.findOpenSessionByPlate('GHOST01'));
-  check('pass-only exit: …session left OPEN for the operator',
-    db.getSessionById(ghost.id).status === 'entered');
-  check('pass-only exit: …and reports exit-not-authorised',
-    warned.some((w) => w.kind === 'exit-not-authorised' && w.plate === 'GHOST01'));
+  check('exit without a pass: NOT refused for lacking a pass',
+    !warned.some((w) => w.kind === 'exit-not-authorised' && w.plate === 'GHOST01'));
+  check('exit without a pass: priced as a transient, never credited to a pass',
+    !completed.some((c) => c.sessionId === ghost.id && c.passId));
 
   // 7. Pass holder whose entry was never recorded still gets out (misread /
   //    entry camera down), and it's flagged so a failing camera surfaces.
   readOn(poOut.id, 'RES0001', 'exit');
   await new Promise((r) => setTimeout(r, 30));
-  check('pass-only exit: pass holder with no open session is released',
+  check('exit with a pass: pass holder with no open session is released',
     warned.some((w) => w.kind === 'exit-pass-holder-no-entry' && w.plate === 'RES0001'));
 
-  // 8. Regression: an 'open' camera is completely untouched by all of this —
-  //    no pass needed, and the app does NOT claim the barrier.
+  // 8. Regression: an 'open' camera admits everyone with no pass, and the entry
+  //    event fires — which is what makes the barrier open (index.ts pulses on
+  //    every 'entry' event; there is no per-camera opt-out any more).
   readOn(cam.id, 'ORDINARY1', 'entry');
   check('open camera: unregistered plate still admitted (flow unchanged)', isInside('ORDINARY1'));
-  check('open camera: barrier stays camera-owned (no new pulse)',
-    entries.some((e) => e.session?.plate === 'ORDINARY1' && e.barrier === 'camera'));
+  check('open camera: the entry event fires, so the barrier opens',
+    entries.some((e) => e.session?.plate === 'ORDINARY1'));
 
-  // ─── barrier control, independent of access mode ─────────────────────────
-  // "Who may enter" and "who lifts the boom" are separate settings. A site that
-  // has switched its camera's auto-open off still wants everyone admitted — but
-  // now nothing opens unless THIS app pulses.
+  // ─── the app always opens the barrier ────────────────────────────────────
+  // barrierControl was removed 2026-08-07. Authorisation is now expressed purely
+  // by WHICH event fires: 'entry' / 'exit-completed' mean the boom rises, a
+  // 'warning' means it stays down. These checks pin that there is no second
+  // opinion left to consult — no payload flag, no camera setting.
   const acLane = db.upsertLane({ name: 'L-APPCTRL', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
   const acIn = db.upsertCamera({
     name: 'AC-IN', laneId: acLane.id, direction: 'entry',
-    accessMode: 'open', barrierControl: 'app',
+    accessMode: 'open',
     host: '10.0.0.30', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
     webhookSecret: null, enabled: true,
   });
   const acOut = db.upsertCamera({
     name: 'AC-OUT', laneId: acLane.id, direction: 'exit',
-    accessMode: 'open', barrierControl: 'app',
+    accessMode: 'open',
     host: '10.0.0.31', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
     webhookSecret: null, enabled: true,
   });
-  check('barrierControl persists as app', db.getCamera(acIn.id).barrierControl === 'app');
-  check('barrierControl defaults to camera', db.getCamera(cam.id).barrierControl === 'camera');
 
   readOn(acIn.id, 'ANYCAR01', 'entry');
-  check('app-controlled + open access: any plate admitted', isInside('ANYCAR01'));
-  check('app-controlled + open access: the APP owns the barrier',
-    entries.some((e) => e.session?.plate === 'ANYCAR01' && e.barrier === 'app'));
+  check('open access: any plate admitted', isInside('ANYCAR01'));
+  check('open access: entry event carries no barrier-ownership flag',
+    entries.some((e) => e.session?.plate === 'ANYCAR01' && e.barrier === undefined));
 
-  // The exit side must carry it too, or a car would be let out in the DB while
-  // the boom stayed down.
   readOn(acOut.id, 'ANYCAR01', 'exit');
   await new Promise((r) => setTimeout(r, 30));
-  check('app-controlled exit: session closed', !isInside('ANYCAR01'));
-  check('app-controlled exit: barrier marked app-owned on the completion event',
-    completed.some((c) => c.barrier === 'app' && c.cameraId === acOut.id));
+  check('exit: session closed', !isInside('ANYCAR01'));
+  check('exit: completion event fires with the exit camera id (the relay to pulse)',
+    completed.some((c) => c.cameraId === acOut.id && c.barrier === undefined));
 
-  // Blacklist becomes genuinely enforceable once the app owns the barrier —
-  // previously the camera opened regardless of what we decided.
+  // The blacklist is genuinely enforceable now the app owns every barrier.
   db.replaceAllBlockedPlates([{ plateNumber: 'BANNED99', vehicleId: 'v-9', reason: 'unpaid', fetchedAt: nowIso }]);
   readOn(acIn.id, 'BANNED99', 'entry');
-  check('app-controlled: blacklisted plate creates no session and no pulse',
+  check('blacklisted plate creates no session and no pulse',
     !isInside('BANNED99') && !entries.some((e) => e.session?.plate === 'BANNED99'));
   db.replaceAllBlockedPlates([]);
 
-  // pass_only must imply app control even if someone writes 'camera' — a pass
-  // check on a camera that opens its own relay is decoration.
-  const coerced = db.upsertCamera({
-    name: 'COERCE-CAM', laneId: null, direction: 'entry',
-    accessMode: 'pass_only', barrierControl: 'camera',
-    host: '10.0.0.32', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
-    webhookSecret: null, enabled: true,
-  });
-  check('pass_only forces barrierControl=app even when told otherwise',
-    db.getCamera(coerced.id).barrierControl === 'app');
-
-  // Turning Only Pass Allow back OFF must release barrier control with it. The
-  // form derives barrierControl from the toggle and sends it on save; if that
-  // derivation were dropped, the row would keep barrier_control='app' with no
-  // control left on screen able to clear it — and the credential validation
-  // would then refuse to save the camera at all. A dead end, reachable by simply
-  // unticking the box.
-  db.upsertCamera({
-    id: coerced.id, name: 'COERCE-CAM', laneId: null, direction: 'entry',
-    accessMode: 'open', barrierControl: 'camera',
-    host: '10.0.0.32', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
-    webhookSecret: null, enabled: true,
-  });
-  // `released` is already taken further up by the manual-release checks.
-  const releasedCam = db.getCamera(coerced.id);
-  check('turning pass_only OFF releases barrier control back to the camera',
-    releasedCam.accessMode === 'open' && releasedCam.barrierControl === 'camera',
-    JSON.stringify({ a: releasedCam.accessMode, b: releasedCam.barrierControl }));
-  check('…and the camera is then flagged as no risk',
-    db.describeCameraRisk(releasedCam) === null, String(db.describeCameraRisk(releasedCam)));
+  // ─── the simulator must route through the RIGHT camera ───────────────────
+  // Root cause of "the exit didn't calculate a price, it just showed free":
+  // simulateExitAt picked `listCameras().find(laneId && enabled)` — ANY camera
+  // on the lane, which on a lane with both an entry and an exit camera is the
+  // ENTRY one (lower id). Every access decision keys off event.cameraId, so the
+  // exit was then judged by the ENTRY camera's settings: with Only Pass Allow
+  // set there, a pass holder took the old pass-only exit branch and left free
+  // with no fee computed at all.
+  //
+  // acLane has AC-IN (entry) and AC-OUT (exit), so it reproduces the shape.
+  const simIn = await flow.simulateEntryAt(acLane.id, 'ROUTE001', nowIso);
+  check('simulateEntryAt routes through the ENTRY-facing camera',
+    simIn.ok && simIn.cameraId === acIn.id, JSON.stringify(simIn));
+  const simOut = await flow.simulateExitAt(acLane.id, 'ROUTE001', new Date().toISOString());
+  await new Promise((r) => setTimeout(r, 30));
+  check('simulateExitAt routes through the EXIT-facing camera, not just "any camera"',
+    simOut.ok && simOut.cameraId === acOut.id, JSON.stringify(simOut));
+  check('…so the exit is recorded against the exit camera',
+    completed.some((c) => c.cameraId === acOut.id));
 
   // ─── health check: the silent failure states ─────────────────────────────
   // These are invisible in the UI otherwise — the camera looks fine right up
   // until a car is sitting at a boom that will never lift.
   const noCreds = db.upsertCamera({
     name: 'RISKY', laneId: null, direction: 'entry',
-    accessMode: 'open', barrierControl: 'app',
+    accessMode: 'open',
     host: '', deviceUser: null, devicePassword: null, devicePort: null,
     webhookSecret: null, enabled: true,
   });
-  check('risk: app-owned barrier with no credentials is flagged',
+  check('risk: a camera with no credentials is flagged',
     /will not open/i.test(db.describeCameraRisk(db.getCamera(noCreds.id)) ?? ''),
     String(db.describeCameraRisk(db.getCamera(noCreds.id))));
   check('risk: listCameras surfaces it on the row',
     !!db.listCameras().find((c) => c.id === noCreds.id)?.risk);
-  check('risk: a properly configured app-owned camera is NOT flagged',
+  check('risk: a properly configured camera is NOT flagged',
     db.describeCameraRisk(db.getCamera(acIn.id)) === null,
     String(db.describeCameraRisk(db.getCamera(acIn.id))));
-  check('risk: an ordinary camera-owned camera is NOT flagged',
-    db.describeCameraRisk(db.getCamera(cam.id)) === null);
+  // Every camera needs credentials now — this app opens every barrier, so the
+  // same missing password that used to be harmless is the reason the boom never
+  // moves. Flagging it is the point: silence here is what "the trigger doesn't
+  // work" actually looked like.
+  check('risk: the default fixture camera (no password) IS flagged',
+    /will not open/i.test(db.describeCameraRisk(db.getCamera(cam.id)) ?? ''),
+    String(db.describeCameraRisk(db.getCamera(cam.id))));
 
 
   // ─── webhook direction coercion (2026-08-05) ─────────────────────────────
@@ -519,16 +514,26 @@ try {
   const PORT = 6099;
   webhook.startLprServer(PORT);
 
-  const post = (body) => new Promise((resolve) => {
+  const postTo = (path, body) => new Promise((resolve) => {
     const payload = Buffer.from(JSON.stringify(body));
     const req = require('node:http').request(
-      { host: '127.0.0.1', port: PORT, path: '/lpr/event', method: 'POST',
+      { host: '127.0.0.1', port: PORT, path, method: 'POST',
         headers: { 'content-type': 'application/json', 'content-length': payload.length } },
-      (res) => { const c = []; res.on('data', (d) => c.push(d)); res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}'))); },
+      (res) => {
+        const c = [];
+        res.on('data', (d) => c.push(d));
+        res.on('end', () => {
+          const raw = Buffer.concat(c).toString() || '{}';
+          let parsed = {};
+          try { parsed = JSON.parse(raw); } catch { parsed = { raw }; }
+          resolve({ ...parsed, statusCode: res.statusCode });
+        });
+      },
     );
     req.on('error', () => resolve({}));
     req.end(payload);
   });
+  const post = (body) => postTo('/lpr/event', body);
 
   // Give the listener a moment to bind before the first request.
   await new Promise((r) => setTimeout(r, 250));
@@ -554,20 +559,90 @@ try {
   check('webhook: omitting direction uses the camera default',
     implied.direction === 'exit', JSON.stringify(implied));
 
+  // ─── the vendor's own push path (2026-08-07) ─────────────────────────────
+  // Hangzhou-family firmware posts to /devicemanagement/php/quickplateresult.php
+  // by default, and some builds have no field to change it. We used to 404 every
+  // one of those, telling the operator to "point the camera at POST /lpr/event"
+  // — advice that cannot be followed on firmware with no such setting.
+  const vendorPath = await postTo('/devicemanagement/php/quickplateresult.php',
+    { cameraId: camExit.id, plate: 'VENDOR01' });
+  check('webhook: the vendor default push path is accepted, not 404d',
+    vendorPath.ok === true && vendorPath.direction === 'exit', JSON.stringify(vendorPath));
+
+  // …but an unrelated path is still refused, so this widened the door, not the trust.
+  const notAPlatePath = await postTo('/admin/whatever', { cameraId: camExit.id, plate: 'VENDOR02' });
+  check('webhook: an unrelated path is still rejected',
+    notAPlatePath.statusCode === 404, JSON.stringify(notAPlatePath));
+
+  // ─── the same read arriving twice (2026-08-07) ───────────────────────────
+  // Accepting the vendor's default push path as well as /lpr/event means a
+  // camera that posts to BOTH turns one car into two identical events, seconds
+  // apart. Collapsed at the door so the flow's own guards stay reserved for real
+  // second passes.
+  const dedupeCam = db.upsertCamera({
+    name: 'DEDUPE-CAM', laneId: null, direction: 'entry',
+    accessMode: 'open', host: '10.0.0.88',
+    deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: true,
+  });
+  const firstPost = await postTo('/lpr/event', { cameraId: dedupeCam.id, plate: 'TWICE001' });
+  const secondPost = await postTo('/devicemanagement/php/quickplateresult.php',
+    { cameraId: dedupeCam.id, plate: 'TWICE001' });
+  check('webhook: the first of two identical reads is processed',
+    firstPost.ok === true && !firstPost.ignored, JSON.stringify(firstPost));
+  check('webhook: the second, on the OTHER path, is collapsed as a duplicate',
+    secondPost.ok === true && secondPost.ignored === 'duplicate_read', JSON.stringify(secondPost));
+  check('webhook: …and it opened exactly ONE session, not two',
+    db.listOpenSessions().filter((s) => s.plate === 'TWICE001').length === 1);
+  // A DIFFERENT plate on the same camera is never a duplicate.
+  const otherPlate = await postTo('/lpr/event', { cameraId: dedupeCam.id, plate: 'TWICE002' });
+  check('webhook: a different plate on the same camera still gets through',
+    otherPlate.ok === true && !otherPlate.ignored, JSON.stringify(otherPlate));
+  db.deleteCamera(dedupeCam.id);
+
+  // ─── two rows, one physical camera: ENABLED wins (2026-08-07) ────────────
+  // A camera set up twice at the same IP — a first attempt left switched off,
+  // then a working row — used to resolve to whichever had the LOWER id. When
+  // that was the disabled leftover, every read from the live camera was
+  // discarded as 'camera_disabled', naming the wrong camera as the reason.
+  const SHARED_IP = '10.0.0.77';
+  const staleRow = db.upsertCamera({
+    name: 'STALE-DUPLICATE', laneId: acLane.id, direction: 'entry',
+    accessMode: 'open', host: SHARED_IP,
+    deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: false,          // ← switched off, lower id
+  });
+  const liveRow = db.upsertCamera({
+    name: 'LIVE-DUPLICATE', laneId: acLane.id, direction: 'exit',
+    accessMode: 'open', host: SHARED_IP,
+    deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: true,           // ← the one actually wired up
+  });
+  check('precondition: the disabled duplicate really does sort first',
+    staleRow.id < liveRow.id);
+  const dupe = await postTo('/lpr/event', {
+    AlarmInfoPlate: { ipaddr: SHARED_IP, result: { PlateResult: { license: 'DUPE0001' } } },
+  });
+  check('webhook: an enabled camera wins over a disabled one at the same IP',
+    dupe.cameraId === liveRow.id, JSON.stringify(dupe));
+  check('webhook: …so the read is routed by the LIVE row\'s direction (exit)',
+    dupe.direction === 'exit', JSON.stringify(dupe));
+  db.deleteCamera(staleRow.id);
+  db.deleteCamera(liveRow.id);
+
   webhook.stopLprServer();
 
   // ─── cloud pull: what survives and what doesn't ──────────────────────────
   // NOTE: reconcileCamerasFromCloud([]) DELETES EVERY CAMERA, so this block runs
   // last — anything after it would be testing against an empty table.
   // reconcileCamerasFromCloud deletes local rows the cloud doesn't have and
-  // re-inserts the ones it does. The cloud carries no access_mode /
-  // barrier_control / credentials, so a re-inserted row used to come back on the
-  // column defaults. With the device's own auto-open switched off, reverting to
-  // barrier_control='camera' means NOTHING opens the barrier — a dead entrance,
-  // with no error to explain it.
+  // re-inserts the ones it does. The cloud carries no credentials, so a
+  // re-inserted row comes back without them — and since this app opens every
+  // barrier, that row is a dead entrance until they're re-entered. The risk flag
+  // is the only thing that surfaces it, which is why it's pinned below.
   const wlCam = db.upsertCamera({
     name: 'PULL-TEST', laneId: null, direction: 'entry',
-    accessMode: 'pass_only', barrierControl: 'app',
+    accessMode: 'pass_only',
     host: '10.0.0.40', deviceUser: 'admin', devicePassword: 's3cret', devicePort: 8080,
     webhookSecret: 'hook-1', enabled: true,
   });
@@ -580,8 +655,8 @@ try {
   ]);
   const afterUpdate = db.listCameras().find((c) => c.externalId === wlExternal);
   check('cloud pull: access mode is restored from the cloud row',
-    afterUpdate?.accessMode === 'pass_only' && afterUpdate?.barrierControl === 'app',
-    JSON.stringify({ a: afterUpdate?.accessMode, b: afterUpdate?.barrierControl }));
+    afterUpdate?.accessMode === 'pass_only',
+    JSON.stringify({ a: afterUpdate?.accessMode }));
   check('cloud pull: LAN-only credentials survive the update path',
     afterUpdate?.deviceUser === 'admin' && afterUpdate?.devicePassword === 's3cret',
     JSON.stringify({ u: afterUpdate?.deviceUser }));
@@ -593,16 +668,8 @@ try {
   ]);
   const afterOff = db.listCameras().find((c) => c.externalId === wlExternal);
   check('cloud pull: access mode OFF in the cloud clears it locally',
-    afterOff?.accessMode === 'open' && afterOff?.barrierControl === 'camera',
-    JSON.stringify({ a: afterOff?.accessMode, b: afterOff?.barrierControl }));
-
-  // barrier_control is derived, never mirrored — a cloud row carries no such
-  // field, so it must always follow the access mode it arrived with.
-  db.reconcileCamerasFromCloud([
-    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
-  ]);
-  check('cloud pull: barrier control is re-derived, not mirrored',
-    db.listCameras().find((c) => c.externalId === wlExternal)?.barrierControl === 'app');
+    afterOff?.accessMode === 'open',
+    JSON.stringify({ a: afterOff?.accessMode }));
 
   // A camera the cloud does NOT list is DELETED — documented, destructive, and
   // it takes the local-only settings with it. Pin the honest behaviour: the row
@@ -621,8 +688,8 @@ try {
   ]);
   const afterReinsert = db.listCameras().find((c) => c.externalId === wlExternal);
   check('cloud pull: a re-created camera gets its access mode back from the cloud',
-    afterReinsert?.accessMode === 'pass_only' && afterReinsert?.barrierControl === 'app',
-    JSON.stringify({ a: afterReinsert?.accessMode, b: afterReinsert?.barrierControl }));
+    afterReinsert?.accessMode === 'pass_only',
+    JSON.stringify({ a: afterReinsert?.accessMode }));
   check('cloud pull: …but NOT the LAN-only credentials, and the risk is flagged',
     !afterReinsert?.deviceUser && !!afterReinsert?.risk,
     JSON.stringify({ u: afterReinsert?.deviceUser, risk: afterReinsert?.risk }));
@@ -635,8 +702,8 @@ try {
   ]);
   const legacy = db.listCameras().find((c) => c.externalId === 'legacy-cam');
   check('cloud pull: a row with no access_mode defaults to open (fail-open)',
-    legacy?.accessMode === 'open' && legacy?.barrierControl === 'camera',
-    JSON.stringify({ a: legacy?.accessMode, b: legacy?.barrierControl }));
+    legacy?.accessMode === 'open',
+    JSON.stringify({ a: legacy?.accessMode }));
 
   out.ok = out.checks.every((c) => c.pass);
 } catch (e) {

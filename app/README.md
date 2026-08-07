@@ -257,12 +257,11 @@ app/
 │   ├── main/                 ⚡ ELECTRON — desktop shell (runs in Node)
 │   │   ├── index.ts            entry: window, tray, services, IPC handlers
 │   │   ├── preload.ts          the window.bridge (React ↔ Node door)
-│   │   ├── gate-simulator.ts   red/green gate window
 │   │   ├── app-update.ts       self-updater
 │   │   └── services/         🟢 NODE.JS — backend logic
 │   │       └── …
 │   ├── renderer/             ⚛️ REACT — the UI
-│   │   ├── main.tsx, App.tsx, GateView.tsx
+│   │   ├── main.tsx, App.tsx
 │   │   ├── pages/*.tsx
 │   │   └── hooks/
 │   └── shared/               🔗 TypeScript types used by BOTH sides
@@ -281,7 +280,6 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 |------|---------|
 | `index.ts` | App entry: opens window + tray, starts every service, registers all `ipcMain.handle(...)` endpoints. Keeps the app alive when the window closes. |
 | `preload.ts` | The bridge — exposes the safe `window.bridge.*` surface to React. The single most useful file to see what the UI can do. |
-| `gate-simulator.ts` | The always-on-top red/green gate window. |
 | `app-update.ts` | Self-updater: check the cloud for a newer build → stream-download it → relaunch. Talks to the cloud via `services/cloud-api.ts` like everything else. |
 
 ### `src/main/services/` (Node backend 🟢)
@@ -294,7 +292,7 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 | `parking-flow.ts` | The brain: entry vs exit, fee calculation, drives the terminal, records the result, opens the gate. |
 | `ecpi-terminal.ts` | Payment-terminal driver over a raw TCP socket (heartbeat + state machine). |
 | `w4g-tng.ts` | Touch'n'Go integration — a parallel payment path via the W4G IO-controller. Deliberately hand-rolled HTTP (no axios): the device firmware is byte-picky about header order + JSON spacing. |
-| `face-gate.ts` | Calls the face-auth turnstile's HTTP API to raise the barrier (its own axios client — different server, different token). |
+| `camera-relay.ts` | **Raises the barrier.** Pulses the LPR camera's onboard IO relay over the vendor's native SDK (`VzLPRClient_SetIOOutputAuto`). The only thing in the app that moves a boom. |
 | `qparking-sync.ts` | **Pull** from the Laravel API: `GET /rate-policies`, `/season-passes`, `/parking-spaces`, `/gate-commands/pending`; `PUT /rate-policies/upsert` pushes rate edits back up. |
 | `sync-queue.ts` | **Push** to the Laravel API: `POST /parking-records`, with exponential-backoff retries so a WAN outage never drops a record. |
 | `camera-snapshots.ts` | Fetches live JPEG snapshots from cameras (UI preview) and uploads them to the cloud on a 10s timer. |

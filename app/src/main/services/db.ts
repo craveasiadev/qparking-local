@@ -225,11 +225,16 @@ function applySchema(db: Database.Database) {
       -- a future mode must not require a table rebuild on live sites, and the
       -- flow treats any unknown value as 'open' (fail-open, never fail-shut).
       access_mode TEXT NOT NULL DEFAULT 'open',
-      -- Who lifts the boom: 'camera' (the device's own relay logic — the
-      -- pre-2026-08-05 behaviour, and the safe default) or 'app' (we pulse it).
-      -- Unconstrained for the same reason as access_mode; unknown reads as
-      -- 'camera', i.e. leave the barrier alone.
-      barrier_control TEXT NOT NULL DEFAULT 'camera',
+      -- RETIRED 2026-08-07, kept only so existing DBs (where it is NOT NULL)
+      -- still accept inserts that omit it. Nothing reads or writes it any more.
+      --
+      -- It chose who lifted the boom: 'camera' (the device's own relay logic,
+      -- and the shipped default) or 'app'. In practice the default meant this
+      -- app recorded the session and then pulsed nothing, so the gate simply
+      -- never moved — indistinguishable from a broken trigger. The app now
+      -- always opens the barrier for a car it has authorised; a site whose
+      -- camera firmware also auto-opens switches that off on the device.
+      barrier_control TEXT NOT NULL DEFAULT 'app',
       host TEXT,
       webhook_secret TEXT,
       enabled INTEGER NOT NULL DEFAULT 1,
@@ -644,7 +649,10 @@ function applySchema(db: Database.Database) {
 	for (const col of [
 		"host TEXT", "device_user TEXT", "device_password TEXT", "device_port INTEGER",
 		"access_mode TEXT NOT NULL DEFAULT 'open'",
-		"barrier_control TEXT NOT NULL DEFAULT 'camera'",
+		// Retired 2026-08-07 and no longer read, but still added on upgrade: the
+		// column is NOT NULL on installs that already have it, and dropping a
+		// column means a full table rebuild for no behavioural gain.
+		"barrier_control TEXT NOT NULL DEFAULT 'app'",
 	]) {
 		try {
 			db.exec(`ALTER TABLE cameras ADD COLUMN ${col}`);
@@ -1032,11 +1040,10 @@ const DEFAULT_SETTINGS: AppSettings = {
 	qparkingBaseUrl: "",
 	qparkingApiKey: "",
 	lprWebhookPort: 6001,
-	exitGracePeriodSeconds: 90,
-	faceappBaseUrl: "",
-	faceappApiToken: "",
-	faceappDeviceId: 0,
-	faceGateEnabled: true,
+	// 60s (was 90s until 2026-08-07). Long enough to swallow a departing car's
+	// duplicate reads, short enough that a genuine quick return isn't refused.
+	// Operator-tunable on the Settings page.
+	exitGracePeriodSeconds: 60,
 	minimumChargeCents: 0,
 	devMode: false,
 	paymentController: "tng",
@@ -1156,9 +1163,6 @@ function rowToCamera(row: any): LprCamera {
 		// deliberate choice: a corrupt value must never silently lock a site's
 		// residents out of their own building.
 		accessMode: row.access_mode === "pass_only" ? "pass_only" : "open",
-		// Same fail-safe direction as accessMode: anything unrecognised means
-		// "don't touch the barrier", never "start driving it".
-		barrierControl: row.barrier_control === "app" ? "app" : "camera",
 		webhookSecret: row.webhook_secret,
 		host: row.host ?? null,
 		deviceUser: row.device_user ?? null,
@@ -1185,21 +1189,17 @@ function rowToCamera(row: any): LprCamera {
  * from an older backup.
  */
 export function describeCameraRisk(camera: LprCamera): string | null {
-	const appOwnsBarrier = camera.barrierControl === "app" || camera.accessMode === "pass_only";
-	if (appOwnsBarrier) {
-		const missing = [
-			!camera.host?.trim() && "host",
-			!camera.deviceUser?.trim() && "device username",
-			!camera.devicePassword?.trim() && "device password",
-		].filter(Boolean);
-		if (missing.length > 0) {
-			return `This app is set to open the barrier but cannot reach the camera — missing ${missing.join(", ")}. The gate will not open for anyone until this is fixed.`;
-		}
-	}
-	if (camera.accessMode === "pass_only" && camera.barrierControl !== "app") {
-		// upsertCamera coerces this, so reaching it means the row was written by
-		// something else entirely.
-		return "Set to pass holders only, but the camera opens its own barrier — the pass check cannot actually stop anyone.";
+	// This app opens the barrier for every car it authorises, and that goes over
+	// the camera's SDK — so every camera needs host + credentials. Without them
+	// the flow decides correctly and the boom never moves, which is the single
+	// most confusing failure this app has: sessions appear, nothing opens.
+	const missing = [
+		!camera.host?.trim() && "host",
+		!camera.deviceUser?.trim() && "device username",
+		!camera.devicePassword?.trim() && "device password",
+	].filter(Boolean);
+	if (missing.length > 0) {
+		return `This app cannot reach the camera to open the barrier — missing ${missing.join(", ")}. Sessions will still be recorded, but the gate will not open for anyone until this is fixed.`;
 	}
 	return null;
 }
@@ -1215,31 +1215,17 @@ export function getCamera(id: number): LprCamera | null {
 	return row ? rowToCamera(row) : null;
 }
 
-/**
- * Normalise barrier_control on write, and enforce the one invariant the pairing
- * has: 'pass_only' is meaningless unless THIS app owns the barrier, because a
- * camera opening its own relay never asks us whether the plate has a pass. The
- * UI blocks that combination too, but this is the backstop — an equipment pull,
- * a hand-edited row or a future caller must not be able to create a lane that
- * reports "pass holders only" while waving everyone through.
- */
-function barrierControlFor(camera: { accessMode?: string; barrierControl?: string }): "camera" | "app" {
-	if (camera.accessMode === "pass_only") return "app";
-	return camera.barrierControl === "app" ? "app" : "camera";
-}
-
 export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> & { id?: number; externalId?: string }): LprCamera {
 	const db = getDb();
 	if (camera.id) {
 		// external_id is immutable device identity — never rewritten on edit.
 		db.prepare(
-			`UPDATE cameras SET name=?, lane_id=?, direction=?, access_mode=?, barrier_control=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE cameras SET name=?, lane_id=?, direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		).run(
 			camera.name,
 			camera.laneId,
 			camera.direction,
 			camera.accessMode === "pass_only" ? "pass_only" : "open",
-			barrierControlFor(camera),
 			camera.host,
 			camera.deviceUser,
 			camera.devicePassword,
@@ -1253,7 +1239,7 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 	const externalId = camera.externalId ?? `dev-${randomUUID()}`;
 	const info = db
 		.prepare(
-			`INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, barrier_control, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		)
 		.run(
 			externalId,
@@ -1261,7 +1247,6 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 			camera.laneId,
 			camera.direction,
 			camera.accessMode === "pass_only" ? "pass_only" : "open",
-			barrierControlFor(camera),
 			camera.host,
 			camera.deviceUser,
 			camera.devicePassword,
@@ -1488,28 +1473,25 @@ export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
 		// secret are still LAN-only and never leave this box, so a surviving row
 		// keeps its own and a re-created one comes back without them.
 		//
-		// barrier_control is DERIVED here rather than mirrored: 'pass_only' implies
-		// this app opens the barrier, anything else leaves the camera to open its
-		// own. Same rule as barrierControlFor() on the write path. Deriving keeps
-		// one source of truth — a mirrored second column could disagree with the
-		// access mode it is supposed to follow.
+		// barrier_control is gone (2026-08-07) — this app opens the barrier for
+		// every car it authorises, so there is nothing left for a pull to derive
+		// or overwrite.
 		//
 		// A camera the cloud does NOT have is deleted outright (documented,
 		// destructive). If that external_id later reappears it comes back as a
 		// fresh INSERT — access_mode restored from the cloud, but WITHOUT its
-		// credentials, so a pass-only camera would be flagged by
-		// describeCameraRisk() until they are re-entered.
+		// credentials, so it is flagged by describeCameraRisk() until they are
+		// re-entered.
 		const upd = db.prepare(
-			"UPDATE cameras SET name=?, direction=?, access_mode=?, barrier_control=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?",
+			"UPDATE cameras SET name=?, direction=?, access_mode=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?",
 		);
 		const ins = db.prepare(
-			"INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, barrier_control, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?,?,?)",
+			"INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?,?)",
 		);
 		for (const r of rows) {
 			const accessMode = r.accessMode === "pass_only" ? "pass_only" : "open";
-			const barrierControl = accessMode === "pass_only" ? "app" : "camera";
-			if (upd.run(r.name, r.direction, accessMode, barrierControl, r.host, r.enabled ? 1 : 0, r.laneExternalId, r.externalId).changes === 0) {
-				ins.run(r.externalId, r.name, r.direction, accessMode, barrierControl, r.host, r.enabled ? 1 : 0, r.laneExternalId);
+			if (upd.run(r.name, r.direction, accessMode, r.host, r.enabled ? 1 : 0, r.laneExternalId, r.externalId).changes === 0) {
+				ins.run(r.externalId, r.name, r.direction, accessMode, r.host, r.enabled ? 1 : 0, r.laneExternalId);
 			}
 		}
 	});

@@ -120,7 +120,7 @@ const api: BridgeApi = {
   rebindSite: (input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }) => ipcRenderer.invoke('site:rebind', input),
   diagnoseLpr: () => ipcRenderer.invoke('diagnose:lpr'),
 
-  // gate simulator
+  // barrier — operator-driven relay pulse
   manualOpenGate: (opts: { cameraId?: number | null; laneId?: number | null }) => ipcRenderer.invoke('gate:manual-open', opts),
 
   // App self-update — check / download / apply against the qparking cloud.
@@ -138,7 +138,7 @@ const api: BridgeApi = {
   tngTestPayCancel: (orderId: string, target?: { host?: string; port?: number }) => ipcRenderer.invoke('tng:test-pay-cancel', orderId, target),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'gate-state' | 'sync-status' | 'cloud-pull' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'sync-status' | 'cloud-pull' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };

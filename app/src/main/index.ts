@@ -109,8 +109,6 @@ import {
   pushActivityLogsToCloud,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
-import { openGateSimulator, sendGateEvent } from './gate-simulator';
-import { openFaceGate } from './services/face-gate';
 import {
   startSyncDrain, syncEvents, getSyncStatus, drainNow,
   enqueueEntry, enqueueExit, enqueueUpdate, enqueueDelete, enqueueTransaction,
@@ -257,18 +255,23 @@ function createTray() {
 /**
  * Raise the physical barrier for an event this app authorised.
  *
- * Only fires when parking-flow marked the event `barrier: 'app'` — i.e. the
- * camera is in 'pass_only' mode and we made the access decision ourselves. An
- * 'open'-mode camera opens its own relay exactly as it always has, and must NOT
- * be pulsed here or every site would get a double fire.
+ * Called ONLY from the two authorised outcomes — a created entry session, and an
+ * exit that settled as paid / free / manual_release. Every refusal path emits a
+ * 'warning' instead and never reaches here, so "was this car allowed through?"
+ * is answered by which event fired, not by a flag on the payload.
+ *
+ * There is no per-camera opt-out: this app receives the plate event, makes the
+ * decision, and opens the boom. (A `barrier_control` setting briefly existed for
+ * sites whose camera firmware auto-opened; it defaulted to leaving the barrier
+ * alone, which just meant the gate never moved. Removed 2026-08-07 — switch the
+ * camera's own auto-open off instead.)
  *
  * Best-effort by design: a failed pulse is logged for the operator but never
  * throws, because a dead relay must not take down the session flow. The usual
- * cause is missing device credentials — which the Cameras form now refuses to
- * save alongside 'pass_only' precisely so this can't happen silently.
+ * cause is missing device credentials, which describeCameraRisk() flags on the
+ * Cameras page.
  */
-function pulseAppOwnedBarrier(payload: any, side: 'entry' | 'exit'): void {
-  if (payload?.barrier !== 'app') return;
+function pulseBarrierFor(payload: any, side: 'entry' | 'exit'): void {
   const cameraId = payload?.cameraId ?? payload?.event?.cameraId ?? payload?.session?.entryCameraId;
   if (!cameraId) return;
   const relay = pulseBarrier(cameraId);
@@ -355,26 +358,12 @@ function wireRendererEvents() {
     });
   });
 
-  // Drive the gate-simulator window. Entry events open the gate inbound; a
-  // successful exit (paid / free / manual_release) opens it outbound. Failed
-  // exits keep the gate closed — the operator handles those manually.
+  // A session row exists, which means the entry was AUTHORISED — every refusal
+  // path (blacklist, pass-only, rescan, exit-grace) emits 'warning' instead and
+  // never reaches here. So this is the one place that raises the boom on entry.
   parkingEvents.on('entry', (p: any) => {
-    const laneName = p?.session?.entryLaneId ? getLane(p.session.entryLaneId)?.name : undefined;
-    // A blacklisted plate never reaches here — handleEntry refuses before it
-    // creates a session or emits this event — so WELCOME, the turnstile and the
-    // cloud mirror below are all unreachable for a banned vehicle by
-    // construction, rather than by a conditional that could be missed.
-    sendGateEvent({ state: 'open', plate: p?.session?.plate, laneName, direction: 'in', holdMs: 4_000 });
-    setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
-    // Pass-only camera → THIS app authorised the entry, so this app raises the
-    // barrier. Gated on barrier==='app' so an ordinary 'open' camera is
-    // untouched: it still opens its own relay, and a pulse here would be a
-    // second, redundant fire on every existing site.
-    pulseAppOwnedBarrier(p, 'entry');
-    // Raise the physical face-auth turnstile on entry — same moment the gate
-    // window shows WELCOME, matching how real LPR-driven parks behave.
-    // openFaceGate() respects the master `faceGateEnabled` toggle, so this
-    // is a no-op when the operator has turned that off.
+    // THIS app authorised the entry, so this app raises the barrier.
+    pulseBarrierFor(p, 'entry');
     // Audit the entry HERE, on the box, at the moment the barrier goes up. The
     // cloud used to be the only writer of this row (on the pushed record), which
     // meant a WAN outage or a not-yet-synced box had no entry history at all.
@@ -390,71 +379,31 @@ function wireRendererEvents() {
       description: `Entry · ${p?.session?.plate ?? '?'}${entryLane ? ` · ${entryLane.name}` : ''}`,
       changes: { entryAt: p?.session?.entryAt ?? null, laneId: p?.session?.entryLaneId ?? null, cameraId: p?.event?.cameraId ?? null },
     });
-    openFaceGate({ plate: p?.session?.plate ?? undefined, reason: 'qparking-entry' })
-      .then((r) => sendToRenderer('log', { terminalId: 0, direction: r.ok ? 'info' : 'error', message: 'face-gate open (entry)', payload: r }))
-      .catch(() => null);
     // Mirror to qparking SaaS via the persistent sync queue (retries on
     // failure so a temporary outage doesn't drop the entry record).
     if (p?.session) enqueueEntry(p.session);
   });
 
-  // Inform the driver when a re-scan was ignored (plate already has an open
-  // session and the entry-handles-exit toggle is OFF). Without this they'd
-  // see the gate sit closed silently and not know to use the exit lane.
+  // A re-scan of a plate that is already inside. Operator-facing log only (the
+  // 'rescan-ignored' fan-out to the renderer above already covers the UI); the
+  // barrier is deliberately NOT pulsed, because no new entry was authorised.
   parkingEvents.on('rescan-ignored', (p: any) => {
-    sendGateEvent({
-      state: 'closed',
-      plate: p?.plate,
-      laneName: 'PLEASE PAY AT EXIT',
-      direction: 'in',
-      reason: 'duplicate-scan',
-      holdMs: 3_000,
+    sendToRenderer('log', {
+      terminalId: 0,
+      direction: 'info',
+      message: `Re-scan ignored — ${p?.plate} already has an open session (#${p?.sessionId}); no new entry, barrier not pulsed. Driver should use the exit lane.`,
+      payload: p,
     });
   });
 
-  // Exit just started — fee computed, terminal about to be driven. Show
-  // "PLEASE PAY RM X.XX" on the gate screen so the driver knows to tap
-  // their card. Stays on this screen until exit-completed fires (success
-  // = COME AGAIN, failure = no change so the operator can intervene).
-  parkingEvents.on('exit-pending', (p: any) => {
-    // Free exits skip the terminal entirely → exit-completed fires almost
-    // immediately. Suppress the PLEASE PAY flash in that case so the
-    // driver sees a clean WELCOME → COME AGAIN transition.
-    if (!p?.feeCents || p.feeCents <= 0) return;
-    const laneName = p?.lane?.name;
-    sendGateEvent({
-      state: 'closed',
-      plate: p?.session?.plate,
-      laneName,
-      direction: 'out',
-      reason: 'please-pay',
-      feeCents: p.feeCents,
-      // No holdMs — stays on the screen until the terminal answers.
-    });
-  });
-
-  // Operator-action warnings — surface them on the gate screen so a
-  // misconfigured site is OBVIOUS instead of failing silently. These map
-  // to specific renderer layouts (red banner + which thing is missing).
+  // Operator-action warnings. These are all refusals or misconfigurations: the
+  // car is at a closed boom and nothing here pulses the barrier. They exist to
+  // put the cause in the operator's log and the Activity Log.
   parkingEvents.on('warning', (p: any) => {
     const kind = p?.kind as string;
     if (kind === 'exit-blacklisted' || kind === 'entry-blacklisted') {
-      // Held at the barrier for staff attention. Long hold (12s) because this
-      // screen exists to be READ by whoever walks over, not to flash past — and
-      // no automatic recovery follows it.
-      //
-      // Single owner of the BLOCKED screen for BOTH directions. The entry path
-      // emits this warning first and then paints nothing, so this survives; and
-      // the dev simulator's Entry button reaches the operator through here too
-      // (it bypasses handleEntry entirely).
-      sendGateEvent({
-        state: 'closed',
-        plate: p?.plate,
-        direction: kind === 'entry-blacklisted' ? 'in' : 'out',
-        reason: 'blacklisted',
-        detail: p?.reason ?? null,
-        holdMs: 12_000,
-      });
+      // Held at the barrier for staff attention — no session, no charge, no
+      // pulse. Nothing recovers automatically; the operator walks over.
       sendToRenderer('log', {
         terminalId: 0,
         direction: 'error',
@@ -479,16 +428,8 @@ function wireRendererEvents() {
       });
     } else if (kind === 'entry-not-authorised' || kind === 'exit-not-authorised') {
       // Pass-only lane, plate holds no valid pass. Same treatment as a blacklist
-      // refusal — long hold, because nothing recovers automatically and the
-      // screen exists to be read by whoever walks over.
+      // refusal — barrier stays down, staff release manually.
       const isEntry = kind === 'entry-not-authorised';
-      sendGateEvent({
-        state: 'closed',
-        plate: p?.plate,
-        direction: isEntry ? 'in' : 'out',
-        reason: 'not-authorised',
-        holdMs: 12_000,
-      });
       sendToRenderer('log', {
         terminalId: 0,
         direction: 'error',
@@ -525,10 +466,6 @@ function wireRendererEvents() {
         description: `${p?.plate ?? '?'} left a pass-only lane on pass ${p?.passId ?? '?'} with no entry recorded — released, no session to close`,
       });
     } else if (kind === 'exit-without-entry') {
-      sendGateEvent({
-        state: 'closed', plate: p?.plate, direction: 'out',
-        reason: 'exit-without-entry', holdMs: 4_000
-      });
       audit({
         eventKey: 'gate.exit.no_entry',
         action: 'exit',
@@ -550,12 +487,6 @@ function wireRendererEvents() {
       // operator could find later: gate screen (4-5s) + device log only. They
       // are all the same story — "this lane could not take the money" — so they
       // share one event key and name the specific cause in the description.
-      const isNoLane = kind === 'exit-no-lane';
-      sendGateEvent({
-        state: 'closed', direction: 'out',
-        reason: isNoLane ? 'no-lane' : kind === 'exit-terminal-offline' ? 'terminal-offline' : 'no-terminal',
-        holdMs: 5_000,
-      });
       const cause = {
         'exit-no-lane': 'the exit camera is not assigned to any lane',
         'exit-no-terminal': 'the lane has no payment terminal wired to it',
@@ -631,13 +562,6 @@ function wireRendererEvents() {
     const session = p?.sessionId ? getSessionById(p.sessionId) : null;
     const txn = p?.transactionId ? getTransactionById(p.transactionId) : null;
     if (session && txn) enqueueTransaction(session, txn);
-    sendGateEvent({
-      state: 'closed',
-      plate: session?.plate,
-      direction: 'out',
-      reason: 'declined',
-      holdMs: 5_000,
-    });
     // A decline had NO local row: the cloud writes one when the pushed
     // transaction lands, so the operator couldn't see it until the next
     // mirror-down (boot / "Sync now"). Refusing a driver at a barrier has to be
@@ -713,23 +637,12 @@ function wireRendererEvents() {
         passId: p?.passId ?? null,
       },
     });
-    const laneName = session?.exitLaneId ? getLane(session.exitLaneId)?.name : undefined;
-    sendGateEvent({
-      state: 'open',
-      // `p.plate` is the fallback for a pass-only exit with no session row.
-      plate: session?.plate ?? p?.plate,
-      laneName,
-      direction: 'out',
-      reason: p?.outcome,
-      holdMs: 4_000,
-    });
-    setTimeout(() => sendGateEvent({ state: 'closed' }), 4_000);
-    pulseAppOwnedBarrier(p, 'exit');
-    // Also raise the physical face-auth turnstile, if configured. Best-effort
-    // — a network failure here doesn't roll back the payment.
-    openFaceGate({ plate: session?.plate ?? p?.plate ?? undefined, reason: `qparking-exit-${p?.outcome}` })
-      .then((r) => sendToRenderer('log', { terminalId: 0, direction: r.ok ? 'info' : 'error', message: 'face-gate open', payload: r }))
-      .catch(() => null);
+    // Raise the boom. Guarded by the `allowed` check above, so this is reachable
+    // ONLY for an exit that actually settled: 'paid' (the terminal approved),
+    // 'free' (pass / grace / zero-rate) or 'manual_release' (operator decision).
+    // A decline, a timeout, a missing terminal or any refusal never emits
+    // 'exit-completed' at all — the car stays put with its session open.
+    pulseBarrierFor(p, 'exit');
   });
 
   // Sync status → renderer for the Dashboard panel.
@@ -745,6 +658,18 @@ function wireRendererEvents() {
   // in a sticky strip at the bottom of the app.
   parkingEvents.on('debug-log', (p: any) => sendToRenderer('parking-flow-log', p));
 
+  // Webhook-stage lines go to the SAME strip. parking-flow's own first line
+  // ("plate event: …") only runs once a read has already survived the webhook,
+  // so everything that drops it before then — unknown camera, disabled camera,
+  // wrong URL, bad secret — was invisible in the one panel an operator watches
+  // to answer "did the gate see this car?". A read that never arrives and a read
+  // that arrives and is discarded looked identical, and neither looked like
+  // anything at all.
+  const flowLog = (text: string) => sendToRenderer('parking-flow-log', {
+    ts: new Date().toISOString(),
+    text: `[lpr-webhook] ${text}`,
+  });
+
   // W4G TNG activity → renderer log stream (so the Settings test panel +
   // bottom log strip can show outbound / inbound / errors live).
   w4gEvents.on('log', (entry: any) => sendToRenderer('log', { terminalId: -1, ...entry, source: 'w4g' }));
@@ -756,6 +681,12 @@ function wireRendererEvents() {
 
   // No LPR listener = no plate events = not one car recorded, anywhere.
   lprEvents.on('listener-error', (p: any) => {
+    // Straight into the live strip too: this is the single most likely reason
+    // for "the camera fires and the log stays empty", and it happens at BOOT —
+    // long before the operator starts watching, so the Activity Log alone means
+    // discovering it only if you think to go looking.
+    flowLog(`LISTENER DOWN: could not bind port ${p?.port ?? '?'} (${p?.code ?? 'error'}: ${p?.message ?? '?'}). NO camera event can reach this app — nothing will appear in this log until it is fixed.`
+      + (p?.code === 'EADDRINUSE' ? ' Another qparking-local is probably already running (check for a packaged/portable copy in the tray).' : ''));
     audit({
       eventKey: 'device.lpr.listener_failed',
       action: 'edit',
@@ -770,10 +701,50 @@ function wireRendererEvents() {
     });
   });
 
-  // A camera whose reads are being thrown away on a secret mismatch — or
-  // something on the LAN posting at the webhook. Throttled at the emitter (one
-  // row per camera per 10 min) because a stale-secret camera retries every pass.
+  // Arrival trace — one line per inbound plate POST, before any guard. Pairs
+  // with the rejection row below: trace + no parking-flow line = we dropped it
+  // (the next row says why); no trace at all = nothing reached this process.
+  lprEvents.on('webhook-received', (p: any) => {
+    const line = `PLATE POST RECEIVED from ${p?.remoteIp ?? '?'}${p?.sentIp && p.sentIp !== p.remoteIp ? ` (reports itself as ${p.sentIp})` : ''} · plate=${p?.plate ?? '(none read)'}${p?.direction ? ` · direction=${p.direction}` : ''} · path=${p?.path ?? '?'}`;
+    flowLog(line);
+    sendToRenderer('log', { terminalId: 0, direction: 'info', message: line, payload: p });
+  });
+
+  // The same read arriving again within seconds — the camera posting to two
+  // endpoints, or re-reporting as its confidence settles. Logged rather than
+  // dropped in silence, so "why did only one of my two posts do anything?" has
+  // an answer sitting right there in the strip.
+  lprEvents.on('webhook-duplicate', (p: any) => {
+    flowLog(`DUPLICATE POST IGNORED: plate=${p?.plate} from "${p?.cameraName ?? `camera ${p?.cameraId}`}" via ${p?.path} — the same read already came through less than ${Math.round((p?.windowMs ?? 0) / 1000)}s ago. This is one car, not two; nothing was recorded twice.`);
+  });
+
+  // Reached the port but not POST /lpr/event — wrong path or wrong method.
+  lprEvents.on('webhook-unroutable', (p: any) => {
+    const line = `WRONG ENDPOINT: ${p?.method} ${p?.url} from ${p?.remoteIp} reached the LPR port but is not the plate endpoint — point the camera at POST /lpr/event`;
+    flowLog(line);
+    sendToRenderer('log', { terminalId: 0, direction: 'error', message: line, payload: p });
+  });
+
+  // A plate read that reached the webhook and was thrown away before it could
+  // become a session: unmatched camera, disabled camera, or a secret mismatch.
+  // Every one of these used to be (or still looked like) silence from inside the
+  // app, which is the worst possible failure for a gate — the camera says it
+  // read the plate, the app shows nothing, and there is no thread to pull.
+  //
+  // Throttled at the emitter (one row per camera per 10 min) because a
+  // misconfigured camera re-posts on every single pass.
   lprEvents.on('webhook-rejected', (p: any) => {
+    const who = p?.cameraName ? `"${p.cameraName}"` : p?.cameraId != null ? `camera ${p.cameraId}` : 'an unrecognised camera';
+    const why = {
+      unknown_camera: `no camera in qparking-local matches it. It posted from ${p?.remoteIp ?? 'an unknown IP'}${p?.sentIp ? ` and reported its own IP as ${p.sentIp}` : ''}, and the registered cameras are: ${p?.knownCameras ?? '—'}. Add it on the Cameras page, or correct the host/LAN IP so it matches exactly.`,
+      camera_disabled: 'that camera is switched OFF on the Cameras page. Re-enable it.',
+      missing_secret_header: 'no X-Webhook-Secret header was sent. Re-enter the secret on the camera, or clear it on the camera record.',
+      wrong_secret: 'the X-Webhook-Secret did not match. Re-enter the secret on the camera, or clear it on the camera record.',
+    }[p?.reason as string] ?? String(p?.reason ?? 'unknown reason');
+
+    const line = `PLATE READ DISCARDED from ${who}${p?.plate ? ` (${p.plate})` : ''} — ${why}`;
+    flowLog(line);
+    sendToRenderer('log', { terminalId: 0, direction: 'error', message: line, payload: p });
     audit({
       eventKey: 'security.webhook.rejected',
       action: 'access',
@@ -782,9 +753,9 @@ function wireRendererEvents() {
       outcome: 'blocked',
       resourceType: 'camera_device',
       resourceId: p?.cameraId != null ? String(p.cameraId) : null,
-      description: `Webhook REJECTED from "${p?.cameraName ?? `camera ${p?.cameraId}`}" (${p?.remoteIp ?? 'unknown IP'}) — ${p?.reason === 'missing_secret_header' ? 'no X-Webhook-Secret header sent' : 'wrong X-Webhook-Secret'}.`
-        + ` Its plate reads are being DISCARDED${p?.plate ? ` (latest: ${p.plate})` : ''}. Re-enter the secret on the camera, or clear it on the camera record.`
-        + ` Further rejections from this camera are muted for ${p?.throttleMinutes ?? 10} minutes.`,
+      description: `Plate read REJECTED from ${who} — ${why}`
+        + ` The read was DISCARDED${p?.plate ? ` (latest: ${p.plate})` : ''}: no session, no barrier.`
+        + ` Further rejections from this source are muted for ${p?.throttleMinutes ?? 10} minutes.`,
       changes: { cameraId: p?.cameraId ?? null, remoteIp: p?.remoteIp ?? null, reason: p?.reason ?? null },
     });
   });
@@ -1442,11 +1413,14 @@ ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string, target?: { hos
 
 ipcMain.handle('diagnose:lpr', () => require('./services/lpr-webhook').diagnose());
 
-// Open the barrier for a lane/camera. Mirrors the remote gate-open path: flash
-// the gate simulator so the operator sees it, pulse the camera's onboard relay
-// (the real barrier wired to the LPR camera's IO output), and best-effort raise
-// the face-auth turnstile. Shared by the Live-display "Open barrier" button and
-// the Sessions "Manual release" (which lets the car out on release).
+// Open the barrier for a lane/camera by pulsing the camera's onboard relay (the
+// real barrier wired to the LPR camera's IO output). Shared by the Live-display
+// "Open barrier" button and the Sessions "Manual release" (which lets the car
+// out on release).
+//
+// Unlike the automatic paths this pulses without asking any access question —
+// no blacklist check, no pass check, no fee. An operator pressing the button has
+// already made the decision and expects the boom to move.
 async function openBarrier(opts: { cameraId?: number | null; laneId?: number | null; reason?: string } = {}) {
   let camera = opts.cameraId ? (listCameras().find((c) => c.id === opts.cameraId) ?? null) : null;
   const lane = opts.laneId ? getLane(opts.laneId) : (camera?.laneId ? getLane(camera.laneId) : null);
@@ -1454,15 +1428,8 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
   // relay wired to it.
   if (!camera && lane) camera = listCameras().find((c) => c.laneId === lane.id && c.enabled) ?? null;
   const laneName = lane?.name ?? camera?.name ?? 'MANUAL OPEN';
-  const direction = camera?.direction === 'entry' ? 'in' : 'out';
   const reason = opts.reason ?? 'manual-operator-open';
-  openGateSimulator(isDev);
-  sendGateEvent({ state: 'open', laneName, direction, reason, holdMs: 5_000 });
-  setTimeout(() => sendGateEvent({ state: 'closed' }), 5_000);
   const relay = camera ? pulseBarrier(camera.id) : { ok: false, error: 'no_camera' };
-  let face: { ok: boolean; status?: number; error?: string } | null = null;
-  try { face = await openFaceGate({ reason: `${reason}:${laneName}` }); }
-  catch (e: any) { face = { ok: false, error: e?.message ?? String(e) }; }
   // Audited HERE rather than in the pages that call it, so every caller is
   // covered by construction — the Live-display tile used to write this row
   // itself, which meant the identical action from the Cameras page ("test
@@ -1480,16 +1447,15 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
       resourceType: 'local_lane',
       resourceId: lane?.id != null ? String(lane.id) : null,
       description: `Barrier opened by hand · ${laneName}${camera ? ` · ${camera.name}` : ' · no camera resolved'}`
-        + (relay.ok ? ' — relay pulsed' : ` — relay FAILED: ${relay.error ?? 'unknown'}`)
-        + (face?.ok ? ' · face-gate opened' : ''),
+        + (relay.ok ? ' — relay pulsed' : ` — relay FAILED: ${relay.error ?? 'unknown'}`),
       changes: { laneId: lane?.id ?? null, cameraId: camera?.id ?? null, reason, relayError: relay.ok ? null : relay.error ?? null },
     });
   }
   return {
-    ok: true,
-    note: `Barrier opened for ${laneName}`
-      + (relay.ok ? ' · camera-relay pulsed' : camera ? ` · relay ${relay.error}` : '')
-      + (face?.ok ? ' · face-gate ok' : ''),
+    ok: relay.ok,
+    note: relay.ok
+      ? `Barrier opened for ${laneName} · camera-relay pulsed`
+      : `Barrier did NOT open for ${laneName} · ${camera ? `relay ${relay.error}` : 'no camera resolved for this lane'}`,
   };
 }
 

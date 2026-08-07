@@ -107,7 +107,7 @@
       "group": "A · entry",
       "name": "A12 entry_at is stored as UTC ISO with a Z marker",
       "pass": true,
-      "detail": "2026-08-06T07:27:50.968Z"
+      "detail": "2026-08-07T02:35:32.343Z"
     },
     {
       "group": "B · exit routing & free exits",
@@ -341,7 +341,7 @@
       "group": "C · paid exit & the terminal",
       "name": "C10b …and tells the device to abort the deduction (PayCancel)",
       "pass": true,
-      "detail": "{\"orderId\":\"157adf3863a8099e7939364bb286c3d5\",\"host\":\"10.0.0.50\",\"port\":80}"
+      "detail": "{\"orderId\":\"1a397531f1729e055c738db7b14024b4\",\"host\":\"10.0.0.50\",\"port\":80}"
     },
     {
       "group": "C · paid exit & the terminal",
@@ -861,7 +861,13 @@
     },
     {
       "group": "I · dev simulator & open-session restore",
-      "name": "I2 simulateEntryAt refuses a plate that is already inside",
+      "name": "I1b …via the real entry event, so the barrier is pulsed like a live read",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "group": "I · dev simulator & open-session restore",
+      "name": "I2 a plate already inside does not open a second session",
       "pass": true,
       "detail": null
     },
@@ -875,13 +881,13 @@
       "group": "I · dev simulator & open-session restore",
       "name": "I4 simulateEntryAt honours the blacklist, exactly like the camera path",
       "pass": true,
-      "detail": "blacklisted — BAN0004 is blocked (sim ban); no entry recorded. Lift the ban in the cloud to let it in."
+      "detail": null
     },
     {
       "group": "I · dev simulator & open-session restore",
       "name": "I4b simulateEntryAt refuses an unregistered plate on an Only Pass Allow lane",
       "pass": true,
-      "detail": "no valid pass — \"SIM-PASSONLY\" is set to Only Pass Allow and SIMNOPASS has no season pass valid right now, so no entry was recorded. Issue a pass in the cloud and press Sync now, or turn the toggle off to test without it."
+      "detail": null
     },
     {
       "group": "I · dev simulator & open-session restore",
@@ -899,11 +905,11 @@
       "group": "I · dev simulator & open-session restore",
       "name": "I5 simulateExitAt refuses a banned plate before anything else",
       "pass": true,
-      "detail": "blacklisted — BAN0005 is blocked (sim ban 2); the barrier stays down and nothing was charged. Lift the ban in the cloud, or release the session manually."
+      "detail": null
     },
     {
       "group": "I · dev simulator & open-session restore",
-      "name": "I6 simulateExitAt needs an open session first",
+      "name": "I6 an exit for a plate with no open session reports exit-without-entry",
       "pass": true,
       "detail": null
     },

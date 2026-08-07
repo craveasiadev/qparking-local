@@ -45,6 +45,14 @@ export interface PlateEvent {
    *  ISO instant instead of "now". Set by the Sessions simulator's timed Exit;
    *  undefined for real camera events, so the live flow is unaffected. */
   exitAtOverride?: string;
+  /** DEV/QA only: force the entry moment (recorded entry_at, and therefore the
+   *  stay length a later exit prices) to this ISO instant instead of "now". Set
+   *  by the Sessions simulator's timed Entry. Undefined for real camera events.
+   *
+   *  This is the ONLY thing that makes a simulated entry differ from a real one
+   *  — the simulator otherwise goes through the very same handlePlateEvent path,
+   *  so every guard, session write, barrier pulse and audit row is identical. */
+  entryAtOverride?: string;
 }
 
 export const lprEvents = new EventEmitter();
@@ -138,11 +146,72 @@ function shouldReportRejection(cameraId: number): boolean {
   return true;
 }
 
+// ─── same-read de-duplication ───────────────────────────────────────────────
+// One car passing a camera produces SEVERAL HTTP posts, from two independent
+// causes that compound:
+//
+//   1. The firmware posts the same read to more than one endpoint — typically
+//      its factory default /devicemanagement/php/quickplateresult.php AND a
+//      configured URL. Accepting both paths (which we must, see isPlateEndpoint)
+//      turns one physical read into two identical events.
+//   2. ANPR firmware re-reports the same plate two or three times per pass as
+//      its confidence settles.
+//
+// Both produce byte-identical (camera, plate) pairs within the same second or
+// two. Collapsing them HERE, at the door, keeps every downstream stage honest:
+// the flow's own guards (already-inside, exit grace, lane busy) exist for real
+// second passes and shouldn't be doing double duty as a network de-duplicator.
+//
+// The window is deliberately short. Same camera + same plate inside a couple of
+// seconds is one car, always — a genuine re-read that far apart is physically
+// impossible, and a DIFFERENT car cannot share the plate.
+const DUPLICATE_POST_WINDOW_MS = 3_000;
+const lastAcceptedRead = new Map<string, number>();
+
+function isDuplicatePost(cameraId: number, plate: string): boolean {
+  const key = `${cameraId}|${plate}`;
+  const now = Date.now();
+  const last = lastAcceptedRead.get(key) ?? 0;
+  if (now - last < DUPLICATE_POST_WINDOW_MS) return true;
+  lastAcceptedRead.set(key, now);
+  // Opportunistic sweep so a long-running box doesn't accumulate one entry per
+  // plate seen, forever. Cheap: only runs once the map is already large.
+  if (lastAcceptedRead.size > 500) {
+    for (const [k, at] of lastAcceptedRead) {
+      if (now - at > DUPLICATE_POST_WINDOW_MS) lastAcceptedRead.delete(k);
+    }
+  }
+  return false;
+}
+
+/**
+ * Which POST paths carry a plate read.
+ *
+ * `/lpr/event` is ours. The rest are what the Hangzhou-family ANPR firmware
+ * posts to WITHOUT being asked — `/devicemanagement/php/quickplateresult.php`
+ * is its factory default push path, hard-coded in some builds with no field to
+ * change it. Rejecting it meant a camera that was correctly wired, correctly
+ * detecting, and genuinely sending its reads to this port got a 404 for every
+ * car, and the operator was told to "point the camera at POST /lpr/event" —
+ * advice that cannot be followed on firmware that has no such setting.
+ *
+ * Matching is on the path only; the body still has to parse and still has to
+ * resolve to a registered camera, so this widens the door, not the trust.
+ */
+function isPlateEndpoint(url: string | undefined): boolean {
+  if (!url) return false;
+  const path = url.split('?')[0].toLowerCase();
+  return path.startsWith('/lpr/event')
+    // Vendor default push paths, seen in the wild on VzLPR/Uniview-clone builds.
+    || path.includes('quickplateresult')
+    || path.includes('plateresult');
+}
+
 export function startLprServer(port: number) {
   stopLprServer();
   activePort = port;
   server = http.createServer((req, res) => {
-    if (req.method === 'POST' && req.url?.startsWith('/lpr/event')) {
+    if (req.method === 'POST' && isPlateEndpoint(req.url)) {
       handleEvent(req, res).catch((e) => {
         res.statusCode = 500;
         res.end(JSON.stringify({ error: e.message }));
@@ -152,6 +221,16 @@ export function startLprServer(port: number) {
     // Live-display MJPEG stream: GET /live/<cameraId>
     const live = req.method === 'GET' && req.url ? /^\/live\/(\d+)/.exec(req.url) : null;
     if (live) { handleLiveStream(Number(live[1]), req, res); return; }
+    // Something reached the port but not the plate endpoint — almost always a
+    // camera pointed at the wrong path (/lpr, /event, a trailing typo) or using
+    // GET. Reported because it is otherwise invisible: the camera shows its
+    // push as "sent", the app shows nothing, and the URL is the last thing
+    // anyone thinks to re-check.
+    lprEvents.emit('webhook-unroutable', {
+      method: req.method ?? '?',
+      url: req.url ?? '?',
+      remoteIp: (req.socket.remoteAddress || '').replace(/^::ffff:/, ''),
+    });
     res.statusCode = 404;
     res.end('not found');
   });
@@ -225,18 +304,78 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
   const remoteIp = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   const extracted = extractEvent(payload, remoteIp);
 
-  if (!extracted.plate) { res.statusCode = 400; res.end(JSON.stringify({ error: 'plate_required' })); return; }
+  // Unconditional arrival trace, emitted BEFORE any guard can drop this read.
+  // This is the one line that answers "is the camera even talking to us?" — the
+  // question every other log in the app assumes has already been settled. If
+  // this appears and no parking-flow line follows, the app rejected the read and
+  // the reason is in the very next log row. If it never appears at all, nothing
+  // reached this process and the problem is the camera's push config or the
+  // network, not qparking-local.
+  lprEvents.emit('webhook-received', {
+    remoteIp,
+    sentIp: extracted.ipaddr ?? null,
+    plate: extracted.plate || null,
+    direction: extracted.direction ?? null,
+    // The PATH matters for diagnosis: a camera posting the same read to both its
+    // factory default endpoint and a configured one shows up here as two
+    // otherwise-identical lines, and without this there is no way to tell that
+    // apart from the camera genuinely firing twice.
+    path: (req.url ?? '').split('?')[0] || '/',
+  });
+
+  if (!extracted.plate) {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: 'plate_required' }));
+    return;
+  }
 
   const camera = resolveCamera(extracted);
   if (!camera) {
+    // SILENT FAILURE, until 2026-08-07: this returned a 404 to the camera and
+    // nothing else — no log line, no event, nothing in the Activity Log. From
+    // inside the app an unmatched camera is indistinguishable from a camera that
+    // never fired, which is exactly the "the plate is detected but the app sees
+    // nothing" dead end.
+    //
+    // It bites hardest when a SECOND camera is added: with one camera registered
+    // resolveCamera falls back to it regardless of IP, so everything works; add
+    // an exit camera and both must now match by IP, and any mismatch starts
+    // dropping reads without a word.
+    const known = listCameras().map((c) => `${c.name}=${c.host || 'no host set'}`).join(', ') || 'none registered';
+    if (shouldReportRejection(-1)) {
+      lprEvents.emit('webhook-rejected', {
+        cameraId: null,
+        cameraName: null,
+        plate: extracted.plate,
+        remoteIp,
+        sentIp: extracted.ipaddr ?? null,
+        knownCameras: known,
+        reason: 'unknown_camera',
+        throttleMinutes: REJECT_REPORT_WINDOW_MS / 60_000,
+      });
+    }
     res.statusCode = 404;
     res.end(JSON.stringify({
       error: 'unknown_camera',
-      hint: `No camera matched. Sent ipaddr=${extracted.ipaddr ?? '-'} remoteIp=${remoteIp}. Add a camera in qparking-local with host=${extracted.ipaddr ?? remoteIp}.`,
+      hint: `No camera matched. Sent ipaddr=${extracted.ipaddr ?? '-'} remoteIp=${remoteIp}. Add a camera in qparking-local with host=${extracted.ipaddr ?? remoteIp}. Registered: ${known}.`,
     }));
     return;
   }
-  if (!camera.enabled) { res.statusCode = 403; res.end(JSON.stringify({ error: 'camera_disabled' })); return; }
+  if (!camera.enabled) {
+    // Same reasoning as unknown_camera: a disabled camera silently swallowed
+    // every read, and "disabled" is easy to forget after a bit of testing.
+    if (shouldReportRejection(camera.id)) {
+      lprEvents.emit('webhook-rejected', {
+        cameraId: camera.id,
+        cameraName: camera.name,
+        plate: extracted.plate,
+        remoteIp,
+        reason: 'camera_disabled',
+        throttleMinutes: REJECT_REPORT_WINDOW_MS / 60_000,
+      });
+    }
+    res.statusCode = 403; res.end(JSON.stringify({ error: 'camera_disabled' })); return;
+  }
 
   // Webhook secret check (skipped when camera has no secret set — useful for
   // dev / on-prem boxes behind a private VLAN). Vendor firmwares can't set
@@ -280,6 +419,29 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ ok: true, ignored: 'no_plate', cameraId: camera.id }));
+    return;
+  }
+
+  // Collapse the same physical read arriving more than once — see
+  // isDuplicatePost. Placed AFTER the frame cache (the operator should still get
+  // the freshest picture) and AFTER the no-read guard, but BEFORE the image is
+  // written to disk and before the event is emitted: a duplicate must cost
+  // neither a file nor a trip through the flow.
+  //
+  // Returns 200, not an error. The camera did nothing wrong, and a non-2xx makes
+  // some firmware retry — which would manufacture the very duplicates this is
+  // here to remove.
+  if (isDuplicatePost(camera.id, plate)) {
+    lprEvents.emit('webhook-duplicate', {
+      cameraId: camera.id,
+      cameraName: camera.name,
+      plate,
+      path: (req.url ?? '').split('?')[0] || '/',
+      windowMs: DUPLICATE_POST_WINDOW_MS,
+    });
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ok: true, ignored: 'duplicate_read', cameraId: camera.id }));
     return;
   }
 
@@ -383,9 +545,24 @@ function resolveCamera(extracted: { cameraId?: number; ipaddr?: string }): LprCa
   }
   const cameras = listCameras();
   if (extracted.ipaddr) {
-    const match = cameras.find((camera) => camera.host && camera.host.trim() === extracted.ipaddr!.trim());
-    if (match) return match;
+    const wanted = extracted.ipaddr.trim();
+    const atThisIp = cameras.filter((camera) => camera.host && camera.host.trim() === wanted);
+    // ENABLED WINS. One physical camera is routinely registered more than once
+    // — a first attempt, then a second row set up properly — and the old
+    // `.find()` took whichever had the lower id. If that was a leftover the
+    // operator had switched OFF, every read from a working, enabled camera at
+    // the same IP was resolved to the dead row and thrown away as
+    // 'camera_disabled'. The camera fired, the app reported the WRONG camera
+    // as the reason, and the real one never saw a single plate.
+    //
+    // Disabled means "ignore this row", not "swallow reads on this IP".
+    return atThisIp.find((camera) => camera.enabled) ?? atThisIp[0] ?? null;
   }
+  // Last resort: a single registered camera takes everything, whatever IP it
+  // reports. Only safe while there IS just one — with two, an unmatched IP has
+  // to be an error rather than a coin toss.
+  const enabled = cameras.filter((camera) => camera.enabled);
+  if (enabled.length === 1) return enabled[0];
   if (cameras.length === 1) return cameras[0];
   return null;
 }
