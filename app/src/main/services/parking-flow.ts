@@ -27,8 +27,9 @@ import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
   listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
   createTransaction, updateTransaction, findBlockedPlate, findLastClosedSessionByPlate,
+  attachSessionCapture,
 } from './db';
-import { lprEvents, normalisePlate, type PlateEvent } from './lpr-webhook';
+import { lprEvents, normalisePlate, type PlateEvent, type PlateCapture } from './lpr-webhook';
 import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, payResultListenerReady, type PayResultBody } from './payment-tng';
 import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
 
@@ -110,6 +111,71 @@ function describeChargeability(session: ParkingSession | null): string {
 
 export function startParkingFlow() {
   lprEvents.on('plate', handlePlateEvent);
+  lprEvents.on('plate-capture', handlePlateCapture);
+}
+
+// ─── Late-arriving plate captures ────────────────────────────────────────────
+//
+// On the vendor ANPR the JPEG rides a SECOND post, ~1s behind the plate-only
+// one that actually drives the flow (see classifyPost in lpr-webhook). Where
+// that picture belongs depends on what the first post did:
+//
+//   entry — the session row already exists, so attach straight to the DB.
+//   exit  — the charge is still in flight and exit_at is NULL, so there is no
+//           column to write yet. Park the path here and let recordExit pick it
+//           up when the exit finally closes.
+//
+// Keyed by camera+plate and swept on read, so a capture whose exit never
+// completed can't later graft itself onto a different stay.
+const PENDING_CAPTURE_TTL_MS = 15 * 60_000;
+const pendingCaptures = new Map<string, { imagePath: string; at: number }>();
+
+function captureKey(cameraId: number, plate: string): string {
+  return `${cameraId}|${plate}`;
+}
+
+/** Claim a parked capture for this (camera, plate), if one is still fresh. */
+function takePendingCapture(cameraId: number | null, plate: string): string | null {
+  const now = Date.now();
+  for (const [k, v] of pendingCaptures) {
+    if (now - v.at > PENDING_CAPTURE_TTL_MS) pendingCaptures.delete(k);
+  }
+  if (cameraId == null) return null;
+  const key = captureKey(cameraId, plate);
+  const hit = pendingCaptures.get(key);
+  if (!hit) return null;
+  pendingCaptures.delete(key);
+  return hit.imagePath;
+}
+
+function handlePlateCapture(capture: PlateCapture) {
+  // An OPEN session for this plate means an exit is mid-charge (or this is an
+  // entry camera re-posting): in both cases the exit column isn't writable yet,
+  // so park it rather than risk attaching to the previous stay.
+  if (capture.direction === 'exit' && findOpenSessionByPlate(capture.plate)) {
+    pendingCaptures.set(captureKey(capture.cameraId, capture.plate), { imagePath: capture.imagePath, at: Date.now() });
+    flog(`CAPTURE PARKED: plate=${capture.plate} side=exit — exit still in flight, will attach when the charge closes`);
+    return;
+  }
+
+  const session = attachSessionCapture(capture.plate, capture.direction, capture.imagePath);
+  if (!session) {
+    pendingCaptures.set(captureKey(capture.cameraId, capture.plate), { imagePath: capture.imagePath, at: Date.now() });
+    flog(`CAPTURE PARKED: plate=${capture.plate} side=${capture.direction} — no session to attach to yet`);
+    return;
+  }
+
+  // attachSessionCapture bumped rev, so this queues a genuinely new push rather
+  // than collapsing into the imageless one already sent for this session. Both
+  // shapes carry the base64 bytes, so the photo reaches DigitalOcean Spaces on
+  // the normal sync path — no separate upload channel.
+  if (capture.direction === 'entry') enqueueEntry(session);
+  else enqueueExit(session);
+  // Nudges the Sessions page to refetch so the thumbnail appears without a
+  // manual refresh. The page's action timeline ignores kinds it doesn't know,
+  // so this adds no noise there.
+  parkingEvents.emit('capture-attached', { sessionId: session.id, plate: capture.plate, side: capture.direction });
+  flog(`CAPTURE ATTACHED: plate=${capture.plate} side=${capture.direction} session=${session.id} → cloud`);
 }
 
 function handlePlateEvent(event: PlateEvent) {
@@ -255,7 +321,10 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
     event.plate,
     lane?.id ?? null,
     event.cameraId,
-    event.imagePath,
+    // Normally the read's own picture. Falls back to a capture that arrived
+    // ahead of this write — on the vendor cameras the two halves of one read
+    // race, and either can land first.
+    event.imagePath ?? takePendingCapture(event.cameraId, event.plate),
   );
 
   // DEV/QA timed entry — back-date the stored entry_at so a later exit prices a
@@ -355,7 +424,7 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
       exitAt: exitIsoNow,
       exitLaneId: lane?.id ?? null,
       exitCameraId: event.cameraId,
-      exitImagePath: event.imagePath,
+      exitImagePath: event.imagePath ?? takePendingCapture(event.cameraId, event.plate),
       durationMinutes: stayDurationMinutes(session.entryAt, exitIsoNow),
       feeCents: 0,
       paymentStatus: 'free',
@@ -465,7 +534,7 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
       exitAt: new Date(exitMs).toISOString(),
       exitLaneId: lane.id,
       exitCameraId: event.cameraId,
-      exitImagePath: event.imagePath,
+      exitImagePath: event.imagePath ?? takePendingCapture(event.cameraId, event.plate),
       durationMinutes,
       feeCents: 0,
       paymentStatus: 'free',
@@ -637,7 +706,7 @@ async function startTngExitCharge(
       exitAt: event.exitAtOverride ?? new Date().toISOString(),
       exitLaneId: lane.id,
       exitCameraId: event.cameraId,
-      exitImagePath: event.imagePath,
+      exitImagePath: event.imagePath ?? takePendingCapture(event.cameraId, event.plate),
       durationMinutes: inflight.durationMinutes,
       feeCents: inflight.feeCents,
       status: 'exited',

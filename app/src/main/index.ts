@@ -342,7 +342,7 @@ function deviceResourceType(type: DeviceType): ActivityLogResourceType {
 
 function wireRendererEvents() {
   lprEvents.on('plate', (event) => sendToRenderer('plate-detected', event));
-  for (const ev of ['entry', 'exit-pending', 'exit-completed', 'exit-declined', 'warning', 'rescan-ignored', 'entry-ignored-recent-exit'] as const) {
+  for (const ev of ['entry', 'exit-pending', 'exit-completed', 'exit-declined', 'warning', 'rescan-ignored', 'entry-ignored-recent-exit', 'capture-attached'] as const) {
     parkingEvents.on(ev, (payload) => sendToRenderer('session', { kind: ev, payload }));
   }
 

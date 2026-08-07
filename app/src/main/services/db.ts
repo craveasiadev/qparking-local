@@ -1562,6 +1562,47 @@ export function findLastClosedSessionByPlate(plate: string): ParkingSession | nu
 	return row ? rowToSession(row) : null;
 }
 
+/**
+ * Attach a late-arriving plate capture to the session it belongs to.
+ *
+ * The vendor ANPR posts one read TWICE: a plate-only "quick result" to its
+ * factory path, then the full result carrying the JPEG a beat later. The quick
+ * post is the one that opens the session, so on those cameras the picture
+ * ALWAYS lands after the row already exists — see the image-upgrade branch in
+ * lpr-webhook. Without this the photo was written to disk and then orphaned.
+ *
+ * Only ever fills a column that is still NULL: a session that already carries a
+ * capture keeps it, so a re-post can never overwrite the picture the flow
+ * recorded first. Bumps `rev` so the sync queue treats it as a real change and
+ * pushes the image to the cloud (see enqueueEntry / enqueueExit — both already
+ * ship the base64 bytes).
+ *
+ * `withinMs` bounds how far back a capture may reach, so a photo can't attach
+ * itself to an unrelated older stay by the same plate.
+ */
+export function attachSessionCapture(
+	plate: string,
+	side: "entry" | "exit",
+	imagePath: string,
+	withinMs = 15 * 60_000,
+): ParkingSession | null {
+	const db = getDb();
+	const since = new Date(Date.now() - withinMs).toISOString();
+	const row = (
+		side === "entry"
+			? db.prepare(
+					"SELECT * FROM sessions WHERE plate = ? AND entry_image_path IS NULL AND entry_at >= ? ORDER BY entry_at DESC LIMIT 1",
+				)
+			: db.prepare(
+					"SELECT * FROM sessions WHERE plate = ? AND exit_at IS NOT NULL AND exit_image_path IS NULL AND exit_at >= ? ORDER BY exit_at DESC LIMIT 1",
+				)
+	).get(plate, since) as any;
+	if (!row) return null;
+	const column = side === "entry" ? "entry_image_path" : "exit_image_path";
+	db.prepare(`UPDATE sessions SET ${column}=?, rev=rev+1, updated_at=${NOW_MS_SQL} WHERE id=?`).run(imagePath, row.id);
+	return getSessionById(row.id);
+}
+
 export function createEntrySession(plate: string, laneId: number | null, cameraId: number | null, imagePath: string | null): ParkingSession {
 	const db = getDb();
 	// Store entry_at as an explicit UTC ISO string (…Z), NOT SQLite's
@@ -1670,7 +1711,12 @@ export function recordExit(
 ): ParkingSession | null {
 	getDb()
 		.prepare(
-			`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=?, duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, pass_id=?, free_reason=?, rev=rev+1, updated_at=${NOW_MS_SQL} WHERE id=?`,
+			// exit_image_path is COALESCEd, not assigned: a NULL here means "the
+			// exit event carried no picture", never "clear the picture". On the
+			// vendor cameras the JPEG arrives on a SECOND post while the charge is
+			// still in flight, so attachSessionCapture may already have filled this
+			// column before the exit closes — a plain assignment wiped it back out.
+			`UPDATE sessions SET exit_at=?, exit_lane_id=?, exit_camera_id=?, exit_image_path=COALESCE(?, exit_image_path), duration_minutes=?, fee_cents=?, status=?, payment_status=?, terminal_txn_id=?, card_scheme=?, payment_timestamp=?, pass_id=?, free_reason=?, rev=rev+1, updated_at=${NOW_MS_SQL} WHERE id=?`,
 		)
 		.run(
 			patch.exitAt,

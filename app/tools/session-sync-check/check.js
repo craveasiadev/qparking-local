@@ -143,6 +143,56 @@ try {
     db.countSessionsNeedingCloudPush() === before + 1,
     'it will re-push once, harmlessly: the cloud upsert is idempotent per plate+open-record');
 
+  // ─── 10. the late plate capture reaches the cloud ─────────────────────────
+  // Regression from 2026-08-07: the vendor ANPR posts one read twice — a
+  // plate-only "quick result" first, the JPEG a beat later. A collapse keyed
+  // only on (camera, plate) let the imageless post win and dropped the
+  // picture-bearing one, so plates kept working while every session silently
+  // lost its photo. attachSessionCapture is what puts the late half back.
+  const capLane = db.upsertLane({ name: 'Capture', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+
+  // Entry: the session already exists when the picture lands.
+  const cap1 = db.createEntrySession('CAPTURE01', capLane.id, 7, null);
+  check('precondition: the quick post opened the session with NO image', cap1.entryImagePath === null);
+  const attached = db.attachSessionCapture('CAPTURE01', 'entry', 'C:\\plates\\CAPTURE01-entry.jpg');
+  check('a late capture attaches to the open session', attached?.entryImagePath === 'C:\\plates\\CAPTURE01-entry.jpg',
+    String(attached?.entryImagePath));
+  check('…and bumps rev so the sync queue treats it as a real change', attached.rev > cap1.rev,
+    `${cap1.rev} → ${attached?.rev}`);
+  queue.enqueueEntry(cap1);          // the imageless push that already went out
+  queue.enqueueEntry(attached);      // the capture push
+  const capRows = db.listDueSync().filter((r) => r.payload.plate_number === 'CAPTURE01');
+  check('…so it queues its OWN push rather than collapsing into the imageless one', capRows.length === 2,
+    `queued ${capRows.length}`);
+
+  // An already-photographed session must never be overwritten by a re-post.
+  const reattach = db.attachSessionCapture('CAPTURE01', 'entry', 'C:\\plates\\WRONG.jpg');
+  check('a second capture does NOT overwrite a session that already has one', reattach === null,
+    String(db.getSessionById(cap1.id).entryImagePath));
+
+  // Exit: the picture lands while the charge is still in flight, so the column
+  // is filled BEFORE recordExit runs. recordExit passes null for the image and
+  // must not wipe it — that assignment is why the COALESCE is there.
+  const cap2 = db.createEntrySession('CAPTURE02', capLane.id, 8, null);
+  db.recordExit(cap2.id, {
+    exitAt: new Date().toISOString(), exitLaneId: capLane.id, exitCameraId: 8,
+    exitImagePath: null, durationMinutes: 10, feeCents: 0, paymentStatus: 'free', terminalTxnId: null,
+  });
+  const cap2Exited = db.attachSessionCapture('CAPTURE02', 'exit', 'C:\\plates\\CAPTURE02-exit.jpg');
+  check('a late EXIT capture attaches to the closed session', cap2Exited?.exitImagePath === 'C:\\plates\\CAPTURE02-exit.jpg',
+    String(cap2Exited?.exitImagePath));
+  db.recordExit(cap2.id, {
+    exitAt: cap2Exited.exitAt, exitLaneId: capLane.id, exitCameraId: 8,
+    exitImagePath: null, durationMinutes: 10, feeCents: 500, paymentStatus: 'paid', terminalTxnId: 'T1',
+  });
+  check('…and a later imageless recordExit does NOT wipe it',
+    db.getSessionById(cap2.id).exitImagePath === 'C:\\plates\\CAPTURE02-exit.jpg',
+    String(db.getSessionById(cap2.id).exitImagePath));
+
+  // The window is bounded, so a photo can't graft onto an unrelated older stay.
+  const stale = db.attachSessionCapture('CAPTURE02', 'exit', 'C:\\plates\\LATE.jpg', -1);
+  check('a capture outside the attach window is refused', stale === null, String(stale?.exitImagePath));
+
   out.ok = out.checks.every((c) => c.pass);
 } catch (error) {
   out.error = error?.stack ?? String(error);

@@ -55,6 +55,21 @@ export interface PlateEvent {
   entryAtOverride?: string;
 }
 
+/**
+ * The picture belonging to a read the flow has already handled, emitted as
+ * `plate-capture`. Deliberately NOT a PlateEvent: it must never route through
+ * handlePlateEvent, because the entry/exit decision was made on the first post
+ * of this same read. Consumed by parking-flow, which attaches it to the session
+ * that read opened.
+ */
+export interface PlateCapture {
+  cameraId: number;
+  plate: string;
+  /** Absolute path under userData/plates — always non-null when emitted. */
+  imagePath: string;
+  direction: 'entry' | 'exit';
+}
+
 export const lprEvents = new EventEmitter();
 
 /**
@@ -166,22 +181,52 @@ function shouldReportRejection(cameraId: number): boolean {
 // seconds is one car, always — a genuine re-read that far apart is physically
 // impossible, and a DIFFERENT car cannot share the plate.
 const DUPLICATE_POST_WINDOW_MS = 3_000;
-const lastAcceptedRead = new Map<string, number>();
+const lastAcceptedRead = new Map<string, { at: number; hadImage: boolean }>();
 
-function isDuplicatePost(cameraId: number, plate: string): boolean {
+/**
+ * What to do with an inbound post, given what we've already accepted for this
+ * (camera, plate) inside the collapse window.
+ *
+ *   'accept'      — first post of this read; run the full flow.
+ *   'capture'     — a repeat that carries the PICTURE the first one lacked.
+ *                   Save the JPEG and attach it to the session the first post
+ *                   opened, but do NOT re-run the flow.
+ *   'drop'        — a genuine duplicate; nothing new to learn from it.
+ *
+ * The 'capture' case is not hypothetical, it is the normal behaviour of the
+ * Hangzhou-family firmware: it posts a plate-only "quick result" to
+ * /devicemanagement/php/quickplateresult.php and the full result carrying
+ * `imageFile` a beat later. Collapsing purely on (camera, plate) meant the
+ * imageless post won and the picture-bearing one was discarded — plates kept
+ * working and every session silently lost its photo.
+ *
+ * Only ONE upgrade per read: `hadImage` flips on the first picture through, so
+ * a camera that posts the image twice still costs one file.
+ */
+type PostVerdict = 'accept' | 'capture' | 'drop';
+
+function classifyPost(cameraId: number, plate: string, hasImage: boolean): PostVerdict {
   const key = `${cameraId}|${plate}`;
   const now = Date.now();
-  const last = lastAcceptedRead.get(key) ?? 0;
-  if (now - last < DUPLICATE_POST_WINDOW_MS) return true;
-  lastAcceptedRead.set(key, now);
+  const mark = lastAcceptedRead.get(key);
+  if (mark && now - mark.at < DUPLICATE_POST_WINDOW_MS) {
+    if (hasImage && !mark.hadImage) {
+      // Deliberately does NOT refresh `mark.at`: the collapse window stays
+      // anchored to the first post, so a chatty camera can't walk it forward.
+      mark.hadImage = true;
+      return 'capture';
+    }
+    return 'drop';
+  }
+  lastAcceptedRead.set(key, { at: now, hadImage: hasImage });
   // Opportunistic sweep so a long-running box doesn't accumulate one entry per
   // plate seen, forever. Cheap: only runs once the map is already large.
   if (lastAcceptedRead.size > 500) {
-    for (const [k, at] of lastAcceptedRead) {
-      if (now - at > DUPLICATE_POST_WINDOW_MS) lastAcceptedRead.delete(k);
+    for (const [k, m] of lastAcceptedRead) {
+      if (now - m.at > DUPLICATE_POST_WINDOW_MS) lastAcceptedRead.delete(k);
     }
   }
-  return false;
+  return 'accept';
 }
 
 /**
@@ -422,16 +467,20 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     return;
   }
 
-  // Collapse the same physical read arriving more than once — see
-  // isDuplicatePost. Placed AFTER the frame cache (the operator should still get
-  // the freshest picture) and AFTER the no-read guard, but BEFORE the image is
-  // written to disk and before the event is emitted: a duplicate must cost
-  // neither a file nor a trip through the flow.
+  // Collapse the same physical read arriving more than once — see classifyPost.
+  // Placed AFTER the frame cache (the operator should still get the freshest
+  // picture) and AFTER the no-read guard, but BEFORE the event is emitted: a
+  // repeat must never cost a second trip through the flow.
+  //
+  // A repeat that carries the PICTURE the first post lacked is the exception —
+  // it still costs a file, because that file is the whole point of it. It takes
+  // the 'capture' branch below instead of the flow.
   //
   // Returns 200, not an error. The camera did nothing wrong, and a non-2xx makes
   // some firmware retry — which would manufacture the very duplicates this is
   // here to remove.
-  if (isDuplicatePost(camera.id, plate)) {
+  const verdict = classifyPost(camera.id, plate, Boolean(extracted.image));
+  if (verdict === 'drop') {
     lprEvents.emit('webhook-duplicate', {
       cameraId: camera.id,
       cameraName: camera.name,
@@ -450,6 +499,20 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     : null;
 
   const direction = resolveDirection(extracted.direction, camera);
+
+  // The picture half of a read the flow has ALREADY acted on. It must not go
+  // through handlePlateEvent: that would open a second session / re-pulse the
+  // barrier for a car that was admitted a second ago. It carries no decision,
+  // only the photo.
+  if (verdict === 'capture') {
+    if (imagePath) {
+      lprEvents.emit('plate-capture', { cameraId: camera.id, plate, imagePath, direction } satisfies PlateCapture);
+    }
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ok: true, captured: Boolean(imagePath), plate, cameraId: camera.id }));
+    return;
+  }
 
   const event: PlateEvent = {
     cameraId: camera.id,
