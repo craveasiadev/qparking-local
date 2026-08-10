@@ -29,6 +29,7 @@ import type {
 	Transaction,
 	TransactionStatus,
 	ActivityLogPayload,
+	CompanySetting,
 } from "../../shared/types";
 import { canonicalPlate } from "../../shared/plate";
 import { randomUUID } from "node:crypto";
@@ -550,6 +551,15 @@ function applySchema(db: Database.Database) {
       pushed_at TEXT,
       sync_error TEXT
     );
+
+	CREATE TABLE IF NOT EXISTS company_settings (
+	id TEXT PRIMARY KEY,
+	company_id TEXT,
+	season_pass_grace_days INTEGER NOT NULL DEFAULT 30,
+	save_entry_image BOOLEAN DEFAULT 1,
+	save_exit_image BOOLEAN DEFAULT 1,
+	sync_interval_minutes INTEGER NOT NULL DEFAULT 60
+	);
   `);
 
 	// 2026-07-09: the cloud retired the vehicle-type concept — pricing is now
@@ -647,7 +657,10 @@ function applySchema(db: Database.Database) {
 	// access_mode carries its own DEFAULT so existing rows land on 'open' — i.e.
 	// every camera on every upgraded install keeps behaving exactly as it did.
 	for (const col of [
-		"host TEXT", "device_user TEXT", "device_password TEXT", "device_port INTEGER",
+		"host TEXT",
+		"device_user TEXT",
+		"device_password TEXT",
+		"device_port INTEGER",
 		"access_mode TEXT NOT NULL DEFAULT 'open'",
 		// Retired 2026-08-07 and no longer read, but still added on upgrade: the
 		// column is NOT NULL on installs that already have it, and dropping a
@@ -672,9 +685,14 @@ function applySchema(db: Database.Database) {
 	// could silently drop every session (see cloud-queue.resolveScopeId) with no
 	// way to tell. They surface as "Not synced" and one push settles them.
 	for (const col of [
-		"card_scheme TEXT", "payment_timestamp TEXT", "pass_id TEXT", "free_reason TEXT",
-		"rev INTEGER NOT NULL DEFAULT 0", "cloud_synced_rev INTEGER",
-		"cloud_synced_at TEXT", "cloud_sync_error TEXT",
+		"card_scheme TEXT",
+		"payment_timestamp TEXT",
+		"pass_id TEXT",
+		"free_reason TEXT",
+		"rev INTEGER NOT NULL DEFAULT 0",
+		"cloud_synced_rev INTEGER",
+		"cloud_synced_at TEXT",
+		"cloud_sync_error TEXT",
 	]) {
 		try {
 			db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -1193,11 +1211,9 @@ export function describeCameraRisk(camera: LprCamera): string | null {
 	// the camera's SDK — so every camera needs host + credentials. Without them
 	// the flow decides correctly and the boom never moves, which is the single
 	// most confusing failure this app has: sessions appear, nothing opens.
-	const missing = [
-		!camera.host?.trim() && "host",
-		!camera.deviceUser?.trim() && "device username",
-		!camera.devicePassword?.trim() && "device password",
-	].filter(Boolean);
+	const missing = [!camera.host?.trim() && "host", !camera.deviceUser?.trim() && "device username", !camera.devicePassword?.trim() && "device password"].filter(
+		Boolean,
+	);
 	if (missing.length > 0) {
 		return `This app cannot reach the camera to open the barrier — missing ${missing.join(", ")}. Sessions will still be recorded, but the gate will not open for anyone until this is fixed.`;
 	}
@@ -1205,9 +1221,7 @@ export function describeCameraRisk(camera: LprCamera): string | null {
 }
 
 export function listCameras(): LprCamera[] {
-	return (getDb().prepare("SELECT * FROM cameras ORDER BY id").all() as any[])
-		.map(rowToCamera)
-		.map((c) => ({ ...c, risk: describeCameraRisk(c) }));
+	return (getDb().prepare("SELECT * FROM cameras ORDER BY id").all() as any[]).map(rowToCamera).map((c) => ({ ...c, risk: describeCameraRisk(c) }));
 }
 
 export function getCamera(id: number): LprCamera | null {
@@ -1580,22 +1594,13 @@ export function findLastClosedSessionByPlate(plate: string): ParkingSession | nu
  * `withinMs` bounds how far back a capture may reach, so a photo can't attach
  * itself to an unrelated older stay by the same plate.
  */
-export function attachSessionCapture(
-	plate: string,
-	side: "entry" | "exit",
-	imagePath: string,
-	withinMs = 15 * 60_000,
-): ParkingSession | null {
+export function attachSessionCapture(plate: string, side: "entry" | "exit", imagePath: string, withinMs = 15 * 60_000): ParkingSession | null {
 	const db = getDb();
 	const since = new Date(Date.now() - withinMs).toISOString();
 	const row = (
 		side === "entry"
-			? db.prepare(
-					"SELECT * FROM sessions WHERE plate = ? AND entry_image_path IS NULL AND entry_at >= ? ORDER BY entry_at DESC LIMIT 1",
-				)
-			: db.prepare(
-					"SELECT * FROM sessions WHERE plate = ? AND exit_at IS NOT NULL AND exit_image_path IS NULL AND exit_at >= ? ORDER BY exit_at DESC LIMIT 1",
-				)
+			? db.prepare("SELECT * FROM sessions WHERE plate = ? AND entry_image_path IS NULL AND entry_at >= ? ORDER BY entry_at DESC LIMIT 1")
+			: db.prepare("SELECT * FROM sessions WHERE plate = ? AND exit_at IS NOT NULL AND exit_image_path IS NULL AND exit_at >= ? ORDER BY exit_at DESC LIMIT 1")
 	).get(plate, since) as any;
 	if (!row) return null;
 	const column = side === "entry" ? "entry_image_path" : "exit_image_path";
@@ -2195,8 +2200,10 @@ export function markSyncOk(id: number): void {
 		// current rev here would mark that change as delivered when it wasn't.
 		const row = db.prepare(`SELECT session_id, session_rev, op FROM sync_queue WHERE id = ?`).get(id) as any;
 		if (row?.session_id != null && String(row.op).startsWith("session.")) {
-			db.prepare(`UPDATE sessions SET cloud_synced_rev = ?, cloud_synced_at = ${NOW_MS_SQL}, cloud_sync_error = NULL WHERE id = ?`)
-				.run(row.session_rev ?? 0, row.session_id);
+			db.prepare(`UPDATE sessions SET cloud_synced_rev = ?, cloud_synced_at = ${NOW_MS_SQL}, cloud_sync_error = NULL WHERE id = ?`).run(
+				row.session_rev ?? 0,
+				row.session_id,
+			);
 		}
 		db.prepare(`DELETE FROM sync_queue WHERE id = ?`).run(id);
 	});
@@ -2207,8 +2214,11 @@ export function markSyncRetry(id: number, error: string, delayMs: number): void 
 	const next = new Date(Date.now() + delayMs).toISOString();
 	const db = getDb();
 	const tx = db.transaction(() => {
-		db.prepare(`UPDATE sync_queue SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-			.run(error, next, id);
+		db.prepare(`UPDATE sync_queue SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(
+			error,
+			next,
+			id,
+		);
 		stampSessionSyncError(id, error);
 	});
 	tx();
@@ -2217,8 +2227,7 @@ export function markSyncRetry(id: number, error: string, delayMs: number): void 
 export function markSyncFailed(id: number, error: string): void {
 	const db = getDb();
 	const tx = db.transaction(() => {
-		db.prepare(`UPDATE sync_queue SET status = 'failed', last_error = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-			.run(error, id);
+		db.prepare(`UPDATE sync_queue SET status = 'failed', last_error = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(error, id);
 		stampSessionSyncError(id, error);
 	});
 	tx();
@@ -2256,11 +2265,7 @@ const NEEDS_CLOUD_PUSH_SQL = `cloud_synced_rev IS NULL
      OR updated_at > cloud_synced_at`;
 
 export function listSessionsNeedingCloudPush(limit = 5000): ParkingSession[] {
-	return (
-		getDb()
-			.prepare(`SELECT * FROM sessions WHERE ${NEEDS_CLOUD_PUSH_SQL} ORDER BY entry_at ASC LIMIT ?`)
-			.all(limit) as any[]
-	).map(rowToSession);
+	return (getDb().prepare(`SELECT * FROM sessions WHERE ${NEEDS_CLOUD_PUSH_SQL} ORDER BY entry_at ASC LIMIT ?`).all(limit) as any[]).map(rowToSession);
 }
 
 /** How many sessions are waiting to reach the cloud (drives the page's badge). */
@@ -2976,6 +2981,63 @@ export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
 	tx();
 }
 
+// ─── company settings (mirror) ─────────────────────────────────────────────
+
+function rowToCompanySetting(row: any): CompanySetting {
+	return {
+		id: row.id,
+		companyId: row.company_id ?? null,
+		seasonPassGraceDays: Number(row.season_pass_grace_days ?? 30),
+		saveEntryImage: !!row.save_entry_image,
+		saveExitImage: !!row.save_exit_image,
+		syncIntervalMinutes: Number(row.sync_interval_minutes ?? 60),
+	};
+}
+
+/** The cached company settings for this install. Null until the first pull —
+ *  callers must treat that as "fall back to the built-in default", never as
+ *  "the feature is off". */
+export function getCompanySetting(): CompanySetting | null {
+	const row = getDb().prepare("SELECT * FROM company_settings LIMIT 1").get() as any;
+	return row ? rowToCompanySetting(row) : null;
+}
+
+/**
+ * Idempotent upsert of the single company-settings row.
+ *
+ * The DELETE is what keeps it single: the cloud sends one record, but its `id`
+ * can change (company re-provisioned, settings row recreated server-side), and
+ * a plain ON CONFLICT upsert would then leave the OLD row sitting alongside the
+ * new one. getCompanySetting() does `LIMIT 1` with no ORDER BY, so which of the
+ * two it returned would be arbitrary — the local mirror would silently serve
+ * stale settings. Deleting every other id first makes that unrepresentable.
+ */
+export function upsertCompanySetting(setting: CompanySetting): CompanySetting {
+	const db = getDb();
+	const tx = db.transaction(() => {
+		db.prepare("DELETE FROM company_settings WHERE id <> ?").run(setting.id);
+		db.prepare(`INSERT INTO company_settings (
+        id, company_id, season_pass_grace_days, save_entry_image, save_exit_image, sync_interval_minutes
+      ) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id=excluded.company_id,
+        season_pass_grace_days=excluded.season_pass_grace_days,
+        save_entry_image=excluded.save_entry_image,
+        save_exit_image=excluded.save_exit_image,
+        sync_interval_minutes=excluded.sync_interval_minutes`,
+		).run(
+			setting.id,
+			setting.companyId,
+			setting.seasonPassGraceDays,
+			setting.saveEntryImage ? 1 : 0,
+			setting.saveExitImage ? 1 : 0,
+			setting.syncIntervalMinutes,
+		);
+	});
+	tx();
+	return getCompanySetting()!;
+}
+
 /**
  * Replace the entire cached pass set (site-wide). The SaaS is the source of
  * truth — a pass that disappeared from the cloud (revoked, expired, holder
@@ -3036,9 +3098,7 @@ export function listActivityLogs(): ActivityLog[] {
 	// Newest first — occurred_at is when the event actually happened (ISO 8601
 	// text, so lexicographic DESC is chronological); created_at breaks ties for
 	// rows logged in the same instant.
-	const rows = getDb()
-		.prepare("SELECT * FROM activity_logs ORDER BY occurred_at DESC, created_at DESC")
-		.all() as any[];
+	const rows = getDb().prepare("SELECT * FROM activity_logs ORDER BY occurred_at DESC, created_at DESC").all() as any[];
 	return rows.map(rowToActivityLog);
 }
 
