@@ -41,10 +41,8 @@ interface CloudSyncReport {
   vehicles: CloudSyncResult;
   spaces: CloudSyncResult;
   activity?: CloudSyncResult;
-  /** Open-session restore (cars still inside per the cloud). `fetched` counts
-   *  sessions actually IMPORTED — stays this box already knows are skipped, so
-   *  0 is the normal healthy-box result. */
   sessions?: CloudSyncResult;
+  companySetting?: CloudSyncResult;
   equipment?: {
     lanes: EquipmentPushItem[];
     terminals: EquipmentPushItem[];
@@ -69,6 +67,7 @@ const PULL_MODEL_LABELS: Record<string, string> = {
   spaces: 'Bay Management',
   activity: 'Activity Logs',
   sessions: 'Sessions',
+  companySetting: 'Company Settings',
 };
 
 const PUSH_GROUP_LABELS: Record<string, string> = {
@@ -353,7 +352,7 @@ export function Settings() {
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] font-mono space-y-1.5">
             <div className="space-y-0.5">
               <div className="text-gray-400 uppercase tracking-wide text-[10px] not-italic">Pulled from cloud ↓</div>
-              {(['site', 'policies', 'passes', 'blockedPlates', 'customers', 'vehicles', 'spaces', 'activity', 'sessions'] as const).map((model) => {
+              {(['site', 'policies', 'passes', 'blockedPlates', 'customers', 'vehicles', 'spaces', 'activity', 'sessions', 'companySetting'] as const).map((model) => {
                 const result = cloudSyncReport[model];
                 if (!result) return null;
                 // Sessions is an IMPORT (restore of cars still inside), not a

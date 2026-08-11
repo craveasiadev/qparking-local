@@ -16,6 +16,7 @@
  *   Site             → sites
  *   SyncQueueRow     → sync_queue
  *   ActivityLog      → activity_logs
+ *   CompanySetting   → company_settings  (single row)
  *   AppSettings      → settings   (key-value rows, coerced by default's type)
  *
  * Shared by BOTH processes (main + renderer) — keep zero runtime code here.
@@ -672,4 +673,23 @@ export interface AppSettings {
    *  succeeded but its PayResult callback was lost (network/firewall). Only
    *  fully safe once the PayResult callback path is reliable. */
   tngAutoRetrigger: boolean;
+}
+
+/** Company-wide settings mirrored from qparking SaaS (GET /company/settings).
+ *  A read-only mirror this app never writes back, like cloud_customers /
+ *  cloud_vehicles.
+ *
+ *  Exactly ONE row — the cloud owns a single settings record per company — so
+ *  db.getCompanySetting() takes no lookup key, the way getCurrentSite() doesn't.
+ *
+ *  ⚠️ MIRRORED ONLY so far: the pull writes these values but nothing reads them
+ *  yet. Honouring them (pass grace at the gate, capture retention, pull cadence)
+ *  is still to be wired up. */
+export interface CompanySetting {
+  id: string;
+  companyId: string | null;
+  seasonPassGraceDays: number;
+  saveEntryImage: boolean;
+  saveExitImage: boolean;
+  syncIntervalMinutes: number;
 }

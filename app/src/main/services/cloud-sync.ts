@@ -23,6 +23,7 @@ import {
 	replaceAllCloudCustomers,
 	replaceAllCloudVehicles,
 	replaceParkingSpaces,
+	upsertCompanySetting,
 	pruneStaleRatePolicies,
 	replaceAllActivityLogs,
 	importOpenSessionsFromCloud,
@@ -36,7 +37,7 @@ import {
 } from "./db";
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
-import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site, ActivityLog } from "../../shared/types";
+import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site, ActivityLog, CompanySetting } from "../../shared/types";
 
 export interface SyncResult {
 	ok: boolean;
@@ -645,6 +646,44 @@ export async function syncParkingSpaces(): Promise<SyncResult> {
 	}
 }
 
+/** Map the cloud's company-settings row to the local CompanySetting. Defaults
+ *  mirror the column defaults in db.applySchema, so a payload missing a field
+ *  lands on the same value a fresh row would. */
+function mapApiRowToCompanySetting(settingRow: any): CompanySetting {
+	return {
+		id: String(settingRow.id ?? ""),
+		companyId: settingRow.company_id ?? null,
+		seasonPassGraceDays: Number(settingRow.season_pass_grace_days ?? 30),
+		// The SaaS may send these as JSON booleans or as 0/1 — `?? default` then
+		// coerce handles both, and keeps an explicit `false`/`0` meaning false.
+		saveEntryImage: !!(settingRow.save_entry_image ?? true),
+		saveExitImage: !!(settingRow.save_exit_image ?? true),
+		syncIntervalMinutes: Number(settingRow.sync_interval_minutes ?? 60),
+	};
+}
+
+/**
+ * Pull the company-wide settings record (GET /company/settings) into the local
+ * `company_settings` mirror. A SINGLE record, not a list — same shape as
+ * syncSite, so it uses the `{ data: {...} }` object envelope rather than
+ * CloudListBody, and reports `fetched: 1`.
+ */
+export async function syncCompanySetting(): Promise<SyncResult> {
+	const cloud = getCloudApi();
+	if (!cloud) return NOT_CONFIGURED;
+	try {
+		const { data: responseBody } = await cloud.get<{ data?: CompanySetting }>("/company/settings");
+		const settingRow = responseBody?.data;
+		if (!settingRow?.id) return { ok: false, fetched: 0, error: "empty_company_settings_payload" };
+		upsertCompanySetting(mapApiRowToCompanySetting(settingRow));
+		return { ok: true, fetched: 1 };
+	} catch (error) {
+		// 404 means an older qparking SaaS without the endpoint — gracefully no-op.
+		if (isHttpStatus(error, 404)) return { ok: true, fetched: 0 };
+		return toFailedSyncResult(error);
+	}
+}
+
 /** Run all pulls in parallel; one failing doesn't block the others. */
 export async function syncAll(): Promise<{
 	policies: SyncResult;
@@ -654,10 +693,11 @@ export async function syncAll(): Promise<{
 	vehicles: SyncResult;
 	spaces: SyncResult;
 	site: SyncResult;
-	activity: SyncResult;
+	activity: SyncResult; 
 	sessions: SyncResult;
+	companySetting: SyncResult;
 }> {
-	const [policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions] = await Promise.all([
+	const [policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions, companySetting] = await Promise.all([
 		syncRatePolicies().catch(toFailedSyncResult),
 		syncSeasonPasses().catch(toFailedSyncResult),
 		syncBlockedPlates().catch(toFailedSyncResult),
@@ -667,8 +707,9 @@ export async function syncAll(): Promise<{
 		syncSite().catch(toFailedSyncResult),
 		syncActivityLogs().catch(toFailedSyncResult),
 		syncOpenSessions().catch(toFailedSyncResult),
+		syncCompanySetting().catch(toFailedSyncResult),
 	]);
-	const results = { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions };
+	const results = { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions, companySetting };
 	stampPullOutcome(results);
 	return results;
 }
