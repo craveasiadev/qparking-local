@@ -604,10 +604,9 @@ function mapApiRowToCompanySetting(settingRow: any): CompanySetting {
 		id: String(settingRow.id ?? ""),
 		companyId: settingRow.company_id ?? null,
 		seasonPassGraceDays: Number(settingRow.season_pass_grace_days ?? 30),
-		// The SaaS may send these as JSON booleans or as 0/1 — `?? default` then
+		// The SaaS may send this as a JSON boolean or as 0/1 — `?? default` then
 		// coerce handles both, and keeps an explicit `false`/`0` meaning false.
-		saveEntryImage: !!(settingRow.save_entry_image ?? true),
-		saveExitImage: !!(settingRow.save_exit_image ?? true),
+		syncCaptureImages: !!(settingRow.sync_capture_images ?? true),
 		syncIntervalMinutes: Number(settingRow.sync_interval_minutes ?? 60),
 	};
 }

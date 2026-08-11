@@ -296,7 +296,7 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 | `camera-probe.ts` | HTTP reachability check for a camera (`Test connection` on the LPR cameras page). |
 | `camera-rtsp.ts` | Live-view video source for the Live display: pulls each camera's RTSP/H.264 stream through FFmpeg and re-serves it as MJPEG on the same `/live/<id>` endpoint `lpr-webhook.ts` exposes. |
 | `cloud-sync.ts` | **Pull** from the Laravel API: rate policies, season passes, parking spaces, blocked plates, customers, vehicles, site, activity logs, open sessions, company settings — all in parallel via `syncAll()`. |
-| `cloud-queue.ts` | **Push** to the Laravel API: a persistent, backoff-retried queue (`sync_queue` table) for session entry/update/exit/delete and payment transactions. Plate images ride along as base64, gated by `company_settings.save_entry_image`/`save_exit_image`. |
+| `cloud-queue.ts` | **Push** to the Laravel API: a persistent, backoff-retried queue (`sync_queue` table) for session entry/update/exit/delete and payment transactions. Plate images ride along as base64, gated by `company_settings.sync_capture_images`. |
 | `camera-push.ts` | Mirrors the local camera registry up to the cloud (read-only mirror; cameras stay owned locally). |
 | `device-push.ts` | Mirrors terminals + lanes up to the cloud. |
 | `device-sync.ts` | Manual, operator-triggered two-way equipment sync (push local → cloud, or pull cloud → local) fired from the Cameras/Lanes/Terminals pages — never automatic. |

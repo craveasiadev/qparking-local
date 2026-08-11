@@ -556,11 +556,31 @@ function applySchema(db: Database.Database) {
 	id TEXT PRIMARY KEY,
 	company_id TEXT,
 	season_pass_grace_days INTEGER NOT NULL DEFAULT 30,
-	save_entry_image BOOLEAN DEFAULT 1,
-	save_exit_image BOOLEAN DEFAULT 1,
+	sync_capture_images BOOLEAN DEFAULT 1,
 	sync_interval_minutes INTEGER NOT NULL DEFAULT 60
 	);
   `);
+
+	// 2026-08-11: the cloud collapsed the per-direction save_entry_image /
+	// save_exit_image pair into a single sync_capture_images flag (see backend
+	// company_settings migration). Add the new column and drop the old pair on
+	// installs that predate this; fresh installs already get the new shape from
+	// the CREATE TABLE above, so both steps just throw and get caught.
+	try {
+		db.exec("ALTER TABLE company_settings ADD COLUMN sync_capture_images BOOLEAN DEFAULT 1");
+	} catch {
+		/* already applied */
+	}
+	try {
+		db.exec("ALTER TABLE company_settings DROP COLUMN save_entry_image");
+	} catch {
+		/* column absent or old SQLite */
+	}
+	try {
+		db.exec("ALTER TABLE company_settings DROP COLUMN save_exit_image");
+	} catch {
+		/* column absent or old SQLite */
+	}
 
 	// 2026-07-09: the cloud retired the vehicle-type concept — pricing is now
 	// purely lane → rate policy → day/time/date. Drop the cached taxonomy tables
@@ -2988,8 +3008,7 @@ function rowToCompanySetting(row: any): CompanySetting {
 		id: row.id,
 		companyId: row.company_id ?? null,
 		seasonPassGraceDays: Number(row.season_pass_grace_days ?? 30),
-		saveEntryImage: !!row.save_entry_image,
-		saveExitImage: !!row.save_exit_image,
+		syncCaptureImages: !!row.sync_capture_images,
 		syncIntervalMinutes: Number(row.sync_interval_minutes ?? 60),
 	};
 }
@@ -3017,20 +3036,18 @@ export function upsertCompanySetting(setting: CompanySetting): CompanySetting {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM company_settings WHERE id <> ?").run(setting.id);
 		db.prepare(`INSERT INTO company_settings (
-        id, company_id, season_pass_grace_days, save_entry_image, save_exit_image, sync_interval_minutes
-      ) VALUES (?,?,?,?,?,?)
+        id, company_id, season_pass_grace_days, sync_capture_images, sync_interval_minutes
+      ) VALUES (?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
         company_id=excluded.company_id,
         season_pass_grace_days=excluded.season_pass_grace_days,
-        save_entry_image=excluded.save_entry_image,
-        save_exit_image=excluded.save_exit_image,
+        sync_capture_images=excluded.sync_capture_images,
         sync_interval_minutes=excluded.sync_interval_minutes`,
 		).run(
 			setting.id,
 			setting.companyId,
 			setting.seasonPassGraceDays,
-			setting.saveEntryImage ? 1 : 0,
-			setting.saveExitImage ? 1 : 0,
+			setting.syncCaptureImages ? 1 : 0,
 			setting.syncIntervalMinutes,
 		);
 	});

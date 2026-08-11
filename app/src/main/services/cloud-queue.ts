@@ -89,10 +89,10 @@ function readImageAsBase64(imagePath: string | null | undefined): string | null 
 	}
 }
 
-/** Gates the upload on company_settings.save_entry_image/save_exit_image (disk save is unaffected). Read at enqueue time, so a flag flip doesn't touch already-queued rows. Missing setting defaults to ON, not off. */
-function readImageForUpload(type: "entry" | "exit", imagePath: string | null | undefined): string | null {
+/** Gates the upload on company_settings.sync_capture_images (disk save is unaffected). Read at enqueue time, so a flag flip doesn't touch already-queued rows. Missing setting defaults to ON, not off. */
+function readImageForUpload(imagePath: string | null | undefined): string | null {
 	const setting = getCompanySetting();
-	const isEnabled = !setting || (type === "entry" ? setting.saveEntryImage : setting.saveExitImage);
+	const isEnabled = !setting || setting.syncCaptureImages;
 	return isEnabled ? readImageAsBase64(imagePath) : null;
 }
 
@@ -114,7 +114,7 @@ function scopeField(session: ParkingSession): { site_id?: string } {
  * fetching directly so retries are guaranteed.
  */
 export function enqueueEntry(session: ParkingSession): void {
-	const entryImage = readImageForUpload("entry", session.entryImagePath);
+	const entryImage = readImageForUpload(session.entryImagePath);
 	enqueueSync(
 		"session.entry",
 		{
@@ -132,8 +132,8 @@ export function enqueueEntry(session: ParkingSession): void {
 export function enqueueExit(session: ParkingSession): void {
 	// Ships both images (entry in case an earlier retry dropped it; safe to resend).
 	// Payment outcome is NOT sent here — that's enqueueTransaction → /transactions.
-	const entryImage = readImageForUpload("entry", session.entryImagePath);
-	const exitImage = readImageForUpload("exit", session.exitImagePath);
+	const entryImage = readImageForUpload(session.entryImagePath);
+	const exitImage = readImageForUpload(session.exitImagePath);
 	enqueueSync(
 		"session.exit",
 		{
@@ -162,9 +162,9 @@ export function enqueueUpdate(session: ParkingSession): void {
 	// Re-posting an open entry refreshes it; posting with exit_time closes it —
 	// same upsert endpoint as enqueueEntry/enqueueExit, images included (safe to
 	// resend: persistPlateImage overwrites the same object key).
-	const entryImage = readImageForUpload("entry", session.entryImagePath);
+	const entryImage = readImageForUpload(session.entryImagePath);
 	if (session.exitAt) {
-		const exitImage = readImageForUpload("exit", session.exitImagePath);
+		const exitImage = readImageForUpload(session.exitImagePath);
 		enqueueSync(
 			"session.update",
 			{
