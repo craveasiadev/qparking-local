@@ -446,6 +446,26 @@ function wireRendererEvents() {
         resourceId: p?.plate ?? null,
         description: `${p?.plate ?? '?'} tried to ${isEntry ? 'enter' : 'exit'} a pass-only lane without a valid pass — refused, barrier not opened`,
       });
+    } else if (kind === 'entry-quota-full') {
+      // The pass is valid; it just has no free slot. Distinct from
+      // not_authorised on purpose — the fix is "one of your other cars must
+      // leave", not "buy a pass", and staff need to be told which.
+      sendToRenderer('log', {
+        terminalId: 0,
+        direction: 'error',
+        message: `QUOTA FULL · ${p?.plate} holds a valid pass but ${p?.inside}/${p?.limit} of its cars are already inside — entry refused at "${p?.cameraName || `camera ${p?.cameraId}`}". Barrier stayed closed; another of the holder's vehicles must exit first.`,
+        payload: p,
+      });
+      audit({
+        eventKey: 'gate.entry.quota_full',
+        action: 'entry',
+        category: 'gate',
+        severity: 'medium',
+        outcome: 'blocked',
+        resourceType: 'vehicle',
+        resourceId: p?.plate ?? null,
+        description: `${p?.plate ?? '?'} refused entry — pass ${p?.passId ?? '?'} already has ${p?.inside ?? '?'}/${p?.limit ?? '?'} vehicles inside`,
+      });
     } else if (kind === 'exit-pass-holder-no-entry') {
       // Let out on the strength of the pass, but recorded: a run of these means
       // the ENTRY camera is dropping reads, which is worth chasing.

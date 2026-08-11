@@ -25,7 +25,7 @@ import { app } from 'electron';
 import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, SeasonPass, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
-  listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, getSessionById,
+  listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, countPassPlatesInside, getSessionById,
   createTransaction, updateTransaction, findBlockedPlate, findLastClosedSessionByPlate,
   attachSessionCapture,
 } from './db';
@@ -301,20 +301,53 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
   // now" — see cloud-sync.ts. On a deny-by-default gate that means a brand-new
   // resident is refused until the operator syncs.
   const camera = getCamera(event.cameraId);
-  if (camera?.accessMode === 'pass_only') {
-    // No window argument = "valid at this instant" (see findSeasonPassByPlate).
-    const pass = findSeasonPassByPlate(event.plate);
-    if (!pass) {
-      flog(`ENTRY REFUSED (NO PASS): plate=${event.plate} camera="${camera.name}" is set to Only Pass Allow and this plate holds no pass valid right now → no session created, barrier NOT pulsed. Issue a pass in the cloud and press Sync now, or turn the toggle off.`);
+  // No window argument = "valid at this instant" (see findSeasonPassByPlate).
+  // Looked up ONCE here: both the pass_only gate and the quota check below
+  // need the same answer, and asking twice invites them to disagree.
+  const pass = findSeasonPassByPlate(event.plate);
+
+  if (camera?.accessMode === 'pass_only' && !pass) {
+    flog(`ENTRY REFUSED (NO PASS): plate=${event.plate} camera="${camera.name}" is set to Only Pass Allow and this plate holds no pass valid right now → no session created, barrier NOT pulsed. Issue a pass in the cloud and press Sync now, or turn the toggle off.`);
+    parkingEvents.emit('warning', {
+      kind: 'entry-not-authorised',
+      plate: event.plate,
+      cameraId: camera.id,
+      cameraName: camera.name,
+    });
+    return;
+  }
+
+  // ─── Concurrency quota (ENTRY ONLY) ──────────────────────────────────
+  // A pass covers a POOL of plates and admits `concurrentLimit` of them at
+  // once — one per bay it holds, or one when it holds none. Ten plates on a
+  // two-bay pass is still two cars inside; the third is refused here.
+  //
+  // Deliberately NOT limited to pass_only cameras: the quota is a property of
+  // the entitlement, not of the lane. And deliberately never applied at exit —
+  // a car that got in legitimately must always be able to leave.
+  //
+  // Counted from THIS box's own open sessions, so it holds through a WAN
+  // outage. The box is the authority for its own site.
+  if (pass) {
+    const inside = countPassPlatesInside(pass.passId, event.plate);
+    if (inside >= pass.concurrentLimit) {
+      flog(
+        `ENTRY REFUSED (QUOTA FULL): plate=${event.plate} pass=${pass.passId} already has ${inside}/${pass.concurrentLimit} car(s) inside → no session created, barrier NOT pulsed. One of the pass's other vehicles must exit first.`,
+      );
       parkingEvents.emit('warning', {
-        kind: 'entry-not-authorised',
+        kind: 'entry-quota-full',
         plate: event.plate,
-        cameraId: camera.id,
-        cameraName: camera.name,
+        cameraId: camera?.id ?? event.cameraId,
+        cameraName: camera?.name ?? '',
+        passId: pass.passId,
+        inside,
+        limit: pass.concurrentLimit,
       });
       return;
     }
-    flog(`PASS OK: plate=${event.plate} holds a valid ${pass.passType} pass (id=${pass.passId}, valid ${pass.startDate ?? '—'}→${pass.endDate ?? 'forever'}) on Only Pass Allow camera "${camera.name}" → admitted`);
+    flog(
+      `PASS OK: plate=${event.plate} holds a valid ${pass.passType} pass (id=${pass.passId}, valid ${pass.startDate ?? '—'}→${pass.endDate ?? 'forever'}, ${inside}/${pass.concurrentLimit} slots used) → admitted`,
+    );
   }
 
   const session = createEntrySession(

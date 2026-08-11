@@ -1,0 +1,170 @@
+{
+  "_comment": [
+    "Canonical gate-decision truth table — PASS_DOMAIN_RECONSTRUCT_PLAN.md §8.",
+    "The cloud (GateDecisionService) and the box (qparking-local) each implement",
+    "this algorithm; this file is what proves they agree. Phase 6 copies it into",
+    "qparking-local and runs it there against the offline implementation.",
+    "",
+    "Case fields:",
+    "  direction               entry | exit",
+    "  registered              false = plate belongs to nobody",
+    "  blacklisted             banned at THIS site",
+    "  pass                    null, or { status, bays, concurrent_limit,",
+    "                          start_offset_days, end_offset_days, other_site }",
+    "  plates_on_pass          size of the plate pool",
+    "  arriving_index          which plate is at the barrier (0-based)",
+    "  already_inside          indexes with an open session at this site",
+    "  expect                  verdict enum value",
+    "  expect_slots            optional [used, allowed]"
+  ],
+  "cases": [
+    {
+      "name": "unknown plate is nobody's vehicle",
+      "direction": "entry",
+      "registered": false,
+      "expect": "no_vehicle"
+    },
+    {
+      "name": "blacklist beats a perfectly valid pass",
+      "direction": "entry",
+      "blacklisted": true,
+      "pass": { "status": "active", "bays": 1, "end_offset_days": 30 },
+      "plates_on_pass": 1,
+      "expect": "deny_blacklist"
+    },
+    {
+      "name": "blacklisted with no pass is still a blacklist denial",
+      "direction": "entry",
+      "blacklisted": true,
+      "pass": null,
+      "expect": "deny_blacklist"
+    },
+    {
+      "name": "registered but no pass at this site falls through to hourly",
+      "direction": "entry",
+      "pass": null,
+      "expect": "no_pass"
+    },
+    {
+      "name": "a pass at another site does not open this gate",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 1, "end_offset_days": 30, "other_site": true },
+      "plates_on_pass": 1,
+      "expect": "no_pass"
+    },
+    {
+      "name": "expired pass does not open the gate",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 1, "start_offset_days": -60, "end_offset_days": -1 },
+      "plates_on_pass": 1,
+      "expect": "no_pass"
+    },
+    {
+      "name": "pass that has not started yet does not open the gate",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 1, "start_offset_days": 7, "end_offset_days": 40 },
+      "plates_on_pass": 1,
+      "expect": "no_pass"
+    },
+    {
+      "name": "pending pass is not yet an entitlement",
+      "direction": "entry",
+      "pass": { "status": "pending", "bays": 1, "end_offset_days": 30 },
+      "plates_on_pass": 1,
+      "expect": "no_pass"
+    },
+    {
+      "name": "no bay means one car — and that car gets in",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 0, "end_offset_days": 30 },
+      "plates_on_pass": 3,
+      "arriving_index": 0,
+      "already_inside": [],
+      "expect": "allow_free",
+      "expect_slots": [0, 1]
+    },
+    {
+      "name": "no bay, one car already inside — second is refused",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 0, "end_offset_days": 30 },
+      "plates_on_pass": 3,
+      "arriving_index": 1,
+      "already_inside": [0],
+      "expect": "deny_quota_full",
+      "expect_slots": [1, 1]
+    },
+    {
+      "name": "ten plates, two bays, second car still gets in",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 2, "end_offset_days": 30 },
+      "plates_on_pass": 10,
+      "arriving_index": 1,
+      "already_inside": [0],
+      "expect": "allow_free",
+      "expect_slots": [1, 2]
+    },
+    {
+      "name": "ten plates, two bays, third car is denied",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 2, "end_offset_days": 30 },
+      "plates_on_pass": 10,
+      "arriving_index": 2,
+      "already_inside": [0, 1],
+      "expect": "deny_quota_full",
+      "expect_slots": [2, 2]
+    },
+    {
+      "name": "a rescan of a car already inside does not eat a second slot",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 1, "end_offset_days": 30 },
+      "plates_on_pass": 4,
+      "arriving_index": 0,
+      "already_inside": [0],
+      "expect": "allow_free",
+      "expect_slots": [0, 1]
+    },
+    {
+      "name": "explicit concurrent_limit overrides the bay count",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 0, "concurrent_limit": 3, "end_offset_days": 30 },
+      "plates_on_pass": 4,
+      "arriving_index": 2,
+      "already_inside": [0, 1],
+      "expect": "allow_free",
+      "expect_slots": [2, 3]
+    },
+    {
+      "name": "resident pass with no end date never lapses",
+      "direction": "entry",
+      "pass": { "status": "active", "bays": 1, "start_offset_days": -900, "end_offset_days": null },
+      "plates_on_pass": 2,
+      "arriving_index": 0,
+      "already_inside": [],
+      "expect": "allow_free",
+      "expect_slots": [0, 1]
+    },
+    {
+      "name": "a car that got in legitimately still exits free when the quota is full",
+      "direction": "exit",
+      "pass": { "status": "active", "bays": 1, "end_offset_days": 30 },
+      "plates_on_pass": 4,
+      "arriving_index": 0,
+      "already_inside": [0, 1, 2],
+      "expect": "allow_free"
+    },
+    {
+      "name": "blacklisted vehicle is stopped at exit too",
+      "direction": "exit",
+      "blacklisted": true,
+      "pass": { "status": "active", "bays": 1, "end_offset_days": 30 },
+      "plates_on_pass": 1,
+      "expect": "deny_blacklist"
+    },
+    {
+      "name": "no pass at exit means the hourly charge applies",
+      "direction": "exit",
+      "pass": null,
+      "expect": "no_pass"
+    }
+  ]
+}

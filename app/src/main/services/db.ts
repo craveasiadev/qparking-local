@@ -382,6 +382,13 @@ function applySchema(db: Database.Database) {
       end_date TEXT,
       is_free INTEGER NOT NULL DEFAULT 0,
       space_number TEXT,
+      -- How many of THIS pass's plates may be inside at once (one per bay, or
+      -- 1 with no bay). Sent pre-computed by the cloud: the box has no bay
+      -- table to derive it from, and the barrier cannot wait on the WAN.
+      concurrent_limit INTEGER NOT NULL DEFAULT 1,
+      -- resident | staff | season | guest — recorded so gate refusals and the
+      -- activity log can say WHO was turned away, not just that someone was.
+      role TEXT,
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (pass_id, plate_number)
     );
@@ -392,11 +399,14 @@ function applySchema(db: Database.Database) {
     -- staff can look an owner up at the gate without a browser. The cloud_
     -- prefix marks them as mirrors this app never writes back (unlike
     -- sessions/lanes/cameras, which are locally owned).
+    -- site_role is what they ARE at this site (the role of the pass they hold
+    -- here). type is the old global resident/visitor flag, kept for one release.
     CREATE TABLE IF NOT EXISTS cloud_customers (
       id TEXT PRIMARY KEY,
       full_name TEXT,
       email TEXT,
       phone TEXT,
+      site_role TEXT,
       type TEXT,
       is_enabled INTEGER NOT NULL DEFAULT 1,
       vehicles_count INTEGER NOT NULL DEFAULT 0,
@@ -416,9 +426,6 @@ function applySchema(db: Database.Database) {
       owner_kind TEXT,
       is_blacklisted INTEGER NOT NULL DEFAULT 0,
       blacklist_reason TEXT,
-      pass_type TEXT,
-      pass_status TEXT,
-      pass_end_date TEXT,
       created_at TEXT,
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -484,6 +491,10 @@ function applySchema(db: Database.Database) {
       status TEXT NOT NULL DEFAULT 'available',
       customer_name TEXT,
       vehicle_plate TEXT,
+      -- What the bay is SET ASIDE for: visitor | resident | season | staff.
+      -- pass_type below is a denormalised copy of whoever holds it, so an
+      -- EMPTY resident bay carried nothing at all and read as general parking.
+      bay_type TEXT,
       pass_type TEXT,
       pass_id TEXT,
       start_date TEXT,
@@ -829,6 +840,15 @@ function applySchema(db: Database.Database) {
 		["lanes", "external_id TEXT"],
 		["lanes", "terminal_external_id TEXT"],
 		["terminals", "external_id TEXT"],
+		// Pass pool + quota (2026-08-10). Existing installs default to 1 car per
+		// pass, which is exactly today's behaviour — one plate, one pass, one car.
+		["season_passes", "concurrent_limit INTEGER NOT NULL DEFAULT 1"],
+		["season_passes", "role TEXT"],
+		// Bay designation (2026-08-11). NULL until the next sync, and the UI
+		// falls back to the legacy pass_type, so an un-synced box is unchanged.
+		["parking_spaces", "bay_type TEXT"],
+		["cloud_customers", "site_role TEXT"],
+		["season_passes", "plan TEXT"],
 	] as const) {
 		try {
 			db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -2697,6 +2717,11 @@ function rowToSeasonPass(row: any): SeasonPass {
 		endDate: row.end_date ?? null,
 		isFree: !!row.is_free,
 		spaceNumber: row.space_number ?? null,
+		// A v1 row (or a pre-migration one) has no limit — one car, today's
+		// behaviour.
+		concurrentLimit: Math.max(1, Number(row.concurrent_limit ?? 1)),
+		role: row.role ?? null,
+		plan: row.plan ?? null,
 		fetchedAt: row.fetched_at,
 	};
 }
@@ -2789,6 +2814,7 @@ function rowToCloudCustomer(row: any): CloudCustomer {
 		fullName: row.full_name ?? null,
 		email: row.email ?? null,
 		phone: row.phone ?? null,
+		siteRole: row.site_role ?? null,
 		type: row.type ?? null,
 		isEnabled: !!row.is_enabled,
 		vehiclesCount: row.vehicles_count ?? 0,
@@ -2808,11 +2834,11 @@ export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM cloud_customers").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
-        id, full_name, email, phone, type, is_enabled,
+        id, full_name, email, phone, site_role, type, is_enabled,
         vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const c of customers) {
-			insert.run(c.id, c.fullName, c.email, c.phone, c.type, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
+			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.type, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
 		}
 	});
 	tx();
@@ -2829,9 +2855,6 @@ function rowToCloudVehicle(row: any): CloudVehicle {
 		ownerKind: row.owner_kind ?? null,
 		isBlacklisted: !!row.is_blacklisted,
 		blacklistReason: row.blacklist_reason ?? null,
-		passType: row.pass_type ?? null,
-		passStatus: row.pass_status ?? null,
-		passEndDate: row.pass_end_date ?? null,
 		createdAt: row.created_at ?? null,
 		fetchedAt: row.fetched_at,
 	};
@@ -2847,9 +2870,8 @@ export function replaceAllCloudVehicles(vehicles: CloudVehicle[]): void {
 		db.prepare("DELETE FROM cloud_vehicles").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_vehicles (
         id, plate_number, vehicle_type, color, model, owner_name, owner_kind,
-        is_blacklisted, blacklist_reason, pass_type, pass_status, pass_end_date,
-        created_at, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+        is_blacklisted, blacklist_reason, created_at, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const v of vehicles) {
 			insert.run(
 				// Canonical plate so a staff search matches what the gate reads.
@@ -2862,9 +2884,6 @@ export function replaceAllCloudVehicles(vehicles: CloudVehicle[]): void {
 				v.ownerKind,
 				v.isBlacklisted ? 1 : 0,
 				v.blacklistReason,
-				v.passType,
-				v.passStatus,
-				v.passEndDate,
 				v.createdAt,
 			);
 		}
@@ -2931,6 +2950,7 @@ function rowToParkingSpace(row: any): ParkingSpace {
 		status: row.status ?? "available",
 		customerName: row.customer_name ?? null,
 		vehiclePlate: row.vehicle_plate ?? null,
+		bayType: row.bay_type ?? null,
 		passType: row.pass_type ?? null,
 		passId: row.pass_id ?? null,
 		startDate: row.start_date ?? null,
@@ -2951,9 +2971,9 @@ export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
 		db.prepare("DELETE FROM parking_spaces").run();
 		const insert = db.prepare(`INSERT INTO parking_spaces (
         id, building, level, zone, space_number, space_code, status,
-        customer_name, vehicle_plate, pass_type, pass_id,
+        customer_name, vehicle_plate, bay_type, pass_type, pass_id,
         start_date, end_date, notes, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const parkingSpace of parkingSpaces) {
 			insert.run(
 				parkingSpace.id,
@@ -2965,6 +2985,7 @@ export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
 				parkingSpace.status,
 				parkingSpace.customerName,
 				parkingSpace.vehiclePlate,
+				parkingSpace.bayType,
 				parkingSpace.passType,
 				parkingSpace.passId,
 				parkingSpace.startDate,
@@ -2974,6 +2995,33 @@ export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
 		}
 	});
 	tx();
+}
+
+/**
+ * How many of a pass's OTHER plates are inside right now — step 4 of the gate
+ * decision (PASS_DOMAIN_RECONSTRUCT_PLAN.md §8).
+ *
+ * `excludePlate` is the car at the barrier: a rescan of a vehicle that is
+ * already inside must not consume a second slot, or a misread at the gate
+ * would lock out its own driver.
+ *
+ * A slot is freed by the EXIT that closes the session, never by a timer — a
+ * car stays at the barrier until it is paid for, freed or released.
+ */
+export function countPassPlatesInside(passId: string, excludePlate: string): number {
+	const row = getDb()
+		.prepare(
+			`
+    SELECT COUNT(*) AS inside
+    FROM sessions s
+    WHERE s.status = 'entered'
+      AND s.plate <> @excludePlate
+      AND s.plate IN (SELECT plate_number FROM season_passes WHERE pass_id = @passId)
+  `,
+		)
+		.get({ passId, excludePlate: canonicalPlate(excludePlate) }) as any;
+
+	return Number(row?.inside ?? 0);
 }
 
 /**
@@ -2987,8 +3035,9 @@ export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
 		db.prepare("DELETE FROM season_passes").run();
 		const insert = db.prepare(`INSERT INTO season_passes (
         pass_id, plate_number, pass_type, status,
-        start_date, end_date, is_free, space_number, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+        start_date, end_date, is_free, space_number,
+        concurrent_limit, role, plan, fetched_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const pass of passes) {
 			insert.run(
 				// Canonical key (see shared/plate.ts) — the cloud keeps whatever
@@ -3002,6 +3051,9 @@ export function replaceAllSeasonPasses(passes: SeasonPass[]): void {
 				pass.endDate,
 				pass.isFree ? 1 : 0,
 				pass.spaceNumber,
+				Math.max(1, pass.concurrentLimit ?? 1),
+				pass.role ?? null,
+				pass.plan ?? null,
 			);
 		}
 	});

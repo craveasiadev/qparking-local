@@ -1,0 +1,82 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "unknown plate is nobody's vehicle → no_vehicle",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "blacklist beats a perfectly valid pass → deny_blacklist",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=false expected=no new session"
+    },
+    {
+      "name": "blacklisted with no pass is still a blacklist denial → deny_blacklist",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=false expected=no new session"
+    },
+    {
+      "name": "registered but no pass at this site falls through to hourly → no_pass",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "a pass at another site does not open this gate → no_pass",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "expired pass does not open the gate → no_pass",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "pass that has not started yet does not open the gate → no_pass",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "pending pass is not yet an entitlement → no_pass",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "no bay means one car — and that car gets in → allow_free",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "no bay, one car already inside — second is refused → deny_quota_full",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=false expected=no new session"
+    },
+    {
+      "name": "ten plates, two bays, second car still gets in → allow_free",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "ten plates, two bays, third car is denied → deny_quota_full",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=false expected=no new session"
+    },
+    {
+      "name": "a rescan of a car already inside does not eat a second slot → allow_free",
+      "pass": true,
+      "detail": "sessionBefore=true sessionAfter=true expected=session present"
+    },
+    {
+      "name": "explicit concurrent_limit overrides the bay count → allow_free",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    },
+    {
+      "name": "resident pass with no end date never lapses → allow_free",
+      "pass": true,
+      "detail": "sessionBefore=false sessionAfter=true expected=session present"
+    }
+  ],
+  "skipped": 3,
+  "error": null
+}

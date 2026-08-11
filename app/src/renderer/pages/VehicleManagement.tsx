@@ -1,66 +1,109 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Car, RefreshCw, CloudDownload, Clock, Ban, Ticket, Building2, User,
+  Car, RefreshCw, CloudDownload, Clock, Ban, Building2, User, Ticket,
 } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip';
-import type { CloudVehicle } from '@shared/types';
+import type { CloudVehicle, SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { toast } from '../toast';
 import { fmtDateTime, todayInAppTz } from '../lib/datetime';
+import { canonicalPlate } from '@shared/plate';
 
 const PAGE_SIZE = 20;
 
 /**
- * Vehicle registry — read-only mirror of the cloud's registered vehicles, so
- * site staff can answer "who owns this plate?" at the gate without logging into
- * the qparking cloud portal in a browser.
+ * Vehicles — every registered plate, what it is, who owns it, whether it is
+ * blocked, and the pass covering it.
+ *
+ * Merged from two pages (2026-08-11). "Vehicles" and "Passes" were both
+ * plate-keyed lists of the same cars, so the same plate appeared on both with
+ * half the answer each: one knew the owner and the ban, the other knew the pass.
+ * At a barrier there is one question — "this plate in front of me: who is it, is
+ * it blocked, is it paid for?" — and it is now answered in one row.
  *
  * This is also the operator-facing home of the BLACKLIST: the Blocked filter
  * lists every banned plate with its reason. Enforcement itself doesn't read this
  * table — the gate uses the leaner blocked_plates list, refreshed on the 60s
  * tick — but both derive from the same cloud `vehicles.is_blacklisted` column.
+ *
+ * A plate may appear with NO pass (registered, nothing bought) and a pass may
+ * cover several plates, so each of its plates carries the same pass detail. The
+ * cloud drops plateless passes from the payload, so nothing is hidden here.
  */
-type Filter = 'all' | 'blocked' | 'with-pass' | 'no-pass';
+type Filter = 'all' | 'blocked';
+
+/** Role chips — same four colours as the Customers and Bays pages. */
+const ROLE_TONE: Record<string, string> = {
+  resident: 'bg-sky-100 text-sky-800',
+  staff: 'bg-violet-100 text-violet-800',
+  season: 'bg-teal-100 text-teal-800',
+  guest: 'bg-amber-100 text-amber-800',
+};
 
 export function VehicleManagement() {
   const [vehicles, setVehicles] = useState<CloudVehicle[]>([]);
+  const [passes, setPasses] = useState<SeasonPass[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
 
   const [load, loading] = useAsyncAction(async () => {
-    setVehicles(await window.bridge.listCloudVehicles());
+    const [vehicleRows, passRows] = await Promise.all([
+      window.bridge.listCloudVehicles(),
+      window.bridge.listSeasonPasses(),
+    ]);
+    setVehicles(vehicleRows);
+    setPasses(passRows);
   });
+
+  // The pass roster is stored one row PER PLATE, already canonical, so this is a
+  // plain lookup rather than a join. Canonicalise the vehicle side too: the
+  // registry and the roster are cached by separate syncs.
+  const passByPlate = useMemo(() => {
+    const map = new Map<string, SeasonPass>();
+    for (const pass of passes) map.set(canonicalPlate(pass.plateNumber), pass);
+    return map;
+  }, [passes]);
+
+  const today = todayInAppTz();
 
   // These directories are deliberately NOT on the background sync tick (they
   // feed lookups, never a gate decision), so the button is the main way to
   // freshen them.
   const [syncFromCloud, syncing] = useAsyncAction(async () => {
-    const result = await window.bridge.syncCloudVehiclesNow();
-    if (result.ok) toast({ tone: 'success', title: `Fetched ${result.fetched} vehicle(s) from cloud` });
-    else toast({ tone: 'error', title: 'Sync failed', detail: String(result.error) });
+    // Two caches feed this page and they are refreshed separately, so pull both
+    // — otherwise a freshened registry sits next to a stale pass roster.
+    const [vehicleResult, passResult] = await Promise.all([
+      window.bridge.syncCloudVehiclesNow(),
+      window.bridge.syncSeasonPassesNow(),
+    ]);
+    if (vehicleResult.ok && passResult.ok) {
+      toast({ tone: 'success', title: `Fetched ${vehicleResult.fetched} vehicle(s) and ${passResult.fetched} pass row(s)` });
+    } else {
+      toast({
+        tone: 'error',
+        title: 'Sync failed',
+        detail: String(vehicleResult.error ?? passResult.error),
+      });
+    }
     await load();
   });
 
   useEffect(() => { void load(); }, []);
 
-  const today = todayInAppTz();
 
   const counts = useMemo(() => ({
     all: vehicles.length,
     blocked: vehicles.filter((v) => v.isBlacklisted).length,
-    'with-pass': vehicles.filter((v) => v.passType).length,
-    'no-pass': vehicles.filter((v) => !v.passType).length,
   }), [vehicles]);
 
   const filtered = vehicles.filter((v) => {
+    const pass = passByPlate.get(canonicalPlate(v.plateNumber));
     if (filter === 'blocked' && !v.isBlacklisted) return false;
-    if (filter === 'with-pass' && !v.passType) return false;
-    if (filter === 'no-pass' && v.passType) return false;
     if (search) {
       const q = search.toLowerCase();
-      const haystack = [v.plateNumber, v.ownerName, v.model, v.color, v.vehicleType, v.passType]
+      const haystack = [v.plateNumber, v.ownerName, v.model, v.color, v.vehicleType, pass?.plan, pass?.role]
         .filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(q)) return false;
     }
@@ -76,13 +119,18 @@ export function VehicleManagement() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Car size={22} /> Vehicle Management
+            <Car size={22} /> Vehicles
             <InfoTip>
-              Vehicles, their owners and the blocked list are managed in the
-              qparking cloud portal. This page is a copy kept on this server so
-              you can check who owns a plate right at the gate. To block or
-              unblock a vehicle, do it in the cloud — the gate picks up the
-              change within about a minute.
+              Every registered plate, plate-first: who owns it, whether it is
+              blocked, and which pass covers it. This is the page to open with a
+              car in front of you.
+              {' '}A pass belongs to the HOLDER and covers a pool of their cars,
+              so the same pass appears on each of its plates — "slots" is how many
+              of them may be inside at once, one per bay.
+              {' '}Everything here is managed in the qparking cloud (Parking
+              Management → Customers, on the holder's row). The gate picks up a
+              block within about a minute; the pass roster refreshes on the sync
+              tick.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
@@ -109,9 +157,10 @@ export function VehicleManagement() {
       <div className="mb-4 flex flex-wrap gap-2">
         {([
           { key: 'all', label: 'All', icon: Car },
+          // No with-pass / no-pass filter: the pass is not a property of the
+          // plate. It belongs to the HOLDER and covers a pool of their cars, so
+          // slicing the vehicle list by it invited exactly the wrong reading.
           { key: 'blocked', label: 'Blocked', icon: Ban },
-          { key: 'with-pass', label: 'With pass', icon: Ticket },
-          { key: 'no-pass', label: 'No pass', icon: Car },
         ] as const).map((f) => {
           const active = filter === f.key;
           const Icon = f.icon;
@@ -135,7 +184,7 @@ export function VehicleManagement() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search plate, owner, model…"
+          placeholder="Search plate, owner, model, pass…"
           className="flex-1 min-w-[200px] h-9 px-3 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none"
         />
       </div>
@@ -156,12 +205,20 @@ export function VehicleManagement() {
                   <th className="text-left px-3 py-2 font-bold">Plate</th>
                   <th className="text-left px-3 py-2 font-bold">Owner</th>
                   <th className="text-left px-3 py-2 font-bold">Vehicle</th>
+                  {/* WHICH pass covers this plate, in the operator's own words,
+                      with the role it was sold under. */}
                   <th className="text-left px-3 py-2 font-bold">Pass</th>
-                  <th className="text-right px-3 py-2 font-bold">Status</th>
+                  <th className="text-left px-3 py-2 font-bold">Valid</th>
+                  {/* Two states only: blocked at THIS site, or not. The
+                      controller scopes vehicle_blacklists to the requesting
+                      site, so this is what this barrier will actually do. */}
+                  <th className="text-right px-3 py-2 font-bold">Blocked</th>
                 </tr>
               </thead>
               <tbody>
-                {pageItems.map((v) => (
+                {pageItems.map((v) => {
+                  const pass = passByPlate.get(canonicalPlate(v.plateNumber));
+                  return (
                   <tr key={v.id} className={`border-t border-gray-100 ${v.isBlacklisted ? 'bg-red-50/50' : ''}`}>
                     <td className="px-3 py-2 font-mono font-semibold">
                       <span className="inline-flex items-center gap-1.5">
@@ -174,23 +231,25 @@ export function VehicleManagement() {
                     <td className="px-3 py-2 text-[12px] text-gray-600">
                       {[v.vehicleType, v.model, v.color].filter(Boolean).join(' · ') || '—'}
                     </td>
-                    <td className="px-3 py-2">
-                      <PassCell passType={v.passType} endDate={v.passEndDate} today={today} />
-                    </td>
+                    <td className="px-3 py-2"><PassCell pass={pass} /></td>
+                    <td className="px-3 py-2"><ValidCell pass={pass} today={today} /></td>
                     <td className="px-3 py-2 text-right">
                       {v.isBlacklisted
                         ? <BlockedBadge reason={v.blacklistReason} />
-                        : <span className="text-[10px] uppercase font-bold text-gray-400">OK</span>}
+                        : <span title="Not blocked at this site" className="text-[10px] uppercase font-bold text-gray-400">No</span>}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
 
           {/* MOBILE CARDS */}
           <ul className="md:hidden divide-y divide-gray-100">
-            {pageItems.map((v) => (
+            {pageItems.map((v) => {
+              const pass = passByPlate.get(canonicalPlate(v.plateNumber));
+              return (
               <li key={v.id} className={`p-3 ${v.isBlacklisted ? 'bg-red-50/50' : ''}`}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono font-bold inline-flex items-center gap-1.5">
@@ -204,11 +263,13 @@ export function VehicleManagement() {
                 <div className="mt-1 text-[11px] text-gray-500">
                   {[v.vehicleType, v.model, v.color].filter(Boolean).join(' · ') || 'No vehicle details'}
                 </div>
-                <div className="mt-1.5">
-                  <PassCell passType={v.passType} endDate={v.passEndDate} today={today} />
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <PassCell pass={pass} />
+                  <ValidCell pass={pass} today={today} />
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}
@@ -228,25 +289,62 @@ function OwnerCell({ name, kind }: { name: string | null; kind: string | null })
   );
 }
 
-function PassCell({
-  passType, endDate, today,
-}: { passType: string | null; endDate: string | null; today: string }) {
-  if (!passType) return <span className="text-[11px] text-gray-400">No pass</span>;
-  // A pass whose end_date has passed is still shown, flagged — the cloud expiry
-  // job runs hourly so a just-lapsed pass can linger a little.
-  const expired = !!endDate && endDate < today;
+/**
+ * Which pass covers this plate: the plan name, with the role it was sold under.
+ * The plan is the operator's own wording; `plan` is NULL on a v1 payload (a SaaS
+ * with no plan catalogue), so the role stands in.
+ */
+function PassCell({ pass }: { pass?: SeasonPass }) {
+  if (!pass) return <span className="text-[11px] text-gray-400">No pass</span>;
+  const role = pass.role ?? undefined;
   return (
-    <span className="inline-flex flex-col items-start gap-0.5">
-      <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase bg-blue-100 text-blue-800">
-        <Ticket size={9} /> {passType}
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold uppercase text-blue-800">
+        <Ticket size={9} /> {pass.plan ?? role ?? 'pass'}
       </span>
-      <span className={`text-[10px] font-mono ${expired ? 'text-amber-700 font-semibold' : 'text-gray-500'}`}>
-        {endDate ? `until ${endDate}${expired ? ' · lapsed' : ''}` : 'no end date'}
+      {role && pass.plan && (
+        <span className={`rounded-full px-1.5 py-px text-[9px] font-bold uppercase ${ROLE_TONE[role] ?? 'bg-gray-100 text-gray-700'}`}>
+          {role}
+        </span>
+      )}
+      {/* How many of the holder's cars may be inside at once — one per bay.
+          Always shown: "1 slot" is the answer to "can their other car come in
+          too?", and leaving it blank made that look unanswered. */}
+      <span className="text-[10px] font-mono text-gray-500">
+        {pass.concurrentLimit} slot{pass.concurrentLimit === 1 ? '' : 's'}
       </span>
     </span>
   );
 }
 
+/**
+ * The pass's term, both ends of it.
+ *
+ * The start matters as much as the end: a pass can be sold today to run from the
+ * 1st, so "does this car have a pass" and "does it have one YET" are different
+ * questions at the barrier.
+ *
+ * A resident pass has no end date at all — that is "forever", not missing data,
+ * so it says so rather than showing a dash.
+ */
+function ValidCell({ pass, today }: { pass?: SeasonPass; today: string }) {
+  if (!pass) return <span className="text-[11px] text-gray-400">—</span>;
+  const expired = !!pass.endDate && pass.endDate < today;
+  const notYet = !!pass.startDate && pass.startDate > today;
+  return (
+    <span className="inline-flex flex-col items-start">
+      <span className={`text-[10px] font-mono ${expired ? 'font-semibold text-amber-700' : 'text-gray-500'}`}>
+        {pass.startDate ?? '—'} → {pass.endDate ?? '—'}
+      </span>
+      {!pass.endDate && <span className="text-[9px] font-bold uppercase text-sky-700">No expiry</span>}
+      {expired && <span className="text-[9px] font-bold uppercase text-amber-700">Lapsed</span>}
+      {notYet && <span className="text-[9px] font-bold uppercase text-gray-500">Starts later</span>}
+    </span>
+  );
+}
+
+/** The barrier refuses this plate outright — no charge, no pulse, staff deal
+ *  with the owner in person. Hover for the reason the cloud recorded. */
 function BlockedBadge({ reason }: { reason: string | null }) {
   return (
     <span

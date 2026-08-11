@@ -33,6 +33,28 @@ function statusConfig(status: string) {
   return STATUS_CONFIG[status] ?? { label: status, bg: 'bg-gray-50', border: 'border-gray-300', text: 'text-gray-600', dot: 'bg-gray-400' };
 }
 
+/** Bay designation → badge colours. Mirrors the cloud BAY_TYPE_BADGE. */
+const BAY_TYPE_BADGE: Record<string, string> = {
+  visitor:  'bg-gray-100 text-gray-500',
+  resident: 'bg-sky-100 text-sky-700',
+  season:   'bg-teal-100 text-teal-700',
+  staff:    'bg-violet-100 text-violet-700',
+};
+
+/**
+ * What the bay is set aside for, or NULL when this box simply does not know yet.
+ *
+ * Deliberately does NOT default to 'visitor'. Every bay in the cloud carries a
+ * designation (the column is NOT NULL, defaulting to visitor), so a NULL here
+ * only ever means "not synced since the cloud started sending bay_type" — and
+ * labelling a whole level VISITOR on that basis is a plain lie. The legacy
+ * denormalised pass type is used when present; otherwise the card shows no
+ * badge and the tallies say so, which is honest and fixed by one sync.
+ */
+function bayDesignation(space: ParkingSpace): string | null {
+  return space.bayType ?? space.passType ?? null;
+}
+
 function fmtDate(v: string | null): string {
   if (!v) return '—';
   return new Date(v).toLocaleDateString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', day: '2-digit', month: 'short', year: 'numeric' });
@@ -59,22 +81,34 @@ function zoneSections(items: ParkingSpace[]): { zone: string; spaces: ParkingSpa
 }
 
 /** One bay — status-coloured card, same content as the cloud BayCard (code,
- *  status, tenant, plate, pass expiry, notes). Read-only here, so a div. */
+ *  status, designation, holder, pass expiry, notes). Read-only here, so a div. */
 function BayCard({ space }: { space: ParkingSpace }) {
   const cfg = statusConfig(space.status);
+  const designation = bayDesignation(space);
   const code = space.spaceCode ?? space.spaceNumber ?? space.id.slice(0, 8);
   return (
     <div title={code} className={`rounded-xl border-2 p-2.5 ${cfg.bg} ${cfg.border}`}>
       <p className={`font-mono text-[11px] font-bold leading-tight ${cfg.text}`}>{code}</p>
-      <div className="mt-1.5 flex items-center gap-1">
+      <div className="mt-1.5 flex flex-wrap items-center gap-1">
         <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${cfg.dot}`} />
         <span className={`text-[10px] font-medium ${cfg.text}`}>{cfg.label}</span>
+        {/* Who the bay is FOR — the operator's designation, same badge and
+            colours as the cloud's Bays page. It holds whether or not anyone is
+            in it, where the old card could only describe an OCCUPIED bay.
+            Absent until this box has synced, rather than guessed at: every bay
+            in the cloud carries one, so a blank here means stale cache, and the
+            header's "Last synced" is the place that says so. */}
+        {designation && (
+          <span className={`ml-auto rounded-full px-1.5 py-px text-[9px] font-bold uppercase ${BAY_TYPE_BADGE[designation] ?? BAY_TYPE_BADGE.visitor}`}>
+            {designation}
+          </span>
+        )}
       </div>
+      {/* Just the HOLDER, no plate: a bay is held by a pass covering a POOL of
+          plates, so naming one of them was misleading. Staff who need the plate
+          have the Vehicles page, which is plate-first. */}
       {space.customerName && (
         <p className={`mt-0.5 text-[10px] truncate font-medium ${cfg.text}`}>{space.customerName}</p>
-      )}
-      {space.vehiclePlate && (
-        <p className={`text-[10px] font-mono truncate ${cfg.text} opacity-80`}>{space.vehiclePlate}</p>
       )}
       {space.endDate && ['occupied', 'reserved', 'vip'].includes(space.status) && (
         <p className={`text-[9px] mt-0.5 ${cfg.text} opacity-60`}>Exp: {fmtDate(space.endDate)}</p>
@@ -90,6 +124,7 @@ export function ParkingSpaces() {
   const [spaces, setSpaces] = useState<ParkingSpace[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
   const [levelFilter, setLevelFilter] = useState('');
 
   async function refresh() { setSpaces(await window.bridge.listParkingSpaces()); }
@@ -115,6 +150,18 @@ export function ParkingSpaces() {
     [spaces],
   );
 
+  // How many bays carry each designation — just the counts beside the filter
+  // options. "Slots left" deliberately lives in the cloud, which is where passes
+  // are sold; this mirror only reports what the bays are.
+  const byDesignation = useMemo(() => {
+    const rows: Record<string, number> = {};
+    for (const s of spaces) {
+      const key = bayDesignation(s);
+      if (key) rows[key] = (rows[key] ?? 0) + 1;
+    }
+    return rows;
+  }, [spaces]);
+
   // Distinct levels present (sorted, unset last) → the level tab strip.
   const levels = useMemo(() => {
     const set = new Set(spaces.map((s) => (s.level ?? '').trim()));
@@ -128,12 +175,13 @@ export function ParkingSpaces() {
   );
 
   const q = search.trim().toLowerCase();
-  const filterActive = q !== '' || statusFilter !== 'all' || levelFilter !== '';
+  const filterActive = q !== '' || statusFilter !== 'all' || typeFilter !== 'all' || levelFilter !== '';
   const filteredSpaces = spaces.filter((s) => {
     if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+    if (typeFilter !== 'all' && bayDesignation(s) !== typeFilter) return false;
     if (levelFilter !== '' && (s.level ?? '').trim() !== levelFilter) return false;
     if (q) {
-      const hay = `${s.spaceCode ?? ''} ${s.spaceNumber ?? ''} ${s.building ?? ''} ${s.level ?? ''} ${s.zone ?? ''} ${s.customerName ?? ''} ${s.vehiclePlate ?? ''} ${s.passType ?? ''}`.toLowerCase();
+      const hay = `${s.spaceCode ?? ''} ${s.spaceNumber ?? ''} ${s.building ?? ''} ${s.level ?? ''} ${s.zone ?? ''} ${s.customerName ?? ''} ${s.vehiclePlate ?? ''} ${bayDesignation(s) ?? ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -181,12 +229,13 @@ export function ParkingSpaces() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Grid3x3 size={22} /> Bay Management
+            <Grid3x3 size={22} /> Bays
             <InfoTip>
               Parking bays are created and edited in the qparking cloud
-              (Operator → Bay Management) — including their building, level and
-              zone. This page is a live copy so you can see which bays are
-              taken, reserved or free. Press "Sync now" to get the latest.
+              (Parking Management → Bays) — including their building, level, zone
+              and which role each bay is set aside for. This page is a live copy
+              so you can see which bays are taken, reserved or free, and how many
+              slots each role has left. Press "Sync now" to get the latest.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
@@ -298,8 +347,15 @@ export function ParkingSpaces() {
               <option value="all">All status</option>
               {statusOptions.map((st) => <option key={st} value={st}>{st}</option>)}
             </select>
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}
+              className="h-9 px-2 rounded-lg border border-gray-200 text-sm focus:border-gray-900 outline-none bg-white capitalize">
+              <option value="all">All bay types</option>
+              {['visitor', 'resident', 'season', 'staff'].map((t) => (
+                <option key={t} value={t}>{t} · {byDesignation[t] ?? 0}</option>
+              ))}
+            </select>
             {filterActive && (
-              <button onClick={() => { setSearch(''); setStatusFilter('all'); setLevelFilter(''); }}
+              <button onClick={() => { setSearch(''); setStatusFilter('all'); setTypeFilter('all'); setLevelFilter(''); }}
                 className="h-9 px-3 text-xs font-bold uppercase tracking-wide text-gray-500 hover:text-gray-900 whitespace-nowrap">
                 Clear
               </button>

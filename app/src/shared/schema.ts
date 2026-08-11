@@ -365,6 +365,14 @@ export interface SeasonPass {
   endDate: string | null;
   isFree: boolean;
   spaceNumber: string | null;
+  /** How many of this pass's plates may be inside at once — one per bay, or 1
+   *  with no bay. Pre-computed by the cloud; the box never derives it. */
+  concurrentLimit: number;
+  /** resident | staff | season | guest */
+  role: string | null;
+  /** The plan the pass was sold on, in the operator's own words ("3 Slot
+   *  Resident", "Staff"). NULL on v1 payloads, which carry no plan. */
+  plan: string | null;
   fetchedAt: string;
 }
 
@@ -379,7 +387,12 @@ export interface CloudCustomer {
   fullName: string | null;
   email: string | null;
   phone: string | null;
-  /** 'resident' | 'visitor' */
+  /** What they ARE at THIS site: 'resident' | 'staff' | 'season' | 'guest' —
+   *  the role of the pass they hold here. NULL on a box that has not synced
+   *  since the cloud started sending it. */
+  siteRole: string | null;
+  /** @deprecated Global 'resident' | 'visitor' flag, stamped once at creation
+   *  and never updated, so it drifts from `siteRole`. */
   type: string | null;
   isEnabled: boolean;
   vehiclesCount: number;
@@ -403,9 +416,6 @@ export interface CloudVehicle {
   ownerKind: string | null;
   isBlacklisted: boolean;
   blacklistReason: string | null;
-  passType: string | null;
-  passStatus: string | null;
-  passEndDate: string | null;
   createdAt: string | null;
   fetchedAt: string;
 }
@@ -437,6 +447,11 @@ export interface ParkingSpace {
   status: string;
   customerName: string | null;
   vehiclePlate: string | null;
+  /** What the bay is SET ASIDE for: 'visitor' | 'resident' | 'season' | 'staff'.
+   *  The operator's designation, which holds whether or not anyone is in it. */
+  bayType: string | null;
+  /** @deprecated Denormalised from whoever holds the bay — empty when nobody
+   *  does. `bayType` is the designation. */
   passType: string | null;
   passId: string | null;
   startDate: string | null;

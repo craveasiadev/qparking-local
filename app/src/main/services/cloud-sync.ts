@@ -200,8 +200,42 @@ function mapApiRowToSeasonPass(seasonPassRow: any, fetchedAt: string): SeasonPas
 		endDate: seasonPassRow.end_date ?? null,
 		isFree: !!(seasonPassRow.is_free ?? false),
 		spaceNumber: seasonPassRow.space_number ?? null,
+		// v1 carries no pool — one plate, one car.
+		concurrentLimit: 1,
+		role: null,
+		// v1 carries no plan — a SaaS that predates the reconstruct has no
+		// pass_products to name.
+		plan: null,
 		fetchedAt,
 	};
+}
+
+/**
+ * v2 row → one cached row PER PLATE, all sharing the pass's id and limit.
+ * The local table's PK is already (pass_id, plate_number), so the pool needs
+ * no new table — and countPassPlatesInside() groups on pass_id.
+ */
+function mapV2RowToSeasonPasses(row: any, fetchedAt: string): SeasonPass[] {
+	const plates: string[] = Array.isArray(row.plates) ? row.plates.filter(Boolean) : [];
+
+	return plates.map((plateNumber) => ({
+		passId: row.id,
+		plateNumber,
+		// pass_type is gone from the cloud model; the product's category is what
+		// free_reason ('pass-<type>') records at exit.
+		passType: row.role ?? "pass",
+		status: row.status,
+		startDate: row.start_date ?? null,
+		endDate: row.end_date ?? null,
+		// The cloud sends no is_free on v2 — a pass IS the entitlement, and the
+		// exit is free because the pass covers it, not because of a flag.
+		isFree: true,
+		spaceNumber: null,
+		concurrentLimit: Math.max(1, Number(row.concurrent_limit ?? 1)),
+		role: row.role ?? null,
+		plan: row.plan ?? null,
+		fetchedAt,
+	}));
 }
 
 /**
@@ -214,10 +248,25 @@ function mapApiRowToSeasonPass(seasonPassRow: any, fetchedAt: string): SeasonPas
 export async function syncSeasonPasses(): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
+	const fetchedAt = new Date().toISOString();
+
+	// v2 first: it carries the plate POOL and a pre-computed concurrent_limit,
+	// which is what the quota guard in parking-flow needs. A SaaS that predates
+	// the pass reconstruct 404s here and we fall back to v1 — one plate per
+	// pass, limit 1, i.e. exactly the old behaviour.
+	try {
+		const { data: v2Body } = await cloud.get<CloudListBody>("/season-passes/v2");
+		const v2Rows = v2Body.data ?? [];
+		const seasonPasses = v2Rows.flatMap((row: any) => mapV2RowToSeasonPasses(row, fetchedAt));
+		replaceAllSeasonPasses(seasonPasses);
+		return { ok: true, fetched: seasonPasses.length };
+	} catch (error) {
+		if (!isHttpStatus(error, 404)) return toFailedSyncResult(error);
+	}
+
 	try {
 		const { data: responseBody } = await cloud.get<CloudListBody>("/season-passes");
 		const seasonPassRows = responseBody.data ?? [];
-		const fetchedAt = new Date().toISOString();
 
 		const seasonPasses = seasonPassRows
 			.filter((seasonPassRow: any) => seasonPassRow.vehicle?.plate_number)
@@ -427,6 +476,9 @@ export async function syncCloudCustomers(): Promise<SyncResult> {
 				fullName: row.full_name ?? null,
 				email: row.email ?? null,
 				phone: row.phone ?? null,
+				// Absent from a SaaS that predates the reconstruct — the UI then
+				// falls back to the legacy type, i.e. exactly the old behaviour.
+				siteRole: row.site_role ?? null,
 				type: row.type ?? null,
 				isEnabled: row.is_enabled == null ? true : !!row.is_enabled,
 				vehiclesCount: Number(row.vehicles_count ?? 0),
@@ -467,9 +519,6 @@ export async function syncCloudVehicles(): Promise<SyncResult> {
 				ownerKind: row.owner_kind ?? null,
 				isBlacklisted: !!row.is_blacklisted,
 				blacklistReason: row.blacklist_reason ?? null,
-				passType: row.pass_type ?? null,
-				passStatus: row.pass_status ?? null,
-				passEndDate: row.pass_end_date ?? null,
 				createdAt: row.created_at ?? null,
 				fetchedAt,
 			}));
@@ -560,6 +609,9 @@ function mapApiRowToParkingSpace(parkingSpaceRow: any, fetchedAt: string): Parki
 		status: parkingSpaceRow.status,
 		customerName: parkingSpaceRow.customer_name ?? null,
 		vehiclePlate: parkingSpaceRow.vehicle_plate ?? null,
+		// Absent from a SaaS that predates the reconstruct — the UI then falls
+		// back to the legacy pass_type, i.e. exactly the old behaviour.
+		bayType: parkingSpaceRow.bay_type ?? null,
 		passType: parkingSpaceRow.pass_type ?? null,
 		passId: parkingSpaceRow.pass_id ?? null,
 		startDate: parkingSpaceRow.start_date ?? null,

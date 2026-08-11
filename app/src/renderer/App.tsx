@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
-  Ticket, Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
+  Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
   Users, Car, RefreshCw, Loader2,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
@@ -15,7 +15,6 @@ import { Transactions } from './pages/Transactions';
 import { Sites } from './pages/Sites';
 import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
-import { SeasonPasses } from './pages/SeasonPasses';
 import { ParkingSpaces } from './pages/ParkingSpaces';
 import { CustomerManagement } from './pages/CustomerManagement';
 import { VehicleManagement } from './pages/VehicleManagement';
@@ -28,7 +27,7 @@ import { subscribeToast } from './toast';
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions' | 'transactions'
   // Parking Management
-  | 'parking-spaces' | 'season-passes' | 'customers' | 'vehicles'
+  | 'parking-spaces' | 'customers' | 'vehicles'
   // Pricing & Tariffs
   | 'policies'
   // System
@@ -63,13 +62,24 @@ const SECTIONS: NavSection[] = [
   {
     key: 'mgmt', label: 'Parking management',
     items: [
-      // Labels track the cloud operator menu so staff switching between the two
-      // surfaces read the same words. The cloud calls a physical slot a "bay"
-      // (code/routes/DB still say `space`), hence "Bay Management" here.
-      { id: 'parking-spaces', label: 'Bay Management', icon: Grid3x3 },
-      { id: 'season-passes', label: 'Season Passes', icon: Ticket },
-      { id: 'customers', label: 'Customer Management', icon: Users },
-      { id: 'vehicles', label: 'Vehicle Management', icon: Car },
+      // Same words, same order as the cloud operator menu, so staff switching
+      // between the two surfaces read one mental map:
+      //   Customers -> who parks here      Bays -> what we have
+      // The cloud calls a physical slot a "bay" (code/routes/DB still say
+      // `space`).
+      { id: 'customers', label: 'Customers', icon: Users },
+      { id: 'parking-spaces', label: 'Bays', icon: Grid3x3 },
+      // Three entries, like the cloud — but the third is Vehicles, not Plans.
+      //
+      // The cloud's "Plans" is its pass_products CATALOGUE (name, price,
+      // duration), which the box does not hold: it caches the passes people
+      // HOLD so the gate can decide offline.
+      //
+      // And the old separate "Passes" page merged into this one (2026-08-11):
+      // both were plate-keyed lists of the same cars, each holding half the
+      // answer. At a barrier there is one question — "this plate: who is it, is
+      // it blocked, is it paid for?" — so it is one page.
+      { id: 'vehicles', label: 'Vehicles', icon: Car },
     ],
   },
   {
@@ -392,7 +402,6 @@ export function App() {
           {page === 'sessions' && <Sessions devMode={devMode} />}
           {page === 'transactions' && <Transactions />}
           {page === 'parking-spaces' && <ParkingSpaces />}
-          {page === 'season-passes' && <SeasonPasses />}
           {page === 'customers' && <CustomerManagement />}
           {page === 'vehicles' && <VehicleManagement />}
           {page === 'policies' && <ParkingPolicies />}

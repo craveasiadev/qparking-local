@@ -20,7 +20,13 @@ const PAGE_SIZE = 20;
  * Scope comes from the cloud endpoint: this site's company, PLUS anyone holding
  * a pass at this site (self-registered visitors can have no company).
  */
-type Filter = 'all' | 'resident' | 'visitor' | 'disabled';
+type Filter = 'all' | 'resident' | 'staff' | 'season' | 'guest' | 'disabled';
+
+/** What they ARE at this site. Falls back to the old global resident/visitor
+ *  flag for a box that has not synced since roles arrived. */
+function roleOf(customer: CloudCustomer): string {
+  return customer.siteRole ?? (customer.type === 'resident' ? 'resident' : 'guest');
+}
 
 export function CustomerManagement() {
   const [customers, setCustomers] = useState<CloudCustomer[]>([]);
@@ -42,14 +48,15 @@ export function CustomerManagement() {
 
   const counts = useMemo(() => ({
     all: customers.length,
-    resident: customers.filter((c) => c.type === 'resident').length,
-    visitor: customers.filter((c) => c.type === 'visitor').length,
+    resident: customers.filter((c) => roleOf(c) === 'resident').length,
+    staff: customers.filter((c) => roleOf(c) === 'staff').length,
+    season: customers.filter((c) => roleOf(c) === 'season').length,
+    guest: customers.filter((c) => roleOf(c) === 'guest').length,
     disabled: customers.filter((c) => !c.isEnabled).length,
   }), [customers]);
 
   const filtered = customers.filter((c) => {
-    if (filter === 'resident' && c.type !== 'resident') return false;
-    if (filter === 'visitor' && c.type !== 'visitor') return false;
+    if (filter !== 'all' && filter !== 'disabled' && roleOf(c) !== filter) return false;
     if (filter === 'disabled' && c.isEnabled) return false;
     if (search) {
       const q = search.toLowerCase();
@@ -68,13 +75,14 @@ export function CustomerManagement() {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Users size={22} /> Customer Management
+            <Users size={22} /> Customers
             <InfoTip>
               Customers are added and edited in the qparking cloud portal
               (Parking Management → Customers). This page is a copy kept on this
               server so you can look up a name or phone number quickly, without
-              logging into the cloud. The vehicle and pass counts only cover
-              this site. Press "Sync from cloud" to get the latest list.
+              logging into the cloud. Role, vehicle and pass counts all cover THIS
+              site only — someone is only listed here because they hold a pass
+              here. Press "Sync from cloud" to get the latest list.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
@@ -102,7 +110,9 @@ export function CustomerManagement() {
         {([
           { key: 'all', label: 'All', icon: Users },
           { key: 'resident', label: 'Residents', icon: Users },
-          { key: 'visitor', label: 'Visitors', icon: Users },
+          { key: 'staff', label: 'Staff', icon: Users },
+          { key: 'season', label: 'Season', icon: Users },
+          { key: 'guest', label: 'Guests', icon: Users },
           { key: 'disabled', label: 'Disabled', icon: UserX },
         ] as const).map((f) => {
           const active = filter === f.key;
@@ -142,7 +152,7 @@ export function CustomerManagement() {
                 <tr>
                   <th className="text-left px-3 py-2 font-bold">Name</th>
                   <th className="text-left px-3 py-2 font-bold">Contact</th>
-                  <th className="text-left px-3 py-2 font-bold">Type</th>
+                  <th className="text-left px-3 py-2 font-bold">Role</th>
                   <th className="text-right px-3 py-2 font-bold">Vehicles</th>
                   <th className="text-right px-3 py-2 font-bold">Passes here</th>
                   <th className="text-right px-3 py-2 font-bold">Status</th>
@@ -155,7 +165,7 @@ export function CustomerManagement() {
                     <td className="px-3 py-2 text-[12px] text-gray-600">
                       <ContactCell email={c.email} phone={c.phone} />
                     </td>
-                    <td className="px-3 py-2"><TypeBadge type={c.type} /></td>
+                    <td className="px-3 py-2"><RoleBadge role={roleOf(c)} /></td>
                     <td className="px-3 py-2 text-right font-mono text-[12px]">
                       <CountChip icon={Car} n={c.vehiclesCount} />
                     </td>
@@ -179,7 +189,7 @@ export function CustomerManagement() {
               <li key={c.id} className={`p-3 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold">{c.fullName || '—'}</span>
-                  <TypeBadge type={c.type} />
+                  <RoleBadge role={roleOf(c)} />
                 </div>
                 <div className="mt-1.5 text-[11px] text-gray-600">
                   <ContactCell email={c.email} phone={c.phone} />
@@ -210,12 +220,18 @@ function ContactCell({ email, phone }: { email: string | null; phone: string | n
   );
 }
 
-function TypeBadge({ type }: { type: string | null }) {
-  if (!type) return <span className="text-[11px] text-gray-400">—</span>;
+/** Same four roles and the same colours as the Passes page and the bay badges,
+ *  so a resident, their pass and their bay all read as one thing. */
+function RoleBadge({ role }: { role: string | null }) {
+  if (!role) return <span className="text-[11px] text-gray-400">—</span>;
+  const tone: Record<string, string> = {
+    resident: 'bg-sky-100 text-sky-800',
+    staff: 'bg-violet-100 text-violet-800',
+    season: 'bg-teal-100 text-teal-800',
+    guest: 'bg-amber-100 text-amber-800',
+  };
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
-      type === 'resident' ? 'bg-indigo-100 text-indigo-800' : 'bg-amber-100 text-amber-800'
-    }`}>{type}</span>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${tone[role] ?? 'bg-gray-100 text-gray-700'}`}>{role}</span>
   );
 }
 
