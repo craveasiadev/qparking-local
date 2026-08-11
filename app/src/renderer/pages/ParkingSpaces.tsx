@@ -8,7 +8,7 @@ import { toast } from '../toast';
 
 /**
  * Bay inventory — mirrored read-only from qparking SaaS.
- * Mirrors the cloud Operator → Bay Management layout: bays grouped into a
+ * Mirrors the cloud's Bays page layout: bays grouped into a
  * panel per level, zone sections inside each level, and a compact status-
  * coloured card per bay. Edits happen in the cloud; this page is for
  * at-the-gate visibility.

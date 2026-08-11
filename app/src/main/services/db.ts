@@ -3061,7 +3061,8 @@ export function upsertCompanySetting(setting: CompanySetting): CompanySetting {
 
 /**
  * How many of a pass's OTHER plates are inside right now — step 4 of the gate
- * decision (PASS_DOMAIN_RECONSTRUCT_PLAN.md §8).
+ * decision. The cloud runs the same rules over the same fixture — see
+ * tools/gate-parity-check, and qparking/PASS_DOMAIN.md for the model.
  *
  * `excludePlate` is the car at the barrier: a rescan of a vehicle that is
  * already inside must not consume a second slot, or a misread at the gate

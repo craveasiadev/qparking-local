@@ -53,18 +53,20 @@ interface CloudSyncReport {
 /**
  * Display names for the sync-report rows — the SIDEBAR page name for each model,
  * so the operator can map a row straight to the page it filled (raw object keys
- * like "blockedPlates" read as developer debug output). Blocked plates have no
- * page of their own; their operator-facing home is Vehicle Management's Blocked
- * filter, hence the one label that isn't verbatim from the sidebar.
+ * like "blockedPlates" read as developer debug output).
+ *
+ * Two labels are not verbatim from the sidebar, both for the same reason: the
+ * Passes page merged into Vehicles (2026-08-11), and blocked plates never had a
+ * page of their own. Both land on Vehicles.
  */
 const PULL_MODEL_LABELS: Record<string, string> = {
   site: 'Sites',
   policies: 'Parking Rates',
-  passes: 'Season Passes',
-  blockedPlates: 'Blocked Plates',
-  customers: 'Customer Management',
-  vehicles: 'Vehicle Management',
-  spaces: 'Bay Management',
+  passes: 'Passes (shown on Vehicles)',
+  blockedPlates: 'Blocked plates (shown on Vehicles)',
+  customers: 'Customers',
+  vehicles: 'Vehicles',
+  spaces: 'Bays',
   activity: 'Activity Logs',
   sessions: 'Sessions',
   companySetting: 'Company Settings',
