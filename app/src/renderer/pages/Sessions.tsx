@@ -98,9 +98,9 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
   // (toLocalInput / toIso are the shared datetime-local <-> ISO helpers below.)
   const [entryLocal, setEntryLocal] = useState(() => toLocalInput(new Date(Date.now() - 60 * 60_000).toISOString()));
   const [exitLocal, setExitLocal] = useState(() => toLocalInput(new Date().toISOString()));
-  const [log, setLog] = useState<{ ts: number; tone: 'in'|'pay'|'out'|'warn'|'info'; text: string }[]>([]);
+  const [log, setLog] = useState<{ ts: number; tone: 'in' | 'pay' | 'out' | 'warn' | 'info'; text: string }[]>([]);
 
-  const push = (tone: 'in'|'pay'|'out'|'warn'|'info', text: string) =>
+  const push = (tone: 'in' | 'pay' | 'out' | 'warn' | 'info', text: string) =>
     setLog((cur) => [{ ts: Date.now(), tone, text }, ...cur].slice(0, 25));
 
   // Latest refresh callback — lets the async exit event stream refresh the
@@ -118,7 +118,7 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
       else if (kind === 'entry-ignored-recent-exit') push('info', `Duplicate read ignored — ${d?.plate ?? '?'} exited ${d?.secondsSinceExit ?? '?'}s ago (exit grace ${d?.graceSeconds ?? '?'}s)`);
       else if (kind === 'exit-pending') push('pay', `Payment pending — RM ${((d?.feeCents ?? 0) / 100).toFixed(2)} · ${d?.durationMinutes ?? '?'} min`);
       else if (kind === 'exit-completed') {
-        const opened = ['paid','free','manual_release'].includes(d?.outcome);
+        const opened = ['paid', 'free', 'manual_release'].includes(d?.outcome);
         push('out', `Exit ${String(d?.outcome ?? '?').toUpperCase()} — barrier ${opened ? 'OPEN' : 'stays CLOSED'}`);
         refreshRef.current?.();
       } else if (kind === 'warning') push('warn', `⚠ ${d?.kind ?? 'warning'}${d?.connState ? ` (${d.connState})` : ''}`);
@@ -354,11 +354,11 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         : r.remaining === 0
           ? { ok: true, text: `Pushed ${r.queued} session${r.queued === 1 ? '' : 's'} — all acknowledged by qparking cloud. They now appear on its Parking Activity page.` }
           : {
-              ok: false,
-              text: `Queued ${r.queued} session${r.queued === 1 ? '' : 's'}, but ${r.remaining} still isn't acknowledged`
-                + `${r.status?.lastError ? ` — last error: ${r.status.lastError}` : ''}. `
-                + 'They stay queued and retry automatically; open a row to see its own error.',
-            },
+            ok: false,
+            text: `Queued ${r.queued} session${r.queued === 1 ? '' : 's'}, but ${r.remaining} still isn't acknowledged`
+              + `${r.status?.lastError ? ` — last error: ${r.status.lastError}` : ''}. `
+              + 'They stay queued and retry automatically; open a row to see its own error.',
+          },
     );
     await Promise.all([fetchPage(), fetchUnsyncedCount()]);
   });
@@ -453,9 +453,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       </header>
 
       {pushResult && (
-        <div className={`mb-3 flex items-start gap-2 rounded-lg border px-4 py-3 text-sm ${
-          pushResult.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'
-        }`}>
+        <div className={`mb-3 flex items-start gap-2 rounded-lg border px-4 py-3 text-sm ${pushResult.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'
+          }`}>
           <CloudUpload size={15} className="mt-0.5 flex-shrink-0" />
           <p className="flex-1">{pushResult.text}</p>
           <button onClick={() => setPushResult(null)} className="flex-shrink-0 opacity-70 hover:opacity-100"><X size={15} /></button>
@@ -536,89 +535,89 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       <div className="relative">
         <PageLoadingOverlay show={pageLoading} />
 
-      {/* DESKTOP/TABLET TABLE */}
-      <div className={`hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[900px]">
-            <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
-              <tr>
-                <th className="text-left px-3 py-2.5 font-bold">Plate</th>
-                <th className="text-left px-3 py-2.5 font-bold">Captures</th>
-                <th className="text-left px-3 py-2.5 font-bold">Entered</th>
-                <th className="text-left px-3 py-2.5 font-bold">Exited</th>
-                <th className="text-right px-3 py-2.5 font-bold">Duration</th>
-                <th className="text-left px-3 py-2.5 font-bold">Payment</th>
-                <th className="text-left px-3 py-2.5 font-bold">Space</th>
-                <th className="text-left px-3 py-2.5 font-bold">Cloud</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((s) => {
-                const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
-                return (
-                  <tr key={s.id} onClick={() => setViewing(s)}
-                    className="border-t border-gray-100 cursor-pointer hover:bg-gray-50">
-                    <td className="px-3 py-2 font-mono font-bold tracking-wider">{s.plate}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center gap-1">
-                        <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
-                        <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(s.entryAt)}</td>
-                    <td className="px-3 py-2 text-xs text-gray-600">
-                      {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
-                    <td className="px-3 py-2"><PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} /></td>
-                    <td className="px-3 py-2 text-xs text-gray-600"><span className="text-gray-400">—</span></td>
-                    <td className="px-3 py-2"><CloudSyncCell session={s} /></td>
-                  </tr>
-                );
-              })}
-              {rows.length === 0 && (
-                <tr><td colSpan={8} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* MOBILE CARDS */}
-      <div className={`md:hidden space-y-2 transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
-        {rows.length === 0 && (
-          <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500">
-            <Car size={18} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}
+        {/* DESKTOP/TABLET TABLE */}
+        <div className={`hidden md:block rounded-xl border border-gray-200 bg-white overflow-hidden transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[900px]">
+              <thead className="bg-gray-50 text-[10px] uppercase tracking-widest text-gray-500">
+                <tr>
+                  <th className="text-left px-3 py-2.5 font-bold">Plate</th>
+                  <th className="text-left px-3 py-2.5 font-bold">Captures</th>
+                  <th className="text-left px-3 py-2.5 font-bold">Entered</th>
+                  <th className="text-left px-3 py-2.5 font-bold">Exited</th>
+                  <th className="text-right px-3 py-2.5 font-bold">Duration</th>
+                  <th className="text-left px-3 py-2.5 font-bold">Payment</th>
+                  <th className="text-left px-3 py-2.5 font-bold">Space</th>
+                  <th className="text-left px-3 py-2.5 font-bold">Cloud</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((s) => {
+                  const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
+                  return (
+                    <tr key={s.id} onClick={() => setViewing(s)}
+                      className="border-t border-gray-100 cursor-pointer hover:bg-gray-50">
+                      <td className="px-3 py-2 font-mono font-bold tracking-wider">{s.plate}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1">
+                          <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
+                          <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-600">{fmtDateTime(s.entryAt)}</td>
+                      <td className="px-3 py-2 text-xs text-gray-600">
+                        {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-xs">{mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</td>
+                      <td className="px-3 py-2"><PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} /></td>
+                      <td className="px-3 py-2 text-xs text-gray-600"><span className="text-gray-400">—</span></td>
+                      <td className="px-3 py-2"><CloudSyncCell session={s} /></td>
+                    </tr>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <tr><td colSpan={8} className="p-8 text-center text-sm text-gray-500"><Car size={16} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
-        )}
-        {rows.map((s) => {
-          const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
-          return (
-            <div key={s.id} onClick={() => setViewing(s)}
-              className="rounded-xl border border-gray-200 bg-white p-3 cursor-pointer active:bg-gray-50">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono font-bold text-base tracking-wider">{s.plate}</span>
-                <div className="flex items-center gap-1.5">
-                  <CloudSyncCell session={s} />
-                  <PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} />
-                </div>
-              </div>
-              <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
-                <span><span className="text-gray-400">Out:</span> {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}</span>
-                <span className="font-mono"><span className="text-gray-400">Dur:</span> {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</span>
-                <span><span className="text-gray-400">Space:</span> —</span>
-              </div>
-              {(s.entryImagePath || s.exitImagePath) && (
-                <div className="mt-2 flex items-center gap-1">
-                  <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
-                  <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
-                </div>
-              )}
+        </div>
+
+        {/* MOBILE CARDS */}
+        <div className={`md:hidden space-y-2 transition-opacity ${pageLoading ? 'opacity-60' : ''}`}>
+          {rows.length === 0 && (
+            <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500">
+              <Car size={18} className="inline mr-1 text-gray-400" /> {hasAnyFilter ? 'No sessions match the current filters.' : 'Nothing here yet.'}
             </div>
-          );
-        })}
-      </div>
+          )}
+          {rows.map((s) => {
+            const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
+            return (
+              <div key={s.id} onClick={() => setViewing(s)}
+                className="rounded-xl border border-gray-200 bg-white p-3 cursor-pointer active:bg-gray-50">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono font-bold text-base tracking-wider">{s.plate}</span>
+                  <div className="flex items-center gap-1.5">
+                    <CloudSyncCell session={s} />
+                    <PaymentCell status={s.paymentStatus} method={s.cardScheme} freeReason={s.freeReason} />
+                  </div>
+                </div>
+                <div className="mt-1 text-[11px] text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                  <span><span className="text-gray-400">In:</span> {fmtDateTime(s.entryAt)}</span>
+                  <span><span className="text-gray-400">Out:</span> {s.exitAt ? fmtDateTime(s.exitAt) : <OnSiteBadge />}</span>
+                  <span className="font-mono"><span className="text-gray-400">Dur:</span> {mins != null ? `${Math.floor(mins / 60)}h ${mins % 60}m` : '—'}</span>
+                  <span><span className="text-gray-400">Space:</span> —</span>
+                </div>
+                {(s.entryImagePath || s.exitImagePath) && (
+                  <div className="mt-2 flex items-center gap-1">
+                    <ThumbCell path={s.entryImagePath} kind="entry" plate={s.plate} onOpen={setPreviewImage} />
+                    <ThumbCell path={s.exitImagePath} kind="exit" plate={s.plate} onOpen={setPreviewImage} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       <PaginationBar pager={pager} rowsOnPage={rows.length} />
