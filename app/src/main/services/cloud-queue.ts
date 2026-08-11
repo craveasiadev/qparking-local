@@ -1,35 +1,29 @@
 /**
- * Outbound push queue to qparking SaaS. Every session state change
- * (entry / update / exit / delete) enqueues a row in `sync_queue` via
- * `db.enqueueSync()`. This module drains the queue with exponential
- * backoff:
- *
- *   attempt 1 → immediate
- *   attempt 2 → +10s
- *   attempt 3 → +30s
- *   attempt 4 → +2min
- *   attempt 5 → +10min
- *   attempt 6+ → marked status='failed'; needs operator retry from UI
- *
- * Why a persistent queue: the SaaS can be unreachable for minutes (VPS
- * reboot, network blip, ISP issue) but parking flow at the gate has to
- * keep working. We push best-effort and replay on recovery. A process
- * restart loses NO sync state because the queue is in SQLite.
- *
- * Exposes a status snapshot for the Dashboard so the operator can see
- * pending/failed counts at a glance.
+ * Outbound push queue to qparking SaaS. Every session state change enqueues a
+ * `sync_queue` row (SQLite-backed, so a restart loses no state) and drains with
+ * backoff (0/10s/30s/2min/10min, failing after 6 attempts) so the SaaS being
+ * briefly unreachable never blocks parking flow at the gate.
  */
-import { EventEmitter } from 'node:events';
-import fs from 'node:fs';
-import axios from 'axios';
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import axios from "axios";
 import {
-  enqueueSync, listDueSync, markSyncOk, markSyncRetry, markSyncFailed,
-  syncQueueStats, listSyncQueueIssues, getLane, getTerminal, isBoundToCurrentSite,
-  getSiteDefaultRatePolicy,
-  type SyncOp,
-} from './db';
-import { getCloudApi } from './cloud-api';
-import type { ParkingSession, Transaction, SyncIssue } from '../../shared/types';
+	enqueueSync,
+	listDueSync,
+	markSyncOk,
+	markSyncRetry,
+	markSyncFailed,
+	syncQueueStats,
+	listSyncQueueIssues,
+	getLane,
+	getTerminal,
+	isBoundToCurrentSite,
+	getSiteDefaultRatePolicy,
+	getCompanySetting,
+	type SyncOp,
+} from "./db";
+import { getCloudApi } from "./cloud-api";
+import type { ParkingSession, Transaction, SyncIssue } from "../../shared/types";
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
 const MAX_ATTEMPTS = 6;
@@ -48,14 +42,14 @@ export const syncEvents = new EventEmitter();
  *               Dashboard can show which record + why (not just the last error)
  */
 export interface SyncStatus {
-  pending: number;
-  failed: number;
-  inFlight: boolean;
-  oldestPending: string | null;
-  lastDrainAt: string | null;
-  lastSuccessAt: string | null;
-  lastError: string | null;
-  issues: SyncIssue[];
+	pending: number;
+	failed: number;
+	inFlight: boolean;
+	oldestPending: string | null;
+	lastDrainAt: string | null;
+	lastSuccessAt: string | null;
+	lastError: string | null;
+	issues: SyncIssue[];
 }
 
 let inFlight = false;
@@ -64,76 +58,55 @@ let lastSuccessAt: string | null = null;
 let lastError: string | null = null;
 
 export function getSyncStatus(): SyncStatus {
-  const stats = syncQueueStats();
-  return {
-    pending: stats.pending,
-    failed: stats.failed,
-    inFlight,
-    oldestPending: stats.oldestPending,
-    lastDrainAt,
-    lastSuccessAt,
-    lastError,
-    issues: listSyncQueueIssues(),
-  };
+	const stats = syncQueueStats();
+	return {
+		pending: stats.pending,
+		failed: stats.failed,
+		inFlight,
+		oldestPending: stats.oldestPending,
+		lastDrainAt,
+		lastSuccessAt,
+		lastError,
+		issues: listSyncQueueIssues(),
+	};
 }
 
-/**
- * Read a plate-capture image off disk and return it as a base64 string ready
- * to embed in a session upsert payload. Returns null if the path is missing
- * or the file can't be read — best-effort so a missing image never blocks
- * the metadata sync. Also caps the size at 500KB so we don't blow up the
- * HTTP request; anything larger is skipped with a warning.
- */
+/** Reads a plate-capture image off disk as base64, capped at 500KB. Best-effort: returns null (never throws) so a missing/oversized image doesn't block the metadata sync. */
 function readImageAsBase64(imagePath: string | null | undefined): string | null {
-  if (!imagePath) return null;
-  try {
-    const stat = fs.statSync(imagePath);
-    const MAX_BYTES = 500 * 1024;
-    if (stat.size > MAX_BYTES) {
-      console.warn(`[cloud-queue] skipping oversized plate image ${imagePath} (${stat.size} bytes, cap ${MAX_BYTES})`);
-      return null;
-    }
-    const buf = fs.readFileSync(imagePath);
-    return buf.toString('base64');
-  } catch (e: any) {
-    console.warn(`[cloud-queue] failed to read plate image ${imagePath}: ${e?.message ?? e}`);
-    return null;
-  }
+	if (!imagePath) return null;
+	try {
+		const stat = fs.statSync(imagePath);
+		const MAX_BYTES = 500 * 1024;
+		if (stat.size > MAX_BYTES) {
+			console.warn(`[cloud-queue] skipping oversized plate image ${imagePath} (${stat.size} bytes, cap ${MAX_BYTES})`);
+			return null;
+		}
+		const buf = fs.readFileSync(imagePath);
+		return buf.toString("base64");
+	} catch (e: any) {
+		console.warn(`[cloud-queue] failed to read plate image ${imagePath}: ${e?.message ?? e}`);
+		return null;
+	}
 }
 
-/**
- * Rate-policy scope key, sent as the payload's legacy `site_id` field.
- *
- * ⚠️ INFORMATIONAL ONLY — it must never gate a push. The current cloud endpoint
- * (ParkingRecordController::upsert) neither validates nor reads `site_id`: it
- * takes the site from the bearer token and correlates by (token site + plate +
- * exit_time IS NULL). It is kept in the payload solely so an older backend that
- * did read it still behaves.
- *
- * This used to return null → every enqueue helper returned early with a
- * console.warn → the session was NEVER queued and NEVER reached the cloud, with
- * nothing anywhere recording the loss. On a box whose lanes carry no rate policy
- * and which has no site-default policy — a completely ordinary setup, and the
- * state of the test box on 2026-08-06 — that silently discarded EVERY session.
- * Resolved best-effort now: present when a policy exists, absent when not.
- *
- * ENTRY-lane-first, then the exit lane, then the site default — mirroring how
- * local pricing (parking-flow.handleExit) resolves the rate, so the two can't
- * disagree about which plan a stay belongs to.
- */
+/** Gates the upload on company_settings.save_entry_image/save_exit_image (disk save is unaffected). Read at enqueue time, so a flag flip doesn't touch already-queued rows. Missing setting defaults to ON, not off. */
+function readImageForUpload(type: "entry" | "exit", imagePath: string | null | undefined): string | null {
+	const setting = getCompanySetting();
+	const isEnabled = !setting || (type === "entry" ? setting.saveEntryImage : setting.saveExitImage);
+	return isEnabled ? readImageAsBase64(imagePath) : null;
+}
+
+/** Legacy `site_id` field — informational only, must never gate a push (the endpoint derives site from the bearer token). Best-effort: absent when no policy resolves. Resolution order mirrors parking-flow.handleExit's rate lookup (entry lane → exit lane → site default). */
 function resolveScopeId(session: ParkingSession): string | null {
-  const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
-  const exitLane = session.exitLaneId ? getLane(session.exitLaneId) : null;
-  return entryLane?.policyId
-    ?? exitLane?.policyId
-    ?? getSiteDefaultRatePolicy()?.policyId
-    ?? null;
+	const entryLane = session.entryLaneId ? getLane(session.entryLaneId) : null;
+	const exitLane = session.exitLaneId ? getLane(session.exitLaneId) : null;
+	return entryLane?.policyId ?? exitLane?.policyId ?? getSiteDefaultRatePolicy()?.policyId ?? null;
 }
 
 /** The legacy `site_id` field, omitted entirely when no policy resolves. */
 function scopeField(session: ParkingSession): { site_id?: string } {
-  const siteId = resolveScopeId(session);
-  return siteId ? { site_id: siteId } : {};
+	const siteId = resolveScopeId(session);
+	return siteId ? { site_id: siteId } : {};
 }
 
 /**
@@ -141,66 +114,88 @@ function scopeField(session: ParkingSession): { site_id?: string } {
  * fetching directly so retries are guaranteed.
  */
 export function enqueueEntry(session: ParkingSession): void {
-  const entryImage = readImageAsBase64(session.entryImagePath);
-  enqueueSync('session.entry', {
-    ...scopeField(session),
-    plate_number: session.plate,
-    entry_time: session.entryAt,
-    ...(entryImage ? { entry_image_base64: entryImage } : {}),
-  }, session.id, session.rev);
-  scheduleDrain();
+	const entryImage = readImageForUpload("entry", session.entryImagePath);
+	enqueueSync(
+		"session.entry",
+		{
+			...scopeField(session),
+			plate_number: session.plate,
+			entry_time: session.entryAt,
+			...(entryImage ? { entry_image_base64: entryImage } : {}),
+		},
+		session.id,
+		session.rev,
+	);
+	scheduleDrain();
 }
 
 export function enqueueExit(session: ParkingSession): void {
-  // Ship BOTH the entry image (in case earlier entry-sync retries dropped it)
-  // and the freshly-captured exit image. Cloud upsert is idempotent per column
-  // so re-uploading the entry image is safe. Payment outcome is NOT sent here —
-  // it rides on its own transaction sync (enqueueTransaction → /transactions).
-  const entryImage = readImageAsBase64(session.entryImagePath);
-  const exitImage  = readImageAsBase64(session.exitImagePath);
-  enqueueSync('session.exit', {
-    ...scopeField(session),
-    plate_number: session.plate,
-    entry_time: session.entryAt,
-    exit_time: session.exitAt,
-    fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
-    duration_minutes: session.durationMinutes ?? 0,
-    status: session.status,
-    // Why this exit cost nothing ('pass-monthly' / 'within-grace' / 'rate-zero' /
-    // 'no-policy'). Without it the cloud's Parking Activity page can only say
-    // "free", and a legitimate pass exit is indistinguishable from a
-    // misconfigured RM0 rate plan — the one distinction revenue assurance needs.
-    free_reason: session.freeReason ?? null,
-    ...(entryImage ? { entry_image_base64: entryImage } : {}),
-    ...(exitImage  ? { exit_image_base64:  exitImage  } : {}),
-  }, session.id, session.rev);
-  scheduleDrain();
+	// Ships both images (entry in case an earlier retry dropped it; safe to resend).
+	// Payment outcome is NOT sent here — that's enqueueTransaction → /transactions.
+	const entryImage = readImageForUpload("entry", session.entryImagePath);
+	const exitImage = readImageForUpload("exit", session.exitImagePath);
+	enqueueSync(
+		"session.exit",
+		{
+			...scopeField(session),
+			plate_number: session.plate,
+			entry_time: session.entryAt,
+			exit_time: session.exitAt,
+			fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
+			duration_minutes: session.durationMinutes ?? 0,
+			status: session.status,
+			// Why this exit cost nothing ('pass-monthly' / 'within-grace' / 'rate-zero' /
+			// 'no-policy'). Without it the cloud's Parking Activity page can only say
+			// "free", and a legitimate pass exit is indistinguishable from a
+			// misconfigured RM0 rate plan — the one distinction revenue assurance needs.
+			free_reason: session.freeReason ?? null,
+			...(entryImage ? { entry_image_base64: entryImage } : {}),
+			...(exitImage ? { exit_image_base64: exitImage } : {}),
+		},
+		session.id,
+		session.rev,
+	);
+	scheduleDrain();
 }
 
 export function enqueueUpdate(session: ParkingSession): void {
-  // The same upsertParkingRecord endpoint handles updates — re-posting an
-  // open entry refreshes it; posting with an exit_time closes it. So an
-  // edit can re-use the entry / exit shapes depending on whether exitAt
-  // is set.
-  if (session.exitAt) {
-    enqueueSync('session.update', {
-      ...scopeField(session),
-      plate_number: session.plate,
-      entry_time: session.entryAt,
-      exit_time: session.exitAt,
-      fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
-      duration_minutes: session.durationMinutes ?? 0,
-      status: session.status,
-      free_reason: session.freeReason ?? null,
-    }, session.id, session.rev);
-  } else {
-    enqueueSync('session.update', {
-      ...scopeField(session),
-      plate_number: session.plate,
-      entry_time: session.entryAt,
-    }, session.id, session.rev);
-  }
-  scheduleDrain();
+	// Re-posting an open entry refreshes it; posting with exit_time closes it —
+	// same upsert endpoint as enqueueEntry/enqueueExit, images included (safe to
+	// resend: persistPlateImage overwrites the same object key).
+	const entryImage = readImageForUpload("entry", session.entryImagePath);
+	if (session.exitAt) {
+		const exitImage = readImageForUpload("exit", session.exitImagePath);
+		enqueueSync(
+			"session.update",
+			{
+				...scopeField(session),
+				plate_number: session.plate,
+				entry_time: session.entryAt,
+				exit_time: session.exitAt,
+				fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
+				duration_minutes: session.durationMinutes ?? 0,
+				status: session.status,
+				free_reason: session.freeReason ?? null,
+				...(entryImage ? { entry_image_base64: entryImage } : {}),
+				...(exitImage ? { exit_image_base64: exitImage } : {}),
+			},
+			session.id,
+			session.rev,
+		);
+	} else {
+		enqueueSync(
+			"session.update",
+			{
+				...scopeField(session),
+				plate_number: session.plate,
+				entry_time: session.entryAt,
+				...(entryImage ? { entry_image_base64: entryImage } : {}),
+			},
+			session.id,
+			session.rev,
+		);
+	}
+	scheduleDrain();
 }
 
 /**
@@ -209,36 +204,36 @@ export function enqueueUpdate(session: ParkingSession): void {
  * updates the cloud row. The cloud correlates it to the parking record by plate.
  */
 export function enqueueTransaction(session: ParkingSession, txn: Transaction): void {
-  // Resolve the durable device identity so the cloud can attribute the charge
-  // to a specific terminal even after a local id renumber / device delete.
-  const terminal = txn.terminalId ? getTerminal(txn.terminalId) : null;
-  enqueueSync('transaction.upsert', {
-    local_transaction_id: txn.localTransactionId,
-    plate_number: session.plate,
-    status: txn.status,
-    amount: (txn.amountCents / 100).toFixed(2),
-    payment_method: txn.paymentMethod ?? null,
-    card_number: txn.cardNumber ?? null,
-    order_id: txn.orderId ?? null,
-    payment_timestamp: txn.paymentTimestamp ?? null,
-    appr_code: txn.apprCode ?? null,
-    pay_type: txn.payType ?? null,
-    // Which payment device rang up the charge — the cloud "source" column.
-    terminal_name: txn.terminalName ?? null,
-    terminal_external_id: terminal?.externalId ?? null,
-  });
-  scheduleDrain();
+	// Resolve the durable device identity so the cloud can attribute the charge
+	// to a specific terminal even after a local id renumber / device delete.
+	const terminal = txn.terminalId ? getTerminal(txn.terminalId) : null;
+	enqueueSync("transaction.upsert", {
+		local_transaction_id: txn.localTransactionId,
+		plate_number: session.plate,
+		status: txn.status,
+		amount: (txn.amountCents / 100).toFixed(2),
+		payment_method: txn.paymentMethod ?? null,
+		card_number: txn.cardNumber ?? null,
+		order_id: txn.orderId ?? null,
+		payment_timestamp: txn.paymentTimestamp ?? null,
+		appr_code: txn.apprCode ?? null,
+		pay_type: txn.payType ?? null,
+		// Which payment device rang up the charge — the cloud "source" column.
+		terminal_name: txn.terminalName ?? null,
+		terminal_external_id: terminal?.externalId ?? null,
+	});
+	scheduleDrain();
 }
 
 export function enqueueDelete(session: ParkingSession): void {
-  // No session id attached: the row is being deleted locally, so there is nothing
-  // left to stamp a sync watermark on by the time this drains.
-  enqueueSync('session.delete', {
-    ...scopeField(session),
-    plate_number: session.plate,
-    entry_time: session.entryAt,
-  });
-  scheduleDrain();
+	// No session id attached: the row is being deleted locally, so there is nothing
+	// left to stamp a sync watermark on by the time this drains.
+	enqueueSync("session.delete", {
+		...scopeField(session),
+		plate_number: session.plate,
+		entry_time: session.entryAt,
+	});
+	scheduleDrain();
 }
 
 let drainTimer: NodeJS.Timeout | null = null;
@@ -246,11 +241,11 @@ let scheduleHandle: NodeJS.Timeout | null = null;
 
 /** Kick a drain on the next tick (debounced). */
 function scheduleDrain() {
-  if (scheduleHandle) return;
-  scheduleHandle = setTimeout(() => {
-    scheduleHandle = null;
-    void drainOnce();
-  }, 50);
+	if (scheduleHandle) return;
+	scheduleHandle = setTimeout(() => {
+		scheduleHandle = null;
+		void drainOnce();
+	}, 50);
 }
 
 /**
@@ -258,105 +253,107 @@ function scheduleDrain() {
  * times — subsequent calls are no-ops.
  */
 export function startSyncDrain(): void {
-  if (drainTimer) return;
-  // Kick an initial drain so anything left over from the previous run
-  // ships immediately on app start.
-  scheduleDrain();
-  drainTimer = setInterval(() => { void drainOnce(); }, DRAIN_INTERVAL_MS);
+	if (drainTimer) return;
+	// Kick an initial drain so anything left over from the previous run
+	// ships immediately on app start.
+	scheduleDrain();
+	drainTimer = setInterval(() => {
+		void drainOnce();
+	}, DRAIN_INTERVAL_MS);
 }
 
 async function drainOnce(): Promise<void> {
-  if (inFlight) return;
-  inFlight = true;
-  syncEvents.emit('status', getSyncStatus());
+	if (inFlight) return;
+	inFlight = true;
+	syncEvents.emit("status", getSyncStatus());
 
-  try {
-    const dueRows = listDueSync();
-    if (dueRows.length === 0) return;
+	try {
+		const dueRows = listDueSync();
+		if (dueRows.length === 0) return;
 
-    if (!getCloudApi()) {
-      // Not configured yet — leave rows pending; they'll retry once the
-      // operator fills in URL + key in Settings.
-      lastError = 'qparking_not_configured';
-      return;
-    }
+		if (!getCloudApi()) {
+			// Not configured yet — leave rows pending; they'll retry once the
+			// operator fills in URL + key in Settings.
+			lastError = "qparking_not_configured";
+			return;
+		}
 
-    if (!isBoundToCurrentSite()) {
-      // Key points at a site this box isn't provisioned for (pending
-      // re-provision). Hold the queue rather than pushing the old site's
-      // sessions to the new site. A confirmed rebind clears the queue anyway.
-      lastError = 'site_not_bound';
-      return;
-    }
+		if (!isBoundToCurrentSite()) {
+			// Key points at a site this box isn't provisioned for (pending
+			// re-provision). Hold the queue rather than pushing the old site's
+			// sessions to the new site. A confirmed rebind clears the queue anyway.
+			lastError = "site_not_bound";
+			return;
+		}
 
-    for (const row of dueRows) {
-      const result = await sendParkingRecord(row.op, row.payload);
-      if (result.ok) {
-        markSyncOk(row.id);
-        lastSuccessAt = new Date().toISOString();
-        lastError = null;
-      } else {
-        const nextAttempt = row.attempts + 1;
-        if (nextAttempt >= MAX_ATTEMPTS) {
-          markSyncFailed(row.id, result.error || 'unknown_error');
-        } else {
-          const delay = BACKOFF_MS[Math.min(nextAttempt, BACKOFF_MS.length - 1)];
-          markSyncRetry(row.id, result.error || 'unknown_error', delay);
-        }
-        lastError = result.error || 'unknown_error';
-      }
-      syncEvents.emit('status', getSyncStatus());
-    }
-  } catch (e: any) {
-    lastError = e?.message ?? String(e);
-  } finally {
-    lastDrainAt = new Date().toISOString();
-    inFlight = false;
-    syncEvents.emit('status', getSyncStatus());
-  }
+		for (const row of dueRows) {
+			const result = await sendParkingRecord(row.op, row.payload);
+			if (result.ok) {
+				markSyncOk(row.id);
+				lastSuccessAt = new Date().toISOString();
+				lastError = null;
+			} else {
+				const nextAttempt = row.attempts + 1;
+				if (nextAttempt >= MAX_ATTEMPTS) {
+					markSyncFailed(row.id, result.error || "unknown_error");
+				} else {
+					const delay = BACKOFF_MS[Math.min(nextAttempt, BACKOFF_MS.length - 1)];
+					markSyncRetry(row.id, result.error || "unknown_error", delay);
+				}
+				lastError = result.error || "unknown_error";
+			}
+			syncEvents.emit("status", getSyncStatus());
+		}
+	} catch (e: any) {
+		lastError = e?.message ?? String(e);
+	} finally {
+		lastDrainAt = new Date().toISOString();
+		inFlight = false;
+		syncEvents.emit("status", getSyncStatus());
+	}
 }
 
 async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
-  const cloud = getCloudApi();
-  if (!cloud) return { ok: false, error: 'qparking_not_configured' };
-  // Transactions have their own endpoint (the payment ledger). All session ops
-  // hit parking-records/upsert — the server differentiates entry vs exit vs
-  // update by what fields are present (exit_time present = closing record;
-  // absent = open/update). Delete is the exception: a body flag the server
-  // recognises as "soft-delete this record".
-  if (op === 'transaction.upsert') {
-    try {
-      const response = await cloud.post('/transactions/upsert', payload);
-      return { ok: true, status: response.status };
-    } catch (error: any) {
-      if (axios.isAxiosError(error) && error.response) {
-        const responseBody: any = error.response.data;
-        const message = responseBody?.message || responseBody?.error || error.response.statusText;
-        return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
-      }
-      const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
-      return { ok: false, error: isTimeout ? 'timeout (10s)' : (error?.message ?? String(error)) };
-    }
-  }
-  const body = op === 'session.delete' ? { ...payload, _delete: true } : payload;
-  try {
-    const response = await cloud.post('/parking-records/upsert', body);
-    return { ok: true, status: response.status };
-  } catch (error: any) {
-    if (axios.isAxiosError(error) && error.response) {
-      const responseBody: any = error.response.data;
-      const message = responseBody?.message || responseBody?.error || error.response.statusText;
-      return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
-    }
-    const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
-    return { ok: false, error: isTimeout ? 'timeout (10s)' : (error?.message ?? String(error)) };
-  }
+	const cloud = getCloudApi();
+	if (!cloud) return { ok: false, error: "qparking_not_configured" };
+	// Transactions have their own endpoint (the payment ledger). All session ops
+	// hit parking-records/upsert — the server differentiates entry vs exit vs
+	// update by what fields are present (exit_time present = closing record;
+	// absent = open/update). Delete is the exception: a body flag the server
+	// recognises as "soft-delete this record".
+	if (op === "transaction.upsert") {
+		try {
+			const response = await cloud.post("/transactions/upsert", payload);
+			return { ok: true, status: response.status };
+		} catch (error: any) {
+			if (axios.isAxiosError(error) && error.response) {
+				const responseBody: any = error.response.data;
+				const message = responseBody?.message || responseBody?.error || error.response.statusText;
+				return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
+			}
+			const isTimeout = axios.isAxiosError(error) && error.code === "ECONNABORTED";
+			return { ok: false, error: isTimeout ? "timeout (10s)" : (error?.message ?? String(error)) };
+		}
+	}
+	const body = op === "session.delete" ? { ...payload, _delete: true } : payload;
+	try {
+		const response = await cloud.post("/parking-records/upsert", body);
+		return { ok: true, status: response.status };
+	} catch (error: any) {
+		if (axios.isAxiosError(error) && error.response) {
+			const responseBody: any = error.response.data;
+			const message = responseBody?.message || responseBody?.error || error.response.statusText;
+			return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
+		}
+		const isTimeout = axios.isAxiosError(error) && error.code === "ECONNABORTED";
+		return { ok: false, error: isTimeout ? "timeout (10s)" : (error?.message ?? String(error)) };
+	}
 }
 
 /** Manual drain — called when operator hits "Retry now" on the dashboard. */
 export async function drainNow(): Promise<SyncStatus> {
-  await drainOnce();
-  return getSyncStatus();
+	await drainOnce();
+	return getSyncStatus();
 }
 
 /**
@@ -367,20 +364,23 @@ export async function drainNow(): Promise<SyncStatus> {
  * rows queued.
  */
 export function backfillAllSessions(): { entries: number; exits: number } {
-  // Import here to avoid the circular import that would trigger if we
-  // pulled this in at module-load time (db.ts → cloud-queue.ts → db.ts).
-  const db = require('./db') as typeof import('./db');
-  const allSessions = db.listRecentSessions(10_000);
-  let entries = 0, exits = 0;
-  for (const session of allSessions) {
-    if (session.exitAt) {
-      enqueueExit(session); exits++;
-    } else {
-      enqueueEntry(session); entries++;
-    }
-  }
-  scheduleDrain();
-  return { entries, exits };
+	// Import here to avoid the circular import that would trigger if we
+	// pulled this in at module-load time (db.ts → cloud-queue.ts → db.ts).
+	const db = require("./db") as typeof import("./db");
+	const allSessions = db.listRecentSessions(10_000);
+	let entries = 0,
+		exits = 0;
+	for (const session of allSessions) {
+		if (session.exitAt) {
+			enqueueExit(session);
+			exits++;
+		} else {
+			enqueueEntry(session);
+			entries++;
+		}
+	}
+	scheduleDrain();
+	return { entries, exits };
 }
 
 /**
@@ -393,15 +393,15 @@ export function backfillAllSessions(): { entries: number; exits: number } {
  * plate). Returns the count enqueued.
  */
 export function backfillAllTransactions(): { transactions: number } {
-  const db = require('./db') as typeof import('./db');
-  const rows = db.listTransactionsPage({ limit: 100_000, offset: 0 });
-  let transactions = 0;
-  for (const txn of rows) {
-    const session = db.getSessionById(txn.sessionId);
-    if (!session) continue; // no session → can't correlate by plate
-    enqueueTransaction(session, txn);
-    transactions++;
-  }
-  scheduleDrain();
-  return { transactions };
+	const db = require("./db") as typeof import("./db");
+	const rows = db.listTransactionsPage({ limit: 100_000, offset: 0 });
+	let transactions = 0;
+	for (const txn of rows) {
+		const session = db.getSessionById(txn.sessionId);
+		if (!session) continue; // no session → can't correlate by plate
+		enqueueTransaction(session, txn);
+		transactions++;
+	}
+	scheduleDrain();
+	return { transactions };
 }
