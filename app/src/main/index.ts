@@ -107,6 +107,7 @@ import {
   syncAll, syncSite, fetchSiteWith,
   cloudPullEvents, getCloudPullState,
   pushActivityLogsToCloud,
+  autoSync, stopAutoSync,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
 import {
@@ -172,12 +173,13 @@ app.whenReady().then(async () => {
   console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listener → :${lprPort}`);
   startLprServer(lprPort);
   startParkingFlow();
-  // One-shot cloud pull at boot — the recurring 60s tick was removed, so the
-  // cloud-owned mirrors (passes, deny list, spaces, activity) refresh only here
-  // and on the operator's manual "Sync now" / site rebind. The local SQLite
-  // cache persists across restarts, so a failed boot pull just leaves the gate
-  // pricing and gating from the last successful sync.
-  void syncAll().catch(() => null);
+  // Cloud pull at boot, then hand over to autoSync()'s recurring pull (cadence
+  // from company_settings.sync_interval_minutes, which this first pull is what
+  // fetches — hence boot-pull-then-arm rather than arming straight away). The
+  // local SQLite cache persists across restarts, so a failed boot pull just
+  // leaves the gate pricing and gating from the last successful sync until the
+  // next tick or a manual "Sync now".
+  void syncAll().catch(() => null).then(() => autoSync());
   startSyncDrain();
   // W4G PayResult callback listener — only start when the operator has
   // enabled the TNG integration. Toggling it on/off in Settings restarts
@@ -199,7 +201,7 @@ app.whenReady().then(async () => {
   createTray();
 });
 
-app.on('before-quit', () => { stopRtspGrabbers(); stopCameraRelay(); });
+app.on('before-quit', () => { stopAutoSync(); stopRtspGrabbers(); stopCameraRelay(); });
 
 app.on('window-all-closed', () => {
   // Keep the process alive on Windows so the background services keep running.

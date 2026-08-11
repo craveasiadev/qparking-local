@@ -34,6 +34,8 @@ import {
 	updateActivityLogs,
 	markActivityLogsPushFailed,
 	listActivityLogs,
+	getCompanySetting,
+	isBoundToCurrentSite,
 } from "./db";
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
@@ -654,10 +656,9 @@ function mapApiRowToCompanySetting(settingRow: any): CompanySetting {
 		id: String(settingRow.id ?? ""),
 		companyId: settingRow.company_id ?? null,
 		seasonPassGraceDays: Number(settingRow.season_pass_grace_days ?? 30),
-		// The SaaS may send these as JSON booleans or as 0/1 — `?? default` then
+		// The SaaS may send this as a JSON boolean or as 0/1 — `?? default` then
 		// coerce handles both, and keeps an explicit `false`/`0` meaning false.
-		saveEntryImage: !!(settingRow.save_entry_image ?? true),
-		saveExitImage: !!(settingRow.save_exit_image ?? true),
+		syncCaptureImages: !!(settingRow.sync_capture_images ?? true),
 		syncIntervalMinutes: Number(settingRow.sync_interval_minutes ?? 60),
 	};
 }
@@ -714,14 +715,77 @@ export async function syncAll(): Promise<{
 	return results;
 }
 
+// ─── periodic pull ───────────────────────────────────────────────────────────
+
+/** Cadence bounds for company_settings.sync_interval_minutes. The floor matters:
+ *  the SaaS can send 0 (or a non-numeric), and `setTimeout(fn, 0)` would re-run a
+ *  ten-endpoint pull — one of them the unbounded /activity-logs replace-all
+ *  mirror — every millisecond. The default matches the column default in
+ *  db.applySchema and mapApiRowToCompanySetting. */
+const MIN_SYNC_INTERVAL_MIN = 1;
+const DEFAULT_SYNC_INTERVAL_MIN = 60;
+
+/** Minutes between pulls, resolved once at autoSync() start. Anything unusable —
+ *  missing row, 0, negative, NaN — falls back to the default rather than clamping
+ *  to the floor: a nonsense value means "no cadence was really configured", not
+ *  "sync as fast as allowed". Interval is fixed at boot — changing the setting
+ *  takes effect on next app restart, same as before this function grew guards. */
+function resolveSyncIntervalMin(): number {
+	const configured = Number(getCompanySetting()?.syncIntervalMinutes);
+	if (configured <= 0) return DEFAULT_SYNC_INTERVAL_MIN;
+	return Math.max(MIN_SYNC_INTERVAL_MIN, configured);
+}
+
+let autoSyncTimer: NodeJS.Timeout | null = null;
+let autoSyncInFlight = false;
+
+/**
+ * Periodic pull, cadence from company_settings.sync_interval_minutes.
+ *
+ * setInterval + an in-flight guard, the same shape cloud-queue.ts's drainOnce
+ * uses for its 30s drain: a tick that lands while the previous syncAll() is
+ * still running is skipped rather than queued, so a pull that outlasts the
+ * interval on a slow link can't stack overlapping runs. Skipping costs nothing
+ * here — the next tick is at most one interval away, same as a dropped drain tick.
+ *
+ * Idempotent — a call while the loop is already running is a no-op, so boot,
+ * settings-save and site-rebind can all call it freely without stacking timers.
+ */
+export function autoSync(): void {
+	if (autoSyncTimer) return;
+	autoSyncTimer = setInterval(async () => {
+		if (autoSyncInFlight) return;
+		// Unconfigured or bound to another site: skip the tick outright. Running it
+		// would fire ten requests that all fail the same way, and stampPullOutcome()
+		// would paper over the last real pull's outcome with that error.
+		if (!getCloudApi() || !isBoundToCurrentSite()) return;
+		autoSyncInFlight = true;
+		try {
+			await syncAll();
+		} catch {
+			// swallow — same as the boot call site's syncAll().catch(() => null)
+		} finally {
+			autoSyncInFlight = false;
+		}
+	}, resolveSyncIntervalMin() * 60_000);
+}
+
+/** Stop the periodic pull (app quit). Safe to call when it was never started. */
+export function stopAutoSync(): void {
+	if (autoSyncTimer) {
+		clearInterval(autoSyncTimer);
+		autoSyncTimer = null;
+	}
+}
+
 /**
  * Update + broadcast the outcome of a full pull.
  *
- * A FAILED pull deliberately does NOT refresh `lastCloudPullAt`. With the
- * recurring tick gone there's no automatic retry, so that stamp is the only
- * thing telling staff whether a cloud-issued ban or season pass has actually
- * reached this barrier — showing a fresh time after a failed pull would be a
- * lie in exactly the situation where it matters.
+ * A FAILED pull deliberately does NOT refresh `lastCloudPullAt`. The next
+ * automatic retry is a whole sync_interval_minutes away, so that stamp is the
+ * only thing telling staff whether a cloud-issued ban or season pass has
+ * actually reached this barrier — showing a fresh time after a failed pull would
+ * be a lie in exactly the situation where it matters.
  */
 function stampPullOutcome(results: Record<string, SyncResult>): void {
 	const failed = Object.entries(results).filter(([, result]) => !result.ok);
@@ -735,22 +799,28 @@ function stampPullOutcome(results: Record<string, SyncResult>): void {
 	cloudPullEvents.emit("pulled", cloudPullState);
 }
 
-// ─── no recurring background sync ────────────────────────────────────────────
+// ─── when cloud-owned mirrors refresh ────────────────────────────────────────
 //
-// The 60s polling tick (passes / deny list / spaces / activity logs) was
+// The old 60s polling tick (passes / deny list / spaces / activity logs) was
 // REMOVED. It cost 4 requests a minute per site forever, and /activity-logs is
 // an unbounded replace-all mirror of the whole audit trail — that request grows
-// without limit as a site ages.
+// without limit as a site ages, so it must not run on a fast fixed tick.
 //
-// Cloud-owned mirrors now refresh at exactly three points, all of them
-// syncAll():
+// Cloud-owned mirrors now refresh at exactly four points, all of them syncAll():
 //   1. app boot            — index.ts
-//   2. manual "Sync now"   — Settings page → ipc 'sync:all-tables'
-//   3. site rebind         — ipc 'site:rebind'
+//   2. autoSync() tick     — every company_settings.sync_interval_minutes (60 default)
+//   3. manual "Sync now"   — Settings page → ipc 'sync:all-tables'
+//   4. site rebind         — ipc 'site:rebind'
 //
 // Operational consequence, by design: a ban or season pass issued in the cloud
-// does NOT reach the barrier until one of those three happens. Site staff have
-// to press "Sync now" after a cloud-side change they need enforced.
+// does NOT reach the barrier until one of those happens. On the default cadence
+// that's up to an hour, so site staff still press "Sync now" when they need a
+// cloud-side change enforced immediately.
+//
+// The session/transaction push queue is separate and deliberately NOT driven
+// from here — cloud-queue's startSyncDrain() runs its own 30s drain with
+// per-row backoff. Equipment (cameras / lanes / terminals) stays manual too;
+// see the boot comment in index.ts.
 
 // Remote gate-open command poll REMOVED: the cloud can't reach a site's LAN,
 // and the poll-based dispatch only fired the gate simulator + face turnstile —

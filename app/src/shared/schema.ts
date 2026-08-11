@@ -682,14 +682,13 @@ export interface AppSettings {
  *  Exactly ONE row — the cloud owns a single settings record per company — so
  *  db.getCompanySetting() takes no lookup key, the way getCurrentSite() doesn't.
  *
- *  ⚠️ MIRRORED ONLY so far: the pull writes these values but nothing reads them
- *  yet. Honouring them (pass grace at the gate, capture retention, pull cadence)
- *  is still to be wired up. */
+ *  syncCaptureImages gates cloud-queue's image upload and syncIntervalMinutes
+ *  drives cloud-sync's pull cadence — both wired up. ⚠️ seasonPassGraceDays is
+ *  still MIRRORED ONLY: nothing honours it at the gate yet. */
 export interface CompanySetting {
   id: string;
   companyId: string | null;
   seasonPassGraceDays: number;
-  saveEntryImage: boolean;
-  saveExitImage: boolean;
+  syncCaptureImages: boolean;
   syncIntervalMinutes: number;
 }

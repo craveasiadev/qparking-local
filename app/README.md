@@ -288,16 +288,18 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 |------|---------|
 | `db.ts` | SQLite schema + every query (sessions, terminals, cameras, lanes, rate policies, settings, sync queue). |
 | `cloud-api.ts` | **The one axios client for the Laravel API.** Builds base URL + `Bearer` auth + 10s timeout from Settings. Every cloud call in the rows below goes through it. |
-| `lpr-webhook.ts` | HTTP **server** the LPR cameras POST plate events to. Also powers the "Simulate" button. |
+| `lpr-webhook.ts` | HTTP **server** the LPR cameras POST plate events to. Also powers the "Simulate" button and the `/live/<id>` MJPEG feed. |
 | `parking-flow.ts` | The brain: entry vs exit, fee calculation, drives the terminal, records the result, opens the gate. |
-| `ecpi-terminal.ts` | Payment-terminal driver over a raw TCP socket (heartbeat + state machine). |
-| `w4g-tng.ts` | Touch'n'Go integration — a parallel payment path via the W4G IO-controller. Deliberately hand-rolled HTTP (no axios): the device firmware is byte-picky about header order + JSON spacing. |
+| `payment-tng.ts` | Touch'n'Go W4G IO-controller integration — the payment-terminal driver. Deliberately hand-rolled HTTP (no axios): the device firmware is byte-picky about header order + JSON spacing. |
+| `payment-probe.ts` | TCP reachability check for a W4G device (`Test connection` on the Payment terminals page). Doesn't speak the payment protocol — just confirms the socket opens. |
 | `camera-relay.ts` | **Raises the barrier.** Pulses the LPR camera's onboard IO relay over the vendor's native SDK (`VzLPRClient_SetIOOutputAuto`). The only thing in the app that moves a boom. |
-| `qparking-sync.ts` | **Pull** from the Laravel API: `GET /rate-policies`, `/season-passes`, `/parking-spaces`, `/gate-commands/pending`; `PUT /rate-policies/upsert` pushes rate edits back up. |
-| `sync-queue.ts` | **Push** to the Laravel API: `POST /parking-records`, with exponential-backoff retries so a WAN outage never drops a record. |
-| `camera-snapshots.ts` | Fetches live JPEG snapshots from cameras (UI preview) and uploads them to the cloud on a 10s timer. |
-| `camera-push.ts` | Mirrors the local camera registry up to the cloud. |
+| `camera-probe.ts` | HTTP reachability check for a camera (`Test connection` on the LPR cameras page). |
+| `camera-rtsp.ts` | Live-view video source for the Live display: pulls each camera's RTSP/H.264 stream through FFmpeg and re-serves it as MJPEG on the same `/live/<id>` endpoint `lpr-webhook.ts` exposes. |
+| `cloud-sync.ts` | **Pull** from the Laravel API: rate policies, season passes, parking spaces, blocked plates, customers, vehicles, site, activity logs, open sessions, company settings — all in parallel via `syncAll()`. |
+| `cloud-queue.ts` | **Push** to the Laravel API: a persistent, backoff-retried queue (`sync_queue` table) for session entry/update/exit/delete and payment transactions. Plate images ride along as base64, gated by `company_settings.sync_capture_images`. |
+| `camera-push.ts` | Mirrors the local camera registry up to the cloud (read-only mirror; cameras stay owned locally). |
 | `device-push.ts` | Mirrors terminals + lanes up to the cloud. |
+| `device-sync.ts` | Manual, operator-triggered two-way equipment sync (push local → cloud, or pull cloud → local) fired from the Cameras/Lanes/Terminals pages — never automatic. |
 
 ### How the backend calls the Laravel API (`cloud-api.ts`)
 
@@ -363,10 +365,10 @@ A car pays and exits:
                                               │ find session (db.ts)
                                               │ compute fee (cloud-synced rate)
 3.                                            ▼
-                                       services/ecpi-terminal.ts      🟢 Node
-                                              │ TCP: "tap card" → approved
+                                       services/payment-tng.ts         🟢 Node
+                                              │ HTTP (W4G): "tap card" → approved
 4.                                            ▼
-                                       db.ts recordExit + sync-queue.ts
+                                       db.ts recordExit + cloud-queue.ts
                                               │ (→ Laravel via cloud-api.ts)
                                               │ emits 'exit-completed'
 5.                                            ▼
@@ -425,7 +427,7 @@ const [sync, syncing] = useAsyncAction(async () => {
 ```
 
 `syncRatePoliciesNow` → `ipcRenderer.invoke('policies:sync')` → `ipcMain.handle('policies:sync',
-() => syncRatePolicies())`, and `syncRatePolicies()` (in `services/qparking-sync.ts`) calls
+() => syncRatePolicies())`, and `syncRatePolicies()` (in `services/cloud-sync.ts`) calls
 `GET /rate-policies` through the shared cloud client (`cloud-api.ts` adds the base URL +
 `Bearer` token), maps the snake_case rows to local types, writes them to SQLite,
 and returns the count.
@@ -586,14 +588,17 @@ from the Laravel API in one click, with a spinner and a result message. It shows
 where real logic, error handling, and UI states go in each layer. Same 4 hops,
 bottom-up:
 
-**Step 1 — Backend logic** (`src/main/services/qparking-sync.ts`). The real work
+**Step 1 — Backend logic** (`src/main/services/cloud-sync.ts`). The real work
 lives in a service, not in the IPC handler. Reuse the existing per-table syncs
 and run them in parallel; the per-call `.catch(toFailedSyncResult)` converts any
 crash into an `{ ok: false, error }` result so one failing endpoint doesn't
-block the others:
+block the others. (Shown trimmed to three tables for clarity — the real
+`syncAll()` pulls ten: rate policies, season passes, parking spaces, blocked
+plates, customers, vehicles, site, activity logs, open sessions, company
+settings.)
 
 ```ts
-/** Run all three pulls in parallel; one failing doesn't block the others. */
+/** Run all pulls in parallel; one failing doesn't block the others. */
 export async function syncAll(): Promise<{
   policies: SyncResult;
   passes: SyncResult;
@@ -612,7 +617,7 @@ export async function syncAll(): Promise<{
 the channel. Handlers stay thin — one line that delegates to the service:
 
 ```ts
-import { …, syncAll } from './services/qparking-sync';
+import { …, syncAll } from './services/cloud-sync';
 
 ipcMain.handle('sync:all-tables', () => syncAll());
 ```
@@ -668,7 +673,7 @@ const [runSyncAll, syncingAll] = useAsyncAction(async () => {
 click → runSyncAll() → window.bridge.syncAllNow()          ⚛️ React
       → ipcRenderer.invoke('sync:all-tables')              ⚡ preload
       → ipcMain.handle('sync:all-tables')                  ⚡ index.ts
-      → syncAll() → 3× GET /api/v1/local-server/…          🟢 qparking-sync.ts → Laravel
+      → syncAll() → 3× GET /api/v1/local-server/…          🟢 cloud-sync.ts → Laravel
       → rows written to SQLite, counts returned back up    🟢 db.ts
       → "✓ Fetched 7 policies, 12 passes, 40 spaces"         ⚛️ React
 ```
