@@ -174,6 +174,12 @@ export interface BridgeApi {
 	/** Probe reachability by host:port directly — lets "Test connection" run
 	 *  against the form values before the camera is saved. */
 	pingCameraHost(input: { host: string; port?: number }): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
+	/** Kill and respawn every live video feed, and re-attempt any barrier handle
+	 *  that never came up — what the Live display's "Refresh cameras" button does
+	 *  before it remounts its tiles. `feeds` is how many are running afterwards.
+	 *  Needed because a camera that comes online AFTER the app started is invisible
+	 *  to the config-driven resync: nothing changed, so nothing gets retried. */
+	restartCameraStreams(): Promise<{ ok: boolean; feeds: number }>;
 
 	// Lanes
 	listLanes(): Promise<ParkingLane[]>;

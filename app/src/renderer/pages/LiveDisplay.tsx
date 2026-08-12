@@ -38,25 +38,45 @@ export function LiveDisplay() {
   // cameraId so a fresh read for cam A never clobbers cam B's readout.
   const [plates, setPlates] = useState<Record<number, PlateEvent>>({});
 
+  // Reload the camera list AND the stream port, then bump the nonce so every tile
+  // remounts and reopens its MJPEG connection. Lanes come along so each tile's
+  // operator actions know the wired terminal.
+  async function reload() {
+    const [cams, lns, diag] = await Promise.all([
+      window.bridge.listCameras(),
+      window.bridge.listLanes(),
+      window.bridge.diagnoseLpr().catch(() => null),
+    ]);
+    setCameras(cams);
+    setLanes(lns);
+    if (diag?.ports) setPorts(diag.ports);
+    setNonce((n) => n + 1);
+  }
+
+  /**
+   * The Refresh button. Restarts the feeds in the MAIN PROCESS first, then
+   * remounts the tiles.
+   *
+   * Remounting alone only reopens the browser's end of the stream, which fixes
+   * nothing when the camera was off (or unplugged) at app start: the ffmpeg
+   * process behind /live/<id> is stuck retrying a host that wasn't there, and the
+   * reopened connection has no frames to carry. So this kills those processes and
+   * respawns them — the camera is on the network NOW, so the fresh attempt
+   * connects. Deliberately NOT on mount: visiting the page shouldn't blank a wall
+   * of healthy feeds for a couple of seconds.
+   */
   async function refresh() {
     setLoading(true);
     try {
-      // Reload the camera list AND the stream port, then bump the nonce so every
-      // tile remounts. Remounting reopens each MJPEG connection, so Refresh
-      // genuinely reconnects a frozen/dropped feed — not just re-reads the list.
-      // Lanes come along so each tile's operator actions know the wired terminal.
-      const [cams, lns, diag] = await Promise.all([
-        window.bridge.listCameras(),
-        window.bridge.listLanes(),
-        window.bridge.diagnoseLpr().catch(() => null),
-      ]);
-      setCameras(cams);
-      setLanes(lns);
-      if (diag?.ports) setPorts(diag.ports);
-      setNonce((n) => n + 1);
+      await window.bridge.restartCameraStreams().catch(() => null);
+      await reload();
     } finally { setLoading(false); }
   }
-  useEffect(() => { void refresh(); }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    void reload().finally(() => setLoading(false));
+  }, []);
 
   // Overlay the LPR result live: every camera pushes its plate reads through the
   // webhook, which the main process fans out as 'plate-detected'. Keep only the
@@ -81,8 +101,10 @@ export function LiveDisplay() {
             <InfoTip title="About this page" kind="info">
               Live video from every gate camera, with the latest plate read
               shown on each tile. From here you can also open a barrier for a
-              car manually. If a camera's tile is missing or black, check its
-              IP address on the LPR cameras page.
+              car manually. If a tile is black, press <strong>Refresh
+              cameras</strong> — that restarts the feeds, which is what a camera
+              switched on after the app needs. If it stays black, check the
+              camera's IP address on the LPR cameras page.
             </InfoTip>
           </h1>
           <p className="text-sm text-gray-500 mt-1">Live video streamed straight from each device over RTSP. A camera needs its IP address set on the LPR cameras page to appear here.</p>
@@ -94,8 +116,9 @@ export function LiveDisplay() {
           )}
         </div>
         <button onClick={() => refresh()} disabled={loading}
+          title="Stop and restart every live feed. Use this when a camera was switched on (or plugged in) after the app started, or if a tile is stuck on black."
           className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh cameras
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> {loading ? 'Reconnecting' : 'Refresh cameras'}
         </button>
       </header>
 

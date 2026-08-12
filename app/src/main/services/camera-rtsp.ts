@@ -195,3 +195,26 @@ export function startRtspGrabbers() { resync(); }
 export function stopRtspGrabbers() {
   for (const id of [...feeds.keys()]) stopFeed(id);
 }
+
+/**
+ * Hard restart — kill every ffmpeg and spawn a fresh one. Backs the Live
+ * display's "Refresh cameras" button.
+ *
+ * resync() deliberately LEAVES a running feed alone (it only starts what's
+ * missing and stops what's unwanted or reconfigured), which is right after a
+ * camera save but useless for the case this exists for: the app started before
+ * the camera was on the network, so ffmpeg is sitting in its own connect/retry
+ * loop against a host that wasn't there. Its `key` still matches, so resync()
+ * considers it healthy and skips it — and remounting the tile in the renderer
+ * only reopens the browser's MJPEG connection, which has nothing to deliver
+ * while the process behind it is stuck. Killing the process is the only thing
+ * that forces an immediate reconnect.
+ *
+ * Returns how many feeds are running afterwards, so the caller can report it.
+ */
+export function restartFeeds(): number {
+  stopRtspGrabbers();
+  log('restarting all RTSP feeds (manual refresh)');
+  resync();
+  return feeds.size;
+}

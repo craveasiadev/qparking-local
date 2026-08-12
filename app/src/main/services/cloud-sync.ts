@@ -39,6 +39,7 @@ import {
 } from "./db";
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
+import { drainNow, getSyncStatus } from "./cloud-queue";
 import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site, ActivityLog, CompanySetting } from "../../shared/types";
 
 export interface SyncResult {
@@ -708,7 +709,72 @@ export async function syncAll(): Promise<{
 		syncCompanySetting().catch(toFailedSyncResult),
 	]);
 	const results = { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions, companySetting };
-	stampPullOutcome(results);
+	stampPullOutcome(results, "full");
+	return results;
+}
+
+// ─── the light recurring sync (what autoSync() runs) ─────────────────────────
+
+/**
+ * Deliver the outbound queue — parking activity (session.entry/exit/update/
+ * delete) and payment transactions — by draining cloud-queue once, right now.
+ *
+ * cloud-queue owns the rows, the backoff and the endpoints; this is only a
+ * "drain now" trigger wearing a SyncResult so it can sit alongside the pulls in
+ * syncEssentials(). `fetched` = rows that left the queue during THIS drain.
+ *
+ * Not-ok only when there is still a backlog AND the queue recorded a reason for
+ * it: rows merely waiting out their backoff window are a normal, healthy state
+ * and must not paint the header red.
+ */
+async function pushQueuedRecordsToCloud(): Promise<SyncResult> {
+	if (!getCloudApi()) return NOT_CONFIGURED;
+	const pendingBefore = getSyncStatus().pending;
+	const status = await drainNow();
+	const pushed = Math.max(0, pendingBefore - status.pending);
+	const backlog = status.pending + status.failed;
+	if (backlog > 0 && status.lastError) return { ok: false, fetched: pushed, error: status.lastError };
+	return { ok: true, fetched: pushed };
+}
+
+/** What one syncEssentials() tick did — three pulls down, one push up. */
+export interface EssentialSyncResults {
+	customers: SyncResult;
+	vehicles: SyncResult;
+	spaces: SyncResult;
+	outbound: SyncResult;
+}
+
+/**
+ * The recurring tick's sync — deliberately a SUBSET of syncAll().
+ *
+ * Down from the cloud (operator-facing directories that change often and cost
+ * little): customers, vehicles, bays.
+ * Up to the cloud: parking activity + transactions, via the outbound queue.
+ *
+ * Everything else syncAll() pulls — rate policies, season passes, the deny
+ * list, the site record, company settings, the activity-log mirror, open-session
+ * recovery — is left OUT on purpose. Two of those are the expensive ones
+ * (/activity-logs is an unbounded replace-all that grows as the site ages), and
+ * the rest change rarely.
+ *
+ * CONSEQUENCE, by design: a season pass issued or a plate banned in the cloud
+ * does NOT reach the barrier on this tick. It arrives at boot, on a site rebind,
+ * or when someone presses "Sync now" — which is why the header's "Synced …"
+ * stamp keeps tracking full pulls only (see stampPullOutcome).
+ *
+ * Same shape as syncAll(): everything in parallel, each call's own
+ * `.catch(toFailedSyncResult)` so one failure never blocks the others.
+ */
+export async function syncEssentials(): Promise<EssentialSyncResults> {
+	const [customers, vehicles, spaces, outbound] = await Promise.all([
+		syncCloudCustomers().catch(toFailedSyncResult),
+		syncCloudVehicles().catch(toFailedSyncResult),
+		syncParkingSpaces().catch(toFailedSyncResult),
+		pushQueuedRecordsToCloud().catch(toFailedSyncResult),
+	]);
+	const results = { customers, vehicles, spaces, outbound };
+	stampPullOutcome(results, "essential");
 	return results;
 }
 
@@ -737,13 +803,18 @@ let autoSyncTimer: NodeJS.Timeout | null = null;
 let autoSyncInFlight = false;
 
 /**
- * Periodic pull, cadence from company_settings.sync_interval_minutes.
+ * Periodic sync, cadence from company_settings.sync_interval_minutes.
+ *
+ * Runs syncEssentials(), NOT syncAll(): customers / vehicles / bays down,
+ * parking activity + transactions up. The full ten-endpoint pull stays on the
+ * three explicit moments — boot, "Sync now", site rebind — so the recurring tick
+ * never carries the unbounded /activity-logs mirror.
  *
  * setInterval + an in-flight guard, the same shape cloud-queue.ts's drainOnce
- * uses for its 30s drain: a tick that lands while the previous syncAll() is
- * still running is skipped rather than queued, so a pull that outlasts the
- * interval on a slow link can't stack overlapping runs. Skipping costs nothing
- * here — the next tick is at most one interval away, same as a dropped drain tick.
+ * uses for its 30s drain: a tick that lands while the previous one is still
+ * running is skipped rather than queued, so a sync that outlasts the interval on
+ * a slow link can't stack overlapping runs. Skipping costs nothing here — the
+ * next tick is at most one interval away, same as a dropped drain tick.
  *
  * Idempotent — a call while the loop is already running is a no-op, so boot,
  * settings-save and site-rebind can all call it freely without stacking timers.
@@ -753,12 +824,12 @@ export function autoSync(): void {
 	autoSyncTimer = setInterval(async () => {
 		if (autoSyncInFlight) return;
 		// Unconfigured or bound to another site: skip the tick outright. Running it
-		// would fire ten requests that all fail the same way, and stampPullOutcome()
+		// would fire requests that all fail the same way, and stampPullOutcome()
 		// would paper over the last real pull's outcome with that error.
 		if (!getCloudApi() || !isBoundToCurrentSite()) return;
 		autoSyncInFlight = true;
 		try {
-			await syncAll();
+			await syncEssentials();
 		} catch {
 			// swallow — same as the boot call site's syncAll().catch(() => null)
 		} finally {
@@ -775,23 +846,43 @@ export function stopAutoSync(): void {
 	}
 }
 
+/** Which sync produced the error currently on display. A light tick must never
+ *  clear a full pull's error — it didn't re-try those mirrors. */
+type PullScope = "full" | "essential";
+let pullErrorOwner: PullScope | null = null;
+
 /**
- * Update + broadcast the outcome of a full pull.
+ * Update + broadcast the outcome of a sync.
  *
  * A FAILED pull deliberately does NOT refresh `lastCloudPullAt`. The next
  * automatic retry is a whole sync_interval_minutes away, so that stamp is the
  * only thing telling staff whether a cloud-issued ban or season pass has
  * actually reached this barrier — showing a fresh time after a failed pull would
  * be a lie in exactly the situation where it matters.
+ *
+ * For the same reason a successful `essential` tick doesn't refresh it either:
+ * syncEssentials() never pulls passes, the deny list or rates, so "Synced
+ * 10:42" after one would claim something that didn't happen. It still REPORTS
+ * its own failures (the operator has to see a dead link), and clears the error
+ * again once it recovers — but only when the error was its own.
  */
-function stampPullOutcome(results: Record<string, SyncResult>): void {
+function stampPullOutcome(results: Record<string, SyncResult>, scope: PullScope): void {
 	const failed = Object.entries(results).filter(([, result]) => !result.ok);
 	if (failed.length === 0) {
-		cloudPullState = { lastCloudPullAt: new Date().toISOString(), lastCloudPullError: "" };
+		if (scope === "full") {
+			cloudPullState = { lastCloudPullAt: new Date().toISOString(), lastCloudPullError: "" };
+			pullErrorOwner = null;
+		} else if (pullErrorOwner === "essential") {
+			cloudPullState = { ...cloudPullState, lastCloudPullError: "" };
+			pullErrorOwner = null;
+		} else {
+			return; // clean light tick, nothing on display changed — don't re-emit
+		}
 	} else {
 		const [mirror, first] = failed[0];
 		const suffix = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
 		cloudPullState = { ...cloudPullState, lastCloudPullError: `${mirror}: ${first.error ?? "failed"}${suffix}` };
+		pullErrorOwner = scope;
 	}
 	cloudPullEvents.emit("pulled", cloudPullState);
 }
@@ -803,21 +894,27 @@ function stampPullOutcome(results: Record<string, SyncResult>): void {
 // an unbounded replace-all mirror of the whole audit trail — that request grows
 // without limit as a site ages, so it must not run on a fast fixed tick.
 //
-// Cloud-owned mirrors now refresh at exactly four points, all of them syncAll():
+// FULL pulls — syncAll(), every mirror including passes, deny list, rates,
+// company settings and the /activity-logs replace-all — happen at exactly three
+// points:
 //   1. app boot            — index.ts
-//   2. autoSync() tick     — every company_settings.sync_interval_minutes (60 default)
-//   3. manual "Sync now"   — Settings page → ipc 'sync:all-tables'
-//   4. site rebind         — ipc 'site:rebind'
+//   2. manual "Sync now"   — header / Settings page → ipc 'sync:all-tables'
+//   3. site rebind         — ipc 'site:rebind'
+//
+// The recurring autoSync() tick runs syncEssentials() instead — every
+// company_settings.sync_interval_minutes (60 default):
+//   down: customers, vehicles, bays
+//   up:   parking activity + transactions (one cloud-queue drain)
 //
 // Operational consequence, by design: a ban or season pass issued in the cloud
-// does NOT reach the barrier until one of those happens. On the default cadence
-// that's up to an hour, so site staff still press "Sync now" when they need a
-// cloud-side change enforced immediately.
+// reaches the barrier only at boot, on a rebind, or when staff press "Sync now"
+// — the hourly tick no longer brings them down. Staff press the button when they
+// need a cloud-side gating change enforced immediately.
 //
-// The session/transaction push queue is separate and deliberately NOT driven
-// from here — cloud-queue's startSyncDrain() runs its own 30s drain with
-// per-row backoff. Equipment (cameras / lanes / terminals) stays manual too;
-// see the boot comment in index.ts.
+// The session/transaction push queue still runs its OWN 30s drain in
+// cloud-queue's startSyncDrain(), with per-row backoff — the tick's push is a
+// nudge on top of it, not the only delivery path. Equipment (cameras / lanes /
+// terminals) stays manual; see the boot comment in index.ts.
 
 // Remote gate-open command poll REMOVED: the cloud can't reach a site's LAN,
 // and the poll-based dispatch only fired the gate simulator + face turnstile —

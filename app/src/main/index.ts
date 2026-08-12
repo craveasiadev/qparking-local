@@ -119,7 +119,7 @@ import { retryAllFailedSync } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier, isSdkLoaded } from './services/camera-relay';
-import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } from './services/camera-rtsp';
+import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers, restartFeeds as restartRtspFeeds } from './services/camera-rtsp';
 import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
@@ -924,6 +924,20 @@ ipcMain.handle('cameras:delete', (_e, id: number) => {
 ipcMain.handle('cameras:latest-frame', (_e, cameraId: number) => getLatestFrame(cameraId));
 ipcMain.handle('cameras:ping', (_e, cameraId: number) => pingCamera(cameraId));
 ipcMain.handle('cameras:ping-host', (_e, input: { host: string; port?: number }) => pingHost(input.host, input.port));
+// Live display → "Refresh cameras". Tear the video feeds down and build them
+// back up, and re-attempt any barrier handle that never came up.
+//
+// This is the fix for a camera plugged in (or powered on) AFTER the app started:
+// its ffmpeg is stuck in a connect/retry loop against a host that wasn't there,
+// and its SDK handle never logged in. Neither notices the camera arriving,
+// because nothing about their CONFIG changed — so resync() alone leaves both
+// exactly as they are. A kill-and-respawn is what makes the feed come up now
+// instead of on the next camera save or app restart.
+ipcMain.handle('cameras:restart-streams', () => {
+  const running = restartRtspFeeds();
+  resyncCameraRelay();
+  return { ok: true, feeds: running };
+});
 
 ipcMain.handle('lanes:list', () => listLanes());
 ipcMain.handle('lanes:save', (_e, input: any) => {

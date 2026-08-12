@@ -106,9 +106,12 @@ interface DebugLogEntry {
 /**
  * Header cloud-pull stamp + manual "Sync now".
  *
- * There is no recurring pull timer any more (see cloud-sync.ts) — cloud-owned
- * data, the barrier's deny list and season passes included, refreshes only at
- * boot, on a site rebind, or when someone presses this button.
+ * The recurring timer only runs the light sync (customers / vehicles / bays
+ * down, parking activity + transactions up — see cloud-sync.syncEssentials), so
+ * the barrier's deny list and season passes still refresh ONLY at boot, on a
+ * site rebind, or when someone presses this button. The stamp tracks those full
+ * pulls for that reason; a light tick reports its errors here but never moves
+ * the time.
  */
 function CloudSyncStamp() {
   const [pullState, setPullState] = useState<{ lastCloudPullAt: string; lastCloudPullError: string } | null>(null);

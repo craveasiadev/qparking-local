@@ -24,6 +24,7 @@ const api: BridgeApi = {
   getCameraLatestFrame: (cameraId: number) => ipcRenderer.invoke('cameras:latest-frame', cameraId),
   pingCamera: (cameraId: number) => ipcRenderer.invoke('cameras:ping', cameraId),
   pingCameraHost: (input: { host: string; port?: number }) => ipcRenderer.invoke('cameras:ping-host', input),
+  restartCameraStreams: () => ipcRenderer.invoke('cameras:restart-streams'),
 
   // lanes
   listLanes: () => ipcRenderer.invoke('lanes:list'),
