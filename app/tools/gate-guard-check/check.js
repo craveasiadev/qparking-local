@@ -455,12 +455,17 @@ try {
   check('exit without a pass: priced as a transient, never credited to a pass',
     !completed.some((c) => c.sessionId === ghost.id && c.passId));
 
-  // 7. Pass holder whose entry was never recorded still gets out (misread /
-  //    entry camera down), and it's flagged so a failing camera surfaces.
+  // 7. Pass holder whose entry was never recorded is HELD, not released. A valid
+  //    pass proves the stay is paid for; it does not prove the car is inside,
+  //    and with no session there is nothing to close. Flagged under its own kind
+  //    so a failing entry camera still surfaces as itself.
+  const completedBefore = completed.length;
   readOn(poOut.id, 'RES0001', 'exit');
   await new Promise((r) => setTimeout(r, 30));
-  check('exit with a pass: pass holder with no open session is released',
+  check('exit with a pass: pass holder with no open session is flagged',
     warned.some((w) => w.kind === 'exit-pass-holder-no-entry' && w.plate === 'RES0001'));
+  check('exit with a pass: …and is NOT released — no exit completes, so the barrier stays down',
+    completed.length === completedBefore);
 
   // 8. Regression: an 'open' camera admits everyone with no pass, and the entry
   //    event fires — which is what makes the barrier open (index.ts pulses on

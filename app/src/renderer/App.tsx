@@ -188,6 +188,11 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
       return { title: 'Payment already in progress', detail: 'A charge is already running on this lane — wait for it to finish.' };
     case 'exit-without-entry':
       return { title: 'Exit with no entry record', detail: `No open session for ${d?.plate ?? 'this plate'}. Check the plate reading or create an entry.` };
+    case 'exit-pass-holder-no-entry':
+      return {
+        title: `Pass holder with no entry record — ${d?.plate ?? 'unknown plate'}`,
+        detail: 'The pass is valid, but there is no open session for this car, so there is nothing to close and the barrier stays down. The entry read was missed or stored under a different plate — check the Sessions list for a similar plate still inside, then release the car manually from Parking Activity.',
+      };
     case 'exit-no-lane':
       return { title: 'Exit on an unconfigured lane', detail: 'The exit camera isn\'t mapped to a lane. Assign it under Cameras / Lanes.' };
     case 'exit-blacklisted':

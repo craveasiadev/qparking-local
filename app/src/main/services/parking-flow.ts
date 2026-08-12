@@ -434,37 +434,40 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // what lets the car out now. (A pass that covered the entry but lapsed
   // mid-stay is billed for the uncovered tail — see PASS PARTIAL below.)
   //
-  // Sits ahead of the no-session guard on purpose. A pass holder whose entry was
-  // never recorded (misread, entry camera down, let in manually) must still get
-  // out; requiring an open session would strand them.
+  // Sits ahead of the no-session guard so a pass holder with no entry on record
+  // is reported as exactly that, rather than as an anonymous exit-without-entry.
+  // It does NOT open the barrier for them — see the !session branch below.
   const exitIsoNow = event.exitAtOverride ?? new Date().toISOString();
   // Scoped to the EXIT instant (not bare "now") so a simulated exit at a chosen
   // time asks the same question a real exit at that time would.
   const passNow = findSeasonPassByPlate(event.plate, { entryAt: exitIsoNow, exitAt: exitIsoNow });
   if (passNow) {
-    flog(`EXIT FREE (PASS): plate=${event.plate} holds a valid ${passNow.passType} pass (id=${passNow.passId}, valid ${passNow.startDate ?? '—'}→${passNow.endDate ?? 'forever'}) → no fee, no terminal → opening barrier`);
-
     if (!session) {
-      // Pass holder with no entry on record. Let them out — we know who they
-      // are — but say so loudly: a run of these means the entry camera is
-      // missing reads, which is worth chasing.
-      flog(`…and there is NO open session for it — opening the barrier anyway (entry was never recorded; check the entry camera). No exit row to write.`);
+      // Pass holder with no entry on record — the barrier stays DOWN.
+      //
+      // A pass says "this car's stay is paid for". It does not say the car is
+      // inside, and there is no session here to prove it is. Opening on the pass
+      // alone waves out anything whose plate matches a valid pass, including a
+      // car that never entered through this site at all, and it writes no exit
+      // row — so the release leaves nothing behind to reconcile or audit.
+      //
+      // This used to open the boom on the grounds that a missed entry read must
+      // not strand a resident. It stranded the accounting instead: the car left,
+      // the site had no record of it, and a genuinely absent entry looked
+      // identical to a plate that was never here. Staff release it by hand (or
+      // add the entry) once they have looked, which is the same answer every
+      // other "car at the barrier we cannot account for" path already gives.
+      flog(`EXIT REFUSED (NO ENTRY ON RECORD): plate=${event.plate} holds a valid ${passNow.passType} pass (id=${passNow.passId}, valid ${passNow.startDate ?? '—'}→${passNow.endDate ?? 'forever'}) but has NO open session — barrier NOT pulsed, no exit row to write. The entry was never recorded (check the entry camera) or was stored under a different reading of this plate. Staff must release this car by hand.`);
       parkingEvents.emit('warning', {
         kind: 'exit-pass-holder-no-entry',
         plate: event.plate,
         cameraId: event.cameraId,
         passId: passNow.passId,
       });
-      parkingEvents.emit('exit-completed', {
-        sessionId: null,
-        outcome: 'free',
-        reason: `pass-${passNow.passType}`,
-        passId: passNow.passId,
-        plate: event.plate,
-        cameraId: event.cameraId,
-      });
       return;
     }
+
+    flog(`EXIT FREE (PASS): plate=${event.plate} holds a valid ${passNow.passType} pass (id=${passNow.passId}, valid ${passNow.startDate ?? '—'}→${passNow.endDate ?? 'forever'}) → no fee, no terminal → opening barrier`);
 
     recordExit(session.id, {
       exitAt: exitIsoNow,

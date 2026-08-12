@@ -518,12 +518,14 @@ function wireRendererEvents() {
         description: `${p?.plate ?? '?'} refused entry — pass ${p?.passId ?? '?'} already has ${p?.inside ?? '?'}/${p?.limit ?? '?'} vehicles inside`,
       });
     } else if (kind === 'exit-pass-holder-no-entry') {
-      // Let out on the strength of the pass, but recorded: a run of these means
-      // the ENTRY camera is dropping reads, which is worth chasing.
+      // Held at the barrier like any other exit we cannot account for. Recorded
+      // separately from 'exit-without-entry' because the cause is different and
+      // so is the fix: a run of these means the ENTRY camera is dropping reads
+      // for cars we can name, which is worth chasing.
       sendToRenderer('log', {
         terminalId: 0,
         direction: 'error',
-        message: `${p?.plate} exited a pass-only lane with a valid pass but NO entry on record — barrier opened. Check the entry camera is reading reliably.`,
+        message: `${p?.plate} reached the exit with a valid pass but NO entry on record — barrier NOT opened, the car is held. Check the entry camera is reading reliably, then release the car from Parking Activity.`,
         payload: p,
       });
       audit({
@@ -531,10 +533,10 @@ function wireRendererEvents() {
         action: 'exit',
         category: 'gate',
         severity: 'medium',
-        outcome: 'ok',
+        outcome: 'blocked',
         resourceType: 'vehicle',
         resourceId: p?.plate ?? null,
-        description: `${p?.plate ?? '?'} left a pass-only lane on pass ${p?.passId ?? '?'} with no entry recorded — released, no session to close`,
+        description: `${p?.plate ?? '?'} held at the exit on pass ${p?.passId ?? '?'} — the pass is valid but no entry was recorded, so there was no session to close and the barrier stayed down`,
       });
     } else if (kind === 'exit-without-entry') {
       audit({
@@ -656,8 +658,9 @@ function wireRendererEvents() {
     });
   });
   parkingEvents.on('exit-completed', (p: any) => {
-    // sessionId is null for a pass-only exit by a holder whose entry was never
-    // recorded — there's no row to mirror, but the barrier must still open.
+    // Every exit that completes closes a real session — the flow refuses any
+    // exit it cannot tie to one, pass holder or not — so the lookup should
+    // always land. Kept null-tolerant so a deleted row can't crash the handler.
     const session = p?.sessionId ? getSessionById(p.sessionId) : null;
     // The car has left: mirror the exit (status change) to qparking SaaS, and
     // push the payment transaction to the ledger if this exit carried one
@@ -698,8 +701,7 @@ function wireRendererEvents() {
       outcome: 'ok',
       resourceType: 'parking_record',
       resourceId: p?.sessionId != null ? String(p.sessionId) : null,
-      description: `Exit · ${session?.plate ?? p?.plate ?? '?'} · ${p?.outcome}${p?.reason ? ` (${p.reason})` : ''} · ${rm(session?.feeCents)}${session?.durationMinutes != null ? ` · ${session.durationMinutes} min` : ''}`
-        + (p?.sessionId ? '' : ' · no entry on record, nothing to close'),
+      description: `Exit · ${session?.plate ?? p?.plate ?? '?'} · ${p?.outcome}${p?.reason ? ` (${p.reason})` : ''} · ${rm(session?.feeCents)}${session?.durationMinutes != null ? ` · ${session.durationMinutes} min` : ''}`,
       changes: {
         outcome: p?.outcome ?? null,
         reason: p?.reason ?? null,
