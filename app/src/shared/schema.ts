@@ -46,6 +46,45 @@ export interface PaymentTerminal {
   updatedAt: string;
 }
 
+// ─── LCD displays ────────────────────────────────────────────────────────────
+
+/**
+ * A driver-facing LCD panel at a barrier, running the qparking-lcd Android app.
+ *
+ * The panel LISTENS on `host:port`; this box dials in and holds one long-lived
+ * TCP connection per display, pushing plate / fare / thank-you frames as the
+ * parking flow decides them. See lcd-display.ts and qparking-lcd/PROTOCOL.md.
+ *
+ * A lane points at its panel via `lanes.lcd_id`. One panel per lane, and a panel
+ * may serve only one lane — two lanes pushing to the same glass would overwrite
+ * each other's fare mid-transaction.
+ */
+export interface LcdDisplay {
+  id: number;
+  /** Durable cloud identity — survives reinstall/renumber. See PaymentTerminal.externalId. */
+  externalId: string;
+  name: string;
+  /** The panel's LAN address, as shown on its own idle screen footer. */
+  host: string;
+  /** The panel's listen port — qparking-lcd Settings → Listen port. Default 7070. */
+  port: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Live link health for one panel, for the Displays page. Not persisted. */
+export interface LcdDisplayStatus {
+  lcdId: number;
+  connected: boolean;
+  /** ISO timestamp of the last successful frame ack, or null if never. */
+  lastAckAt: string | null;
+  /** Last screen the panel acknowledged. */
+  lastScreen: string | null;
+  /** Most recent connection error, cleared on a successful connect. */
+  lastError: string | null;
+}
+
 // ─── cameras ─────────────────────────────────────────────────────────────────
 
 /** Per-camera config. Cameras POST plate events to our HTTP webhook
@@ -170,6 +209,10 @@ export interface ParkingLane {
   policyId: string | null;
   /** FK to PaymentTerminal — exit lanes have this set. */
   terminalId: number | null;
+  /** FK to LcdDisplay — the driver-facing panel at this barrier. Unlike the
+   *  terminal this is useful in BOTH directions: an entry lane shows the plate
+   *  and a welcome, an exit lane shows the plate and the fare. */
+  lcdId: number | null;
   /** Optional GPIO/relay address for the gate barrier. */
   gateRelayAddress: string | null;
   enabled: boolean;

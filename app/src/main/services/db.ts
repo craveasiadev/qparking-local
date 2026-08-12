@@ -14,6 +14,7 @@ import type {
 	CloudCustomer,
 	CloudVehicle,
 	AppSettings,
+	LcdDisplay,
 	LprCamera,
 	ParkingLane,
 	ParkingSession,
@@ -264,11 +265,28 @@ function applySchema(db: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Driver-facing LCD panels running the qparking-lcd Android app. Same shape
+    -- as terminals because the operator's job is the same: name the box, say
+    -- where it is on the LAN. Unlike a terminal there is no timeout column — the
+    -- panel is fire-and-forget, and a frame it misses costs nothing but a blank
+    -- screen (see lcd-display.ts, which never blocks the parking flow on it).
+    CREATE TABLE IF NOT EXISTS lcds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      external_id TEXT,
+      name TEXT NOT NULL,
+      host TEXT NOT NULL,
+      port INTEGER NOT NULL DEFAULT 7070,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS lanes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       policy_id TEXT,
       terminal_id INTEGER,
+      lcd_id INTEGER,
       gate_relay_address TEXT,
       enabled INTEGER NOT NULL DEFAULT 1
     );
@@ -649,6 +667,16 @@ function applySchema(db: Database.Database) {
 		/* column absent or old SQLite */
 	}
 
+	// 2026-08-12: driver-facing LCD panels (qparking-lcd). The CREATE TABLE above
+	// only gives lanes.lcd_id to FRESH installs — an existing box's lanes table
+	// predates the column, so add it here. Idempotent: the ALTER throws once the
+	// column exists.
+	try {
+		db.exec("ALTER TABLE lanes ADD COLUMN lcd_id INTEGER");
+	} catch {
+		/* already applied */
+	}
+
 	// Live video now comes from the device SDK (device_user/password/port), not a
 	// stream/RTSP URL. Drop the vestigial cameras.stream_url column left over from
 	// the old RTSP attempt (best-effort; no-op on old SQLite or if already gone).
@@ -947,7 +975,7 @@ function applySchema(db: Database.Database) {
 
 	// Backfill existing rows to their legacy `local-{id}` id — the cloud already
 	// stores them keyed on `local-{id}`, so this preserves today's mappings.
-	for (const table of ["cameras", "lanes", "terminals"] as const) {
+	for (const table of ["cameras", "lanes", "terminals", "lcds"] as const) {
 		try {
 			db.exec(`UPDATE ${table} SET external_id = 'local-' || id WHERE external_id IS NULL OR external_id = ''`);
 		} catch {
@@ -1246,6 +1274,84 @@ export function deleteTerminal(id: number) {
 	getDb().prepare("DELETE FROM terminals WHERE id = ?").run(id);
 }
 
+// ─── LCD displays ──────────────────────────────────────────────────────────
+
+function rowToLcd(row: any): LcdDisplay {
+	return {
+		id: row.id,
+		externalId: row.external_id,
+		name: row.name,
+		host: row.host,
+		port: row.port,
+		enabled: !!row.enabled,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+export function listLcds(): LcdDisplay[] {
+	return (getDb().prepare("SELECT * FROM lcds ORDER BY id").all() as any[]).map(rowToLcd);
+}
+
+export function getLcd(id: number): LcdDisplay | null {
+	const row = getDb().prepare("SELECT * FROM lcds WHERE id = ?").get(id) as any;
+	return row ? rowToLcd(row) : null;
+}
+
+/**
+ * Clamp the panel's listen port. Same reasoning as normaliseWebhookPort: the
+ * value arrives from a renderer number input, and a bad one fails silently —
+ * the connection just never establishes and the glass stays on its idle image,
+ * which looks identical to a panel that is simply switched off.
+ */
+function normaliseLcdPort(port: unknown): number {
+	const value = Number(port);
+	return Number.isInteger(value) && value > 0 && value < 65536 ? value : 7070;
+}
+
+export function upsertLcd(
+	lcd: Omit<LcdDisplay, "id" | "externalId" | "createdAt" | "updatedAt"> & { id?: number; externalId?: string },
+): LcdDisplay {
+	const db = getDb();
+	const port = normaliseLcdPort(lcd.port);
+	if (lcd.id) {
+		// external_id is immutable device identity — never rewritten on edit.
+		db.prepare(`UPDATE lcds SET name=?, host=?, port=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(
+			lcd.name,
+			lcd.host,
+			port,
+			lcd.enabled ? 1 : 0,
+			lcd.id,
+		);
+		return getLcd(lcd.id)!;
+	}
+	const externalId = lcd.externalId ?? `dev-${randomUUID()}`;
+	const info = db
+		.prepare(`INSERT INTO lcds (external_id, name, host, port, enabled) VALUES (?,?,?,?,?)`)
+		.run(externalId, lcd.name, lcd.host, port, lcd.enabled ? 1 : 0);
+	return getLcd(Number(info.lastInsertRowid))!;
+}
+
+export function deleteLcd(id: number) {
+	const db = getDb();
+	const tx = db.transaction(() => {
+		// Clear the FK first. A lane left pointing at a deleted panel would make
+		// lcd-display look it up on every plate event and log a miss forever.
+		db.prepare("UPDATE lanes SET lcd_id = NULL WHERE lcd_id = ?").run(id);
+		db.prepare("DELETE FROM lcds WHERE id = ?").run(id);
+	});
+	tx();
+}
+
+/** The panel wired to a lane, if any — and only when it's switched on. */
+export function getLaneLcd(laneId: number | null | undefined): LcdDisplay | null {
+	if (laneId == null) return null;
+	const lane = getLane(laneId);
+	if (!lane?.lcdId) return null;
+	const lcd = getLcd(lane.lcdId);
+	return lcd?.enabled ? lcd : null;
+}
+
 export function logTerminal(terminalId: number, direction: "send" | "recv" | "error" | "info", message: string, payload?: unknown) {
 	try {
 		getDb()
@@ -1392,6 +1498,10 @@ function rowToLane(row: any): ParkingLane {
 		name: row.name,
 		policyId: row.policy_id,
 		terminalId: row.terminal_id,
+		// `?? null` rather than a bare read: on a box migrated from before the
+		// column existed SQLite yields undefined, which would serialise across IPC
+		// as a missing key and break the renderer's `lcdId ?? ''` select binding.
+		lcdId: row.lcd_id ?? null,
 		gateRelayAddress: row.gate_relay_address,
 		enabled: !!row.enabled,
 	};
@@ -1410,10 +1520,11 @@ export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?:
 	const db = getDb();
 	if (lane.id) {
 		// external_id is immutable device identity — never rewritten on edit.
-		db.prepare(`UPDATE lanes SET name=?, policy_id=?, terminal_id=?, gate_relay_address=?, enabled=? WHERE id=?`).run(
+		db.prepare(`UPDATE lanes SET name=?, policy_id=?, terminal_id=?, lcd_id=?, gate_relay_address=?, enabled=? WHERE id=?`).run(
 			lane.name,
 			lane.policyId,
 			lane.terminalId,
+			lane.lcdId ?? null,
 			lane.gateRelayAddress,
 			lane.enabled ? 1 : 0,
 			lane.id,
@@ -1422,8 +1533,8 @@ export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?:
 	}
 	const externalId = lane.externalId ?? `dev-${randomUUID()}`;
 	const info = db
-		.prepare(`INSERT INTO lanes (external_id, name, policy_id, terminal_id, gate_relay_address, enabled) VALUES (?,?,?,?,?,?)`)
-		.run(externalId, lane.name, lane.policyId, lane.terminalId, lane.gateRelayAddress, lane.enabled ? 1 : 0);
+		.prepare(`INSERT INTO lanes (external_id, name, policy_id, terminal_id, lcd_id, gate_relay_address, enabled) VALUES (?,?,?,?,?,?,?)`)
+		.run(externalId, lane.name, lane.policyId, lane.terminalId, lane.lcdId ?? null, lane.gateRelayAddress, lane.enabled ? 1 : 0);
 	return getLane(Number(info.lastInsertRowid))!;
 }
 

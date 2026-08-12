@@ -16,6 +16,8 @@ import type {
 	CloudCustomer,
 	CloudVehicle,
 	AppSettings,
+	LcdDisplay,
+	LcdDisplayStatus,
 	LprCamera,
 	ParkingLane,
 	ParkingSession,
@@ -159,6 +161,16 @@ export interface BridgeApi {
 	/** TCP reachability probe by host:port — backs the per-device "Test
 	 *  connection" button (works against the form values before saving). */
 	pingTerminalHost(input: { host: string; port: number }): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+
+	// Driver-facing LCD panels (the qparking-lcd Android app) — CRUD + link health
+	listLcds(): Promise<LcdDisplay[]>;
+	saveLcd(input: Omit<LcdDisplay, "id" | "externalId" | "createdAt" | "updatedAt"> & { id?: number }): Promise<LcdDisplay>;
+	deleteLcd(id: number): Promise<void>;
+	/** Live connection health for every configured panel. */
+	getLcdStatuses(): Promise<LcdDisplayStatus[]>;
+	/** Drive a sample fare → thank-you → idle sequence at an address, so the
+	 *  wiring can be proved from the form before anything is saved. */
+	testLcd(input: { host: string; port: number }): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
 
 	// LPR cameras
 	listCameras(): Promise<LprCamera[]>;

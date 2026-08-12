@@ -17,6 +17,13 @@ const api: BridgeApi = {
   deleteTerminal: (id: number) => ipcRenderer.invoke('terminals:delete', id),
   pingTerminalHost: (input: { host: string; port: number }) => ipcRenderer.invoke('terminals:ping-host', input),
 
+  // LCD displays — driver-facing panels running the qparking-lcd Android app
+  listLcds: () => ipcRenderer.invoke('lcds:list'),
+  saveLcd: (input: unknown) => ipcRenderer.invoke('lcds:save', input),
+  deleteLcd: (id: number) => ipcRenderer.invoke('lcds:delete', id),
+  getLcdStatuses: () => ipcRenderer.invoke('lcds:statuses'),
+  testLcd: (input: { host: string; port: number }) => ipcRenderer.invoke('lcds:test', input),
+
   // cameras
   listCameras: () => ipcRenderer.invoke('cameras:list'),
   saveCamera: (input: unknown) => ipcRenderer.invoke('cameras:save', input),

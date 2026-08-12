@@ -3,12 +3,13 @@ import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
   Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
-  Users, Car, RefreshCw, Loader2,
+  Users, Car, RefreshCw, Loader2, Monitor,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
 import { Cameras } from './pages/Cameras';
 import { Lanes } from './pages/Lanes';
+import { Lcds } from './pages/Lcds';
 import { ParkingPolicies } from './pages/ParkingPolicies';
 import { Sessions } from './pages/Sessions';
 import { Transactions } from './pages/Transactions';
@@ -25,7 +26,7 @@ import { fmtTime, fmtTimeSeconds } from './lib/datetime';
 import { subscribeToast } from './toast';
 
 type Page =
-  | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lanes' | 'sessions' | 'transactions'
+  | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lcds' | 'lanes' | 'sessions' | 'transactions'
   // Parking Management
   | 'parking-spaces' | 'customers' | 'vehicles'
   // Pricing & Tariffs
@@ -56,6 +57,9 @@ const SECTIONS: NavSection[] = [
       { id: 'transactions', label: 'Transactions', icon: Receipt },
       { id: 'cameras', label: 'LPR cameras', icon: Camera },
       { id: 'terminals', label: 'Payment terminals', icon: CreditCard },
+      // Sits next to the other two device pages, and directly above Lanes —
+      // which is where a panel gets bound to the barrier it faces.
+      { id: 'lcds', label: 'LCD displays', icon: Monitor },
       { id: 'lanes', label: 'Lanes', icon: Map },
     ],
   },
@@ -406,6 +410,7 @@ export function App() {
           {page === 'live' && <LiveDisplay />}
           {page === 'cameras' && <Cameras />}
           {page === 'terminals' && <Terminals devMode={devMode} />}
+          {page === 'lcds' && <Lcds />}
           {page === 'lanes' && <Lanes />}
           {page === 'sessions' && <Sessions devMode={devMode} />}
           {page === 'transactions' && <Transactions />}

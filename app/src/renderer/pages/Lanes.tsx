@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Cpu, Search } from 'lucide-react';
-import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera } from '@shared/types';
+import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Cpu, Search, Monitor } from 'lucide-react';
+import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera, LcdDisplay } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
@@ -11,7 +11,7 @@ import { useCurrentSite } from '../context/SiteContext';
 const PAGE_SIZE = 10;
 
 const EMPTY: Omit<ParkingLane, 'id' | 'externalId'> = {
-  name: '', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
+  name: '', policyId: null, terminalId: null, lcdId: null, gateRelayAddress: null, enabled: true,
 };
 
 /** A lane's direction is derived from its cameras (the single source of
@@ -32,6 +32,7 @@ export function Lanes() {
   const [terminals, setTerminals] = useState<PaymentTerminal[]>([]);
   const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
+  const [lcds, setLcds] = useState<LcdDisplay[]>([]);
   // `cameraIds` rides alongside the lane fields — it's the set of cameras this
   // lane covers, persisted server-side against each camera's lane_id.
   const [editing, setEditing] = useState<(Partial<ParkingLane> & { cameraIds?: number[] }) | null>(null);
@@ -48,6 +49,7 @@ export function Lanes() {
     setTerminals(await window.bridge.listTerminals());
     setPolicies(await window.bridge.listRatePolicies());
     setCameras(await window.bridge.listCameras());
+    setLcds(await window.bridge.listLcds());
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -215,6 +217,7 @@ export function Lanes() {
                   </Chip>
                   {showPlan && <Chip icon={Gauge}>plan: {s?.policyName ?? 'site default'}</Chip>}
                   {showTerm && <Chip icon={CreditCard} muted={!t}>device: {t?.name ?? 'none'}</Chip>}
+                  {l.lcdId != null && <Chip icon={Monitor}>lcd: {lcds.find((d) => d.id === l.lcdId)?.name ?? 'unknown'}</Chip>}
                   {l.gateRelayAddress && <Chip icon={Cpu} mono>{l.gateRelayAddress}</Chip>}
                 </div>
               </div>
@@ -323,6 +326,29 @@ export function Lanes() {
                   </select>
                 </Field>
               )}
+              {/* Shown for BOTH directions, unlike the rate plan and the payment
+                  device: an entry lane's panel greets the driver with the plate
+                  it read, an exit lane's shows the plate and what they owe. */}
+              <Field label="LCD display (optional)">
+                <select className="input" value={editing.lcdId ?? ''} onChange={(e) => setEditing({ ...editing, lcdId: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">— none —</option>
+                  {lcds.map((d) => {
+                    const takenBy = list.find((l) => l.lcdId === d.id && l.id !== editing.id);
+                    return (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.host}:{d.port}){!d.enabled ? ' — disabled' : ''}{takenBy ? ` — on "${takenBy.name}"` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              </Field>
+              <div className="sm:col-span-2 -mt-1">
+                {lcds.length === 0 ? (
+                  <p className="text-[11px] text-gray-500">No panels yet — add one on the <strong>LCD Displays</strong> page. Optional: a lane works fine without one.</p>
+                ) : (
+                  <p className="text-[11px] text-gray-500">Give each lane its own panel. Two lanes sharing one screen would overwrite each other's fare mid-transaction.</p>
+                )}
+              </div>
               <Field label="Gate relay (optional)"><input className="input font-mono" value={editing.gateRelayAddress ?? ''} onChange={(e) => setEditing({ ...editing, gateRelayAddress: e.target.value })} placeholder="GPIO addr / relay URL" /></Field>
               <Field label="Enabled">
                 <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={editing.enabled ?? true} onChange={(e) => setEditing({ ...editing, enabled: e.target.checked })} /> active</label>

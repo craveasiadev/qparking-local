@@ -84,6 +84,7 @@ function migrateUserData() {
 import {
   getDb, getSettings, saveSettings,
   listTerminals, upsertTerminal, deleteTerminal,
+  listLcds, upsertLcd, deleteLcd,
   listCameras, upsertCamera, deleteCamera,
   listLanes, upsertLane, deleteLane, getLane, setLaneCameras,
   listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
@@ -118,6 +119,7 @@ import {
 import { retryAllFailedSync } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
+import { startLcdDisplays, stopLcdDisplays, reloadLcdLinks, getLcdStatuses, testLcd } from './services/lcd-display';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier, isSdkLoaded } from './services/camera-relay';
 import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers, restartFeeds as restartRtspFeeds } from './services/camera-rtsp';
 import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
@@ -172,6 +174,10 @@ app.whenReady().then(async () => {
   const lprPorts = startLprServers();
   console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listeners → :${lprPorts.join(', :')}`);
   startParkingFlow();
+  // Driver-facing LCD panels. Started AFTER the parking flow because it
+  // subscribes to that module's events; it opens its own outbound TCP links and
+  // never blocks anything the flow does.
+  startLcdDisplays();
   // Cloud pull at boot, then hand over to autoSync()'s recurring pull (cadence
   // from company_settings.sync_interval_minutes, which this first pull is what
   // fetches — hence boot-pull-then-arm rather than arming straight away). The
@@ -210,6 +216,7 @@ function stopBackgroundServices() {
   try { stopRtspGrabbers(); } catch { /* ignore */ }
   try { stopCameraRelay(); } catch { /* ignore */ }
   try { stopLprServers(); } catch { /* ignore */ }
+  try { stopLcdDisplays(); } catch { /* ignore */ }
 }
 
 /** Any quit route that isn't the tray's — Windows shutdown, a task-manager close,
@@ -898,6 +905,24 @@ ipcMain.handle('terminals:save', (_e, input) => {
 ipcMain.handle('terminals:delete', (_e, id: number) => { deleteTerminal(id); });
 // TCP reachability probe by host:port — backs the per-device "Test connection".
 ipcMain.handle('terminals:ping-host', (_e, input: { host: string; port: number }) => pingTerminalHost(input.host, input.port));
+
+// LCD displays = qparking-lcd Android panels at the barrier. CRUD plus link
+// health; the frames themselves are pushed by lcd-display.ts off parking-flow
+// events, so there is no per-command console here either.
+ipcMain.handle('lcds:list', () => listLcds());
+ipcMain.handle('lcds:save', (_e, input) => {
+  const saved = upsertLcd(input);
+  // Reconcile immediately: an operator who just fixed a typo'd IP expects the
+  // panel to come alive now, not after the next app restart.
+  reloadLcdLinks();
+  return saved;
+});
+ipcMain.handle('lcds:delete', (_e, id: number) => { deleteLcd(id); reloadLcdLinks(); });
+ipcMain.handle('lcds:statuses', () => getLcdStatuses());
+// Fires a real fare → thank-you → idle sequence at the address in the form,
+// before it has been saved. Takes ~6s, which is the point — the installer walks
+// to the panel and watches it.
+ipcMain.handle('lcds:test', (_e, input: { host: string; port: number }) => testLcd(input.host, input.port));
 
 ipcMain.handle('cameras:list', () => listCameras());
 ipcMain.handle('cameras:save', async (_e, input) => {
