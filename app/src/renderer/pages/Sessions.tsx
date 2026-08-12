@@ -79,8 +79,10 @@ function useEscapeToClose(onClose: () => void) {
  *   - Entry → opens a session stamped with the chosen entry time.
  *   - Exit  → runs the real exit at the chosen exit time: prices the stay,
  *             prompts a wired terminal to tap, records + opens the gate.
- * Actions route through an enabled camera on the lane, exercising the actual
- * routing → fee → gate → terminal chain, not a mock.
+ * Each action routes through the camera on the lane FACING that way, exercising
+ * the actual routing → fee → gate → terminal chain, not a mock. A lane wired for
+ * entry only cannot serve Exit and the main process refuses it — the lane picker
+ * labels what each lane can do so the refusal is never a surprise.
  *
  * A one-shot "Simulate session" button was removed (2026-07-29): it wrote a
  * fabricated already-completed stay straight to the DB, skipping the pass
@@ -89,7 +91,7 @@ function useEscapeToClose(onClose: () => void) {
  * exercises the actual decisions instead. Use "Test price" on the Parking
  * Rates page for pure pricing checks, which needs no session at all.
  */
-function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSessionCreated?: () => void }) {
+function DevSimulator({ lanes, cameras, onSessionCreated }: { lanes: ParkingLane[]; cameras: LprCamera[]; onSessionCreated?: () => void }) {
   const site = useCurrentSite();
   const [plate, setPlate] = useState('');
   const [laneId, setLaneId] = useState<number | ''>('');
@@ -125,6 +127,24 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     });
     return off;
   }, []);
+
+  // What a lane is physically wired for. Direction lives on the CAMERAS, so a
+  // lane can serve entry only if it has an enabled entry-facing camera; a shared
+  // in/out barrier has one of each. Surfaced in the picker because the two buttons
+  // need different wiring and a lane's NAME is not a guarantee — "Exit 1" is just
+  // a label somebody typed.
+  const laneDirections = (id: number) => {
+    const dirs = new Set(cameras.filter((c) => c.laneId === id && c.enabled).map((c) => c.direction));
+    return { entry: dirs.has('entry'), exit: dirs.has('exit') };
+  };
+  const laneLabel = (l: ParkingLane) => {
+    const d = laneDirections(l.id);
+    if (d.entry && d.exit) return `${l.name} — entry + exit`;
+    if (d.entry) return `${l.name} — entry only`;
+    if (d.exit) return `${l.name} — exit only`;
+    return `${l.name} — no enabled camera`;
+  };
+  const wiring = laneId === '' ? null : laneDirections(Number(laneId));
 
   function baseGuard(): number | null {
     if (!plate.trim()) { push('warn', '✗ Enter a plate first'); return null; }
@@ -206,7 +226,7 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
           <select value={laneId} onChange={(e) => setLaneId(e.target.value ? Number(e.target.value) : '')}
             className="h-9 px-2 rounded-lg border border-gray-300 text-sm min-w-[10rem]">
             <option value="">— select lane —</option>
-            {lanes.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            {lanes.map((l) => <option key={l.id} value={l.id}>{laneLabel(l)}</option>)}
           </select>
         </div>
         {log.length > 0 && (
@@ -224,7 +244,11 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
           className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
           {busy === 'entry' ? <Loader2 size={13} className="animate-spin" /> : <ArrowDown size={13} />} Entry
         </button>
-        <span className="text-[11px] text-gray-400 pb-2">opens a session stamped at this time</span>
+        <span className={`text-[11px] pb-2 ${wiring && !wiring.entry ? 'text-red-600' : 'text-gray-400'}`}>
+          {wiring && !wiring.entry
+            ? 'this lane has no entry camera — Entry will be refused'
+            : 'opens a session stamped at this time'}
+        </span>
       </div>
 
       <div className="flex flex-wrap items-end gap-2">
@@ -237,6 +261,11 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
           className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wide disabled:opacity-50">
           {busy === 'exit' ? <Loader2 size={13} className="animate-spin" /> : <ArrowUp size={13} />} Exit
         </button>
+        <span className={`text-[11px] pb-2 ${wiring && !wiring.exit ? 'text-red-600' : 'text-gray-400'}`}>
+          {wiring && !wiring.exit
+            ? 'this lane has no exit camera — Exit will be refused'
+            : 'prices the stay and drives the real exit'}
+        </span>
       </div>
 
       {log.length > 0 && (
@@ -526,7 +555,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         </div>
       </div>
 
-      {devMode && <DevSimulator lanes={lanes} onSessionCreated={() => runRefresh()} />}
+      {devMode && <DevSimulator lanes={lanes} cameras={cameras} onSessionCreated={() => runRefresh()} />}
 
       {/* Results — desktop table + mobile cards share one relative wrapper so a
           single loading overlay can dim them during a fetch. */}

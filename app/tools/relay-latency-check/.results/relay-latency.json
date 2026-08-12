@@ -4,22 +4,22 @@
     {
       "name": "first save side-effects finish inside 1000ms",
       "pass": true,
-      "detail": "16ms"
+      "detail": "21ms"
     },
     {
       "name": "a repeat save is not re-charged for the failed connect (<1000ms)",
       "pass": true,
-      "detail": "1ms"
+      "detail": "0ms"
     },
     {
       "name": "editing the host still returns immediately (<1000ms)",
       "pass": true,
-      "detail": "7ms"
+      "detail": "8ms"
     },
     {
       "name": "deleting a camera returns immediately (<1000ms)",
       "pass": true,
-      "detail": "0ms"
+      "detail": "1ms"
     },
     {
       "name": "a cold pulse on an unreachable camera gives up inside 2000ms",
@@ -45,22 +45,22 @@
   "timings": [
     {
       "label": "first save (cold: may load the SDK)",
-      "ms": 16,
+      "ms": 21,
       "note": ""
     },
     {
       "label": "second save, nothing changed",
-      "ms": 1,
+      "ms": 0,
       "note": ""
     },
     {
       "label": "save with a changed host (new connect attempt)",
-      "ms": 7,
+      "ms": 8,
       "note": ""
     },
     {
       "label": "delete + resync",
-      "ms": 0,
+      "ms": 1,
       "note": ""
     },
     {

@@ -527,6 +527,44 @@ try {
   check('…so the exit is recorded against the exit camera',
     completed.some((c) => c.cameraId === acOut.id));
 
+  // A lane can only serve the direction it is WIRED for. The old fallback ("any
+  // enabled camera on the lane") meant the simulator's Exit button worked on an
+  // entry-only lane: it drove a real exit through the entry camera, closing the
+  // session and pulsing the entry boom at a gate no car can leave through.
+  // Reported from QA: "even if I select the entry lane, it still allows exit."
+  const inOnly = db.upsertLane({ name: 'L-IN-ONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const inOnlyCam = db.upsertCamera({
+    name: 'IN-ONLY', laneId: inOnly.id, direction: 'entry', accessMode: 'open',
+    host: '10.0.0.32', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: true,
+  });
+  const outOnly = db.upsertLane({ name: 'L-OUT-ONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  db.upsertCamera({
+    name: 'OUT-ONLY', laneId: outOnly.id, direction: 'exit', accessMode: 'open',
+    host: '10.0.0.33', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: true,
+  });
+
+  const exitOnEntryLane = await flow.simulateExitAt(inOnly.id, 'WRONGDIR', new Date().toISOString());
+  check('an entry-only lane REFUSES a simulated exit',
+    exitOnEntryLane.ok === false && exitOnEntryLane.cameraId === undefined, JSON.stringify(exitOnEntryLane));
+  check('…and the refusal names the wiring, not "no camera" (the lane has one)',
+    /no exit camera/.test(exitOnEntryLane.error ?? '') && /wired for entry/.test(exitOnEntryLane.error ?? ''),
+    exitOnEntryLane.error);
+
+  const entryOnExitLane = await flow.simulateEntryAt(outOnly.id, 'WRONGDI2', nowIso);
+  check('an exit-only lane REFUSES a simulated entry',
+    entryOnExitLane.ok === false && !db.findOpenSessionByPlate('WRONGDI2'), JSON.stringify(entryOnExitLane));
+
+  // Disabling the only camera is a third distinct state — the lane is wired the
+  // right way and still cannot serve, so "add a camera" would be wrong advice.
+  db.upsertCamera({ ...inOnlyCam, enabled: false });
+  const disabled = await flow.simulateEntryAt(inOnly.id, 'WRONGDI3', nowIso);
+  check('a lane whose cameras are all disabled says so, and creates nothing',
+    disabled.ok === false && /disabled/.test(disabled.error ?? '') && !db.findOpenSessionByPlate('WRONGDI3'),
+    disabled.error);
+  db.upsertCamera({ ...inOnlyCam, enabled: true });
+
   // ─── health check: the silent failure states ─────────────────────────────
   // These are invisible in the UI otherwise — the camera looks fine right up
   // until a car is sitting at a boom that will never lift.

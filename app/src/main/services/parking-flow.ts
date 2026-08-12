@@ -1421,18 +1421,45 @@ export function retriggerSessionExitByPlate(plate: string, laneId?: number | nul
 
 /**
  * Pick the camera on `laneId` that faces the given way — the one a real car
- * would trigger. Falls back to any enabled camera on the lane so a half-wired
- * test lane still routes somewhere.
+ * would trigger. There is deliberately NO fallback to a camera facing the other
+ * way: direction is a physical property of how the lane is wired, and every
+ * access decision keys off event.cameraId (Only Pass Allow at entry, the audit
+ * trail, which relay gets pulsed).
  *
- * Getting this wrong is not cosmetic. Every access decision is keyed to
- * event.cameraId (Only Pass Allow at entry, the audit trail, the relay that gets
- * pulsed), so picking "any enabled camera" — as the exit simulator used to —
- * meant that on a lane with BOTH an entry and an exit camera it grabbed the
- * entry one, and the exit was then judged by the entry camera's settings.
+ * The fallback used to be "any enabled camera on the lane", and it let the dev
+ * simulator lie in two different ways. On a lane holding BOTH cameras it grabbed
+ * the entry one (lower id), so an exit was judged by the ENTRY camera's settings
+ * — a pass holder took the pass-only exit branch and left free with no fee
+ * computed. And on an entry-only lane the Exit button worked anyway: it drove a
+ * real exit through the entry camera, closing sessions and pulsing the entry boom
+ * at a gate a car physically cannot leave through.
  */
 function laneCameraFacing(laneId: number, direction: 'entry' | 'exit') {
-  const cams = listCameras().filter((c) => c.laneId === laneId && c.enabled);
-  return cams.find((c) => c.direction === direction) ?? cams[0] ?? null;
+  return listCameras().find(
+    (c) => c.laneId === laneId && c.enabled && c.direction === direction,
+  ) ?? null;
+}
+
+/**
+ * Why this lane cannot serve `direction`, phrased so the operator knows what to
+ * change. "No camera at all", "all disabled" and "wired the other way round"
+ * have different remedies, and a single generic message sent people to add a
+ * camera to a lane that already had two.
+ */
+function laneCannotServe(laneId: number, laneName: string, direction: 'entry' | 'exit'): string {
+  const onLane = listCameras().filter((c) => c.laneId === laneId);
+  const usable = onLane.filter((c) => c.enabled);
+
+  if (onLane.length === 0) {
+    return `lane "${laneName}" has no camera — add one facing ${direction} on the Cameras page`;
+  }
+  if (usable.length === 0) {
+    return `every camera on lane "${laneName}" is disabled — enable the ${direction}-facing one on the Cameras page`;
+  }
+
+  const facing = [...new Set(usable.map((c) => c.direction))].join(' + ');
+  return `lane "${laneName}" has no ${direction} camera (it is wired for ${facing}) `
+    + `— pick a lane that can ${direction}, or set a camera on this lane to face ${direction}`;
 }
 
 /**
@@ -1463,8 +1490,10 @@ export async function simulateEntryAt(
   if (!norm) return { ok: false, error: 'plate_required' };
   const entryMs = Date.parse(entryIso);
   if (Number.isNaN(entryMs)) return { ok: false, error: 'invalid_entry_time' };
+  // ENTRY-facing only. An entry driven through an exit camera would be judged by
+  // the wrong camera's access mode and pulse the wrong boom.
   const cam = laneCameraFacing(laneId, 'entry');
-  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one so the flow can route to this lane` };
+  if (!cam) return { ok: false, error: laneCannotServe(laneId, lane.name, 'entry') };
 
   const event: PlateEvent = {
     cameraId: cam.id,
@@ -1533,9 +1562,10 @@ export async function simulateExitAt(
   if (!norm) return { ok: false, error: 'plate_required' };
   const exitMs = Date.parse(exitIso);
   if (Number.isNaN(exitMs)) return { ok: false, error: 'invalid_exit_time' };
-  // The EXIT-facing camera, not "any camera on the lane" — see laneCameraFacing.
+  // The EXIT-facing camera, and only that — see laneCameraFacing. Picking an
+  // entry camera here is what let the Exit button "work" on an entry-only lane.
   const cam = laneCameraFacing(laneId, 'exit');
-  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — add or enable one so the flow can route to this lane` };
+  if (!cam) return { ok: false, error: laneCannotServe(laneId, lane.name, 'exit') };
 
   const event: PlateEvent = {
     cameraId: cam.id,
