@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Receipt, RefreshCw, Search, X, Loader2,
   Eye, CheckCircle2, XCircle, Clock, RotateCcw, Ban, UploadCloud, CalendarDays,

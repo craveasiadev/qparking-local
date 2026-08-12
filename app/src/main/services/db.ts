@@ -411,6 +411,9 @@ function applySchema(db: Database.Database) {
       -- resident | staff | season | guest — recorded so gate refusals and the
       -- activity log can say WHO was turned away, not just that someone was.
       role TEXT,
+      -- The plan the pass was sold on, in the operator's own words. NULL on v1
+      -- cloud payloads, which carry no plan.
+      plan TEXT,
       fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (pass_id, plate_number)
     );
@@ -422,14 +425,14 @@ function applySchema(db: Database.Database) {
     -- prefix marks them as mirrors this app never writes back (unlike
     -- sessions/lanes/cameras, which are locally owned).
     -- site_role is what they ARE at this site (the role of the pass they hold
-    -- here). type is the old global resident/visitor flag, kept for one release.
+    -- here). It replaced the old global resident/visitor flag column "type",
+    -- which is dropped below on installs that still carry it.
     CREATE TABLE IF NOT EXISTS cloud_customers (
       id TEXT PRIMARY KEY,
       full_name TEXT,
       email TEXT,
       phone TEXT,
       site_role TEXT,
-      type TEXT,
       is_enabled INTEGER NOT NULL DEFAULT 1,
       vehicles_count INTEGER NOT NULL DEFAULT 0,
       active_passes_count INTEGER NOT NULL DEFAULT 0,
@@ -547,17 +550,13 @@ function applySchema(db: Database.Database) {
       fax TEXT,
       country TEXT,
       email TEXT,
-      season_pass_logo_url TEXT,
       parking_site_type TEXT,
       logo_url TEXT,
-      receipt_header TEXT,
-      receipt_footer TEXT,
-      primary_color TEXT NOT NULL DEFAULT '#3b82f6',
-      scope_free_minutes INTEGER,
-      scope_first_block_cents INTEGER,
-      scope_per_block_cents INTEGER,
-      scope_block_minutes INTEGER,
-      scope_daily_cap_cents INTEGER,
+      -- NOTE: receipt-branding / season-pass-logo / scope_* override columns are
+      -- deliberately absent. They were retired 2026-07-10 and the DROP COLUMN
+      -- loop below still runs for installs that predate that; declaring them
+      -- here too meant a fresh install created nine columns and dropped them
+      -- again in the same boot.
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -701,6 +700,15 @@ function applySchema(db: Database.Database) {
 		} catch {
 			/* column absent or old SQLite */
 		}
+	}
+
+	// 2026-08-12: cloud_customers.type — the old GLOBAL resident/visitor flag,
+	// superseded by site_role (what they are at THIS site). Nothing has written
+	// or read it since site_role landed, so every row's value was already stale.
+	try {
+		db.exec("ALTER TABLE cloud_customers DROP COLUMN type");
+	} catch {
+		/* column absent or old SQLite */
 	}
 
 	// Idempotent column adds for installs whose `cameras` table was created
@@ -1146,7 +1154,6 @@ const DEFAULT_SETTINGS: AppSettings = {
 	exitGracePeriodSeconds: 60,
 	minimumChargeCents: 0,
 	devMode: false,
-	paymentController: "tng",
 	tngEnabled: false,
 	tngHost: "192.168.1.105",
 	tngPort: 80,

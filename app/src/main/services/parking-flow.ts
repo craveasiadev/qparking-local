@@ -22,16 +22,16 @@
  */
 import { EventEmitter } from 'node:events';
 import { app } from 'electron';
-import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, SeasonPass, TariffRule } from '../../shared/types';
+import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
-  listLanes, listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, countPassPlatesInside, getSessionById,
+  listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, countPassPlatesInside, getSessionById,
   createTransaction, updateTransaction, findBlockedPlate, findLastClosedSessionByPlate,
   attachSessionCapture,
 } from './db';
 import { lprEvents, normalisePlate, type PlateEvent, type PlateCapture } from './lpr-webhook';
 import { payRequest as tngPayRequest, payCancel as tngPayCancel, payTypeToCardScheme, newOrderId as newTngOrderId, w4gLog, payResultListenerReady, type PayResultBody } from './payment-tng';
-import { enqueueEntry, enqueueExit, enqueueTransaction } from './cloud-queue';
+import { enqueueEntry, enqueueExit } from './cloud-queue';
 
 // Stamped into every parking-flow log line so the operator can verify they're
 // running the build that has the latest fix — vs an older cached installer.
@@ -1031,15 +1031,6 @@ export function computeFee(
     total += res.total;
   }
   return total;
-}
-
-/** Does this cached pass cover the given site-local yyyy-MM-dd day? Mirrors the
- *  SQL lookup in findSeasonPassByPlate, including its NULLIF guard ('' from a
- *  sloppy cloud row = open-ended, same as NULL). */
-function passCoversDay(pass: SeasonPass, dayKey: string): boolean {
-  const start = pass.startDate || null;
-  const end = pass.endDate || null;
-  return (!start || start <= dayKey) && (!end || end >= dayKey);
 }
 
 /** ms instant of site-local midnight AFTER the given yyyy-MM-dd day — the first

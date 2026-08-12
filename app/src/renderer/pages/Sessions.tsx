@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
   Trash2, Loader2,
-  Image as ImageIcon, Zap, ArrowDown, ArrowUp, MapPin,
+  Image as ImageIcon, Zap, ArrowDown, ArrowUp,
   LogIn, LogOut, Clock, Banknote, CloudUpload, CloudOff,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
@@ -13,7 +13,7 @@ import { PaginationBar, PageLoadingOverlay } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
 import { fmtDateTime, fmtTimeSeconds, elapsedMinutesSince } from '../lib/datetime';
 import { toast } from '../toast';
-import { useCurrentSite } from '../../context/SiteContext';
+import { useCurrentSite } from '../context/SiteContext';
 
 const PAGE_SIZE = 20;
 
@@ -92,7 +92,6 @@ function useEscapeToClose(onClose: () => void) {
  * Rates page for pure pricing checks, which needs no session at all.
  */
 function DevSimulator({ lanes, cameras, onSessionCreated }: { lanes: ParkingLane[]; cameras: LprCamera[]; onSessionCreated?: () => void }) {
-  const site = useCurrentSite();
   const [plate, setPlate] = useState('');
   const [laneId, setLaneId] = useState<number | ''>('');
   const [busy, setBusy] = useState<string | null>(null);

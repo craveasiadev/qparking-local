@@ -6,7 +6,7 @@ import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
-import { useCurrentSite } from '../../context/SiteContext';
+import { useCurrentSite } from '../context/SiteContext';
 
 const PAGE_SIZE = 10;
 

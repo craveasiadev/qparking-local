@@ -11,7 +11,7 @@ import { PaginationBar } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 import { fmtTimeSeconds } from '../lib/datetime';
-import { useCurrentSite } from '../../context/SiteContext';
+import { useCurrentSite } from '../context/SiteContext';
 
 /**
  * Payment terminals = Alarmtech Touch'n'Go W4G devices. One device per exit

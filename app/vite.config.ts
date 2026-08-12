@@ -11,7 +11,9 @@ import path from 'node:path';
 export default defineConfig({
   root: path.resolve(__dirname, 'src/renderer'),
   base: './',
-  publicDir: path.resolve(__dirname, 'src/renderer/public'),
+  // No static assets to copy — every icon comes from lucide-react and the only
+  // stylesheet is index.css, both of which go through the bundler.
+  publicDir: false,
   server: { port: 5173, strictPort: true },
   build: {
     outDir: path.resolve(__dirname, 'dist/renderer'),

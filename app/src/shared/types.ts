@@ -13,7 +13,6 @@ export * from "./schema";
 
 import type {
 	SeasonPass,
-	BlockedPlate,
 	CloudCustomer,
 	CloudVehicle,
 	AppSettings,

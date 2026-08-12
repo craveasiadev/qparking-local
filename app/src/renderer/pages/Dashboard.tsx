@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import type { ParkingSession, PaymentTerminal, LprCamera, SyncStatus } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
-import { useCurrentSite } from '../../context/SiteContext';
+import { useCurrentSite } from '../context/SiteContext';
 import { InfoTip } from '../components/InfoTip';
 import { fmtTime, fmtTimeSeconds, todayInAppTz, dateInAppTz } from '../lib/datetime';
 

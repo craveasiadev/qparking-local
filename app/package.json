@@ -14,7 +14,7 @@
     "dev:electron": "wait-on tcp:5173 && tsc -p src/main/tsconfig.json && node scripts/dev-electron.mjs",
     "build": "npm run build:renderer && npm run build:main",
     "build:renderer": "vite build",
-    "build:main": "tsc -p src/main/tsconfig.json",
+    "build:main": "node scripts/clean-main.mjs && tsc -p src/main/tsconfig.json",
     "package": "npm run build && electron-builder --win nsis portable",
     "package:portable": "npm run build && electron-builder --win portable",
     "publish:cloud": "node scripts/publish.mjs",
@@ -35,8 +35,7 @@
     "axios": "^1.18.1",
     "better-sqlite3": "^11.3.0",
     "ffmpeg-static": "^5.3.0",
-    "koffi": "^3.1.0",
-    "lucide-react": "^0.460.0"
+    "koffi": "^3.1.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
@@ -49,6 +48,7 @@
     "concurrently": "^9.0.0",
     "electron": "^32.0.0",
     "electron-builder": "^25.0.5",
+    "lucide-react": "^0.460.0",
     "postcss": "^8.4.45",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

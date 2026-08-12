@@ -27,9 +27,18 @@ import {
 } from './db';
 import { pushCamera } from './camera-push';
 import { pushLane, pushTerminal, toEquipmentPushItem } from './device-push';
-import type { EquipmentPushItem } from '../../shared/types';
+// The bridge contract in shared/types is the single definition of this module's
+// vocabulary — the renderer and this implementation have to agree on it, and a
+// second copy here only ever drifts.
+import type {
+  EquipmentPushItem,
+  DeviceSyncType as DeviceType,
+  DeviceSyncPreview as DevicePreview,
+  DevicePushResult,
+  DevicePullResult,
+} from '../../shared/types';
 
-export type DeviceType = 'cameras' | 'lanes' | 'terminals';
+export type { DeviceType, DevicePreview, DevicePushResult, DevicePullResult };
 
 interface CloudListBody { data?: any[] }
 
@@ -113,19 +122,6 @@ const RECONCILE_PATH: Record<DeviceType, string> = {
 
 // ─── preview (counts for the confirmation modal) ─────────────────────────────
 
-export interface DevicePreview {
-  ok: boolean;
-  error?: string;
-  localCount: number;
-  cloudCount: number;
-  /** Push: cloud rows that will be removed. Pull: local rows that will be removed. */
-  toRemove: number;
-  /** Rows that exist on the destination and will be overwritten/updated. */
-  toUpdate: number;
-  /** Rows that will be newly created on the destination. */
-  toAdd: number;
-}
-
 export async function previewDeviceSync(type: DeviceType, direction: 'push' | 'pull'): Promise<DevicePreview> {
   const notReady = NOT_READY();
   if (notReady) return { ok: false, error: notReady.error, localCount: 0, cloudCount: 0, toRemove: 0, toUpdate: 0, toAdd: 0 };
@@ -145,8 +141,6 @@ export async function previewDeviceSync(type: DeviceType, direction: 'push' | 'p
 }
 
 // ─── push (local → cloud, mirror) ────────────────────────────────────────────
-
-export interface DevicePushResult { ok: boolean; error?: string; items?: EquipmentPushItem[]; removed?: number; }
 
 export async function pushDevicesToCloud(type: DeviceType): Promise<DevicePushResult> {
   const notReady = NOT_READY();
@@ -178,8 +172,6 @@ export async function pushDevicesToCloud(type: DeviceType): Promise<DevicePushRe
 }
 
 // ─── pull (cloud → local, replace) ───────────────────────────────────────────
-
-export interface DevicePullResult { ok: boolean; error?: string; applied?: number; }
 
 export async function pullDevicesFromCloud(type: DeviceType): Promise<DevicePullResult> {
   const notReady = NOT_READY();

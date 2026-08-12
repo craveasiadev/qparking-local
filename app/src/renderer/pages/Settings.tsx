@@ -23,7 +23,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { fmtTimeSeconds, fmtDate } from '../lib/datetime';
 import { toast } from '../toast';
-import { useCurrentSite } from '../../context/SiteContext';
+import { useCurrentSite } from '../context/SiteContext';
 import { InfoTip } from '../components/InfoTip';
 
 // ─── Types local to this page ────────────────────────────────────────────────

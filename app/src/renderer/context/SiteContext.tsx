@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import type { Site } from "../shared/types";
+import type { Site } from "../../shared/types";
 
 interface SiteContextType {
 	currentSite: Site | null;

@@ -104,7 +104,7 @@ import { startLprServers, stopLprServers, lprEvents, getLatestFrame } from './se
 import {
   syncRatePolicies, syncParkingSpaces, syncSeasonPasses,
   syncCloudCustomers, syncCloudVehicles,
-  syncAll, syncSite, fetchSiteWith,
+  syncAll, fetchSiteWith,
   cloudPullEvents, getCloudPullState,
   pushActivityLogsToCloud,
   autoSync, stopAutoSync,
@@ -124,7 +124,7 @@ import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type Devic
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
   loopbackPayResult as tngLoopback,
-  w4gStatus, w4gEvents, newOrderId as newTngOrderId,
+  w4gStatus, w4gEvents,
 } from './services/payment-tng';
 import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
 
