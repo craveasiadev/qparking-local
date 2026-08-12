@@ -80,6 +80,14 @@ async function fetchCloudCameras(): Promise<CloudCameraRow[]> {
     accessMode: r.access_mode === 'pass_only' ? 'pass_only' : 'open',
     host: r.ip_address ?? null,
     enabled: !!r.is_enabled,
+    // Absent on a cloud that predates the mirror, or empty on a camera that
+    // never had them — reconcileCamerasFromCloud treats both as "the cloud has
+    // nothing to say" and keeps whatever this box already holds.
+    deviceUser: r.device_user ?? null,
+    devicePassword: r.device_password ?? null,
+    devicePort: Number.isFinite(Number(r.device_port)) && Number(r.device_port) > 0 ? Number(r.device_port) : null,
+    webhookPort: Number.isFinite(Number(r.webhook_port)) && Number(r.webhook_port) > 0 ? Number(r.webhook_port) : null,
+    webhookSecret: r.webhook_secret ?? null,
     laneExternalId: r.lane_external_id ?? null,
   }));
 }

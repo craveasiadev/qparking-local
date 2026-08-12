@@ -95,7 +95,14 @@ export function DeviceSyncButtons({ type, onDone }: { type: DeviceSyncType; onDo
               ) : (
                 <p className="text-sm text-gray-600">
                   This replaces this PC's {noun} with the cloud's: <strong>{dialog.preview.toAdd} added</strong>, <strong>{dialog.preview.toUpdate} updated</strong>, and <strong>{dialog.preview.toRemove} removed</strong> locally.
-                  {type !== 'terminals' && ' LAN-only secrets (webhook / SDK / terminal secrets) are not restored and must be re-entered.'}
+                  {/* Per type, because it stopped being one rule. Cameras now
+                      mirror their whole LAN wiring (2026-08-12), so a pull leaves
+                      them usable; terminals still keep their timeout locally;
+                      lanes have nothing local to lose. Saying "secrets are not
+                      restored" for cameras would send an operator off to re-type
+                      passwords they no longer need. */}
+                  {type === 'cameras' && " Camera logins, ports and webhook secrets come back with them, so pulled cameras are ready to use."}
+                  {type === 'terminals' && ' The connection timeout is local-only and returns to its default on any terminal the cloud re-creates.'}
                 </p>
               )}
               <p className="text-[11px] font-semibold uppercase tracking-wide text-red-600">This cannot be undone.</p>

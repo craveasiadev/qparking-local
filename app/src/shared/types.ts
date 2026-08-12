@@ -379,7 +379,10 @@ export interface BridgeApi {
 	getSettings(): Promise<AppSettings>;
 	saveSettings(s: Partial<AppSettings>): Promise<AppSettings>;
 	/** LPR listener health — bound port, LAN addresses cameras can reach, camera count. */
-	diagnoseLpr(): Promise<{ port: number; addresses: string[]; cameras: number }>;
+	/** `ports` is the set actually LISTENING — a camera's port missing from it
+	 *  failed to bind, which is the difference between "wired wrong" and
+	 *  "something else holds the port". */
+	diagnoseLpr(): Promise<{ ports: number[]; addresses: string[]; cameras: number }>;
 
 	// Barrier
 	/** Operator "open barrier" for a lane/camera — pulses that camera's onboard

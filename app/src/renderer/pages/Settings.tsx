@@ -8,7 +8,8 @@
  *
  * Sections, top to bottom:
  *   1. qparking SaaS sync  — cloud base URL + API key, manual "Sync now"
- *   2. Local servers       — LPR webhook port, exit grace period
+ *   2. Local servers       — exit grace period (the LPR webhook port moved onto
+ *                            each camera on 2026-08-11 — see the Cameras page)
  *   3. App updates         — check / download / install a newer build
  *   4. Maintenance         — clear Electron browser cache
  *
@@ -407,9 +408,10 @@ export function Settings() {
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 space-y-4">
         <SectionHeader icon={Server} title="Local servers" />
-        <Field label="LPR webhook port">
-          <input type="number" className="input" value={settings.lprWebhookPort} onChange={(e) => setSettings({ ...settings, lprWebhookPort: Number(e.target.value) })} />
-        </Field>
+        {/* The LPR webhook port used to live here, as ONE box-wide value. It is
+            now a field on each camera (2026-08-11): firmware varies in what it
+            will let you set, so a site can end up with cameras pushing to
+            different ports, and the box binds a listener for each. */}
         {/* Was stored but had no control anywhere, so in practice it could only be
             changed by editing the SQLite file — exposed 2026-08-07. */}
         <Field label="Exit grace period (seconds)">

@@ -26,6 +26,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { app } from 'electron';
 import { listCameras } from './db';
+import { tcpProbe } from './tcp-probe';
 import type { LprCamera } from '../../shared/types';
 
 let koffi: any = null;
@@ -99,8 +100,89 @@ interface Conn {
   key: string;
   stopped: boolean;
   connected: boolean;
+  /** Has IsConnected ever reported this handle up? Distinguishes "still coming
+   *  up" (normal, the first second after Open) from "was up and DROPPED" — only
+   *  the latter means the handle is dead and must not be pulsed. */
+  everConnected: boolean;
 }
 const connections = new Map<number, Conn>();
+
+// ─── why connecting is gated ────────────────────────────────────────────────
+// VzLPRClient_Open is a SYNCHRONOUS native call. Against an address that doesn't
+// answer it blocked the Electron main process for ~6 seconds (measured) — no
+// IPC, no repaint — and because a failed Open recorded nothing, every later
+// resync() paid it again. Saving a camera runs a resync, so saving ANY camera
+// while one was unreachable took six seconds, then another six on the next save.
+//
+// So: prove the port is open with an async socket probe first, and remember a
+// failure for a while instead of retrying it on every save.
+
+/** Socket-probe budget before we bother the SDK. A camera on the same LAN
+ *  answers in single-digit ms; anything slower than this is not a camera that is
+ *  about to hand us a working handle. */
+const CONNECT_PROBE_TIMEOUT_MS = 500;
+
+/** How long a failed connect is left alone. Long enough that repeated saves cost
+ *  nothing, short enough that a camera plugged back in warms up on its own via
+ *  the retry tick below. */
+const CONNECT_RETRY_AFTER_MS = 30_000;
+
+/** How often to re-examine cameras that have no warm handle, or a dropped one. */
+const RECONNECT_TICK_MS = 60_000;
+
+/** cameraId → the config that failed and when, so a dead camera is not re-probed
+ *  on every resync. Cleared as soon as its config changes: an edited host is a
+ *  new thing to try, not the same failure. */
+const lastFailure = new Map<number, { key: string; at: number }>();
+
+/** Cameras with a probe/Open in flight — overlapping resyncs must not stack. */
+const connecting = new Set<number>();
+
+let reconnectTimer: NodeJS.Timeout | null = null;
+
+function noteFailure(c: LprCamera, why: string) {
+  lastFailure.set(c.id, { key: camKey(c), at: Date.now() });
+  log(`cam ${c.id} relay unavailable — ${why} (not retried for ${CONNECT_RETRY_AFTER_MS / 1000}s)`);
+}
+
+/** True while a recent failure for this EXACT config should be left alone. */
+function backingOff(c: LprCamera): boolean {
+  const failure = lastFailure.get(c.id);
+  if (!failure) return false;
+  if (failure.key !== camKey(c)) { lastFailure.delete(c.id); return false; }
+  return Date.now() - failure.at < CONNECT_RETRY_AFTER_MS;
+}
+
+/**
+ * Warm this camera up WITHOUT blocking the caller.
+ *
+ * Callers are IPC handlers (saving a camera) and the boot sequence, so nothing
+ * here may sit on the main thread. The socket probe is async; the native Open
+ * that follows is synchronous but now only runs against a port that just
+ * answered, where it returns promptly.
+ */
+function scheduleConnect(c: LprCamera) {
+  if (connecting.has(c.id) || connections.has(c.id) || backingOff(c)) return;
+  connecting.add(c.id);
+  void (async () => {
+    try {
+      const port = Number(c.devicePort) || 80;
+      const probe = await tcpProbe(c.host!, port, CONNECT_PROBE_TIMEOUT_MS);
+      if (!probe.ok) {
+        noteFailure(c, `nothing answered at ${c.host}:${port} (${probe.code}) in ${probe.latencyMs}ms`);
+        return;
+      }
+      // The camera may have been edited or deleted while we were probing, and a
+      // pulse may have opened a handle in the meantime.
+      const current = listCameras().find((x) => x.id === c.id);
+      if (!current || !usesRelay(current) || camKey(current) !== camKey(c)) return;
+      if (connections.has(c.id)) return;
+      openConnection(current);
+    } finally {
+      connecting.delete(c.id);
+    }
+  })();
+}
 
 /** Config signature — reconnect when any of the relay-connection inputs change. */
 function camKey(c: LprCamera): string {
@@ -131,8 +213,15 @@ function openConnection(c: LprCamera) {
     // SDK contract: 0 = failure, ANY non-zero value = valid handle. Handles are
     // large 32-bit tokens (the demo even uses one as 0x7bb86e85), so a NEGATIVE
     // signed value is a perfectly valid handle — never treat handle<0 as error.
-    if (handle === 0) { log(`cam ${cid} Open failed (handle=0) — check IP ${c.host}:${port}, username, and password`); return; }
-    const conn: Conn = { handle, timer: null, key: camKey(c), stopped: false, connected: false };
+    if (handle === 0) {
+      // The port answered but the SDK refused — almost always the username or
+      // password. Recorded like any other failure so it isn't retried on every
+      // save; correcting the credentials changes camKey and clears it at once.
+      noteFailure(c, `SDK Open refused at ${c.host}:${port} (handle=0) — check the username and password`);
+      return;
+    }
+    lastFailure.delete(cid);
+    const conn: Conn = { handle, timer: null, key: camKey(c), stopped: false, connected: false, everConnected: false };
     connections.set(cid, conn);
     log(`cam ${cid} opened (handle=${handle}, ${c.host}:${port}) — waiting for connection`);
 
@@ -144,7 +233,7 @@ function openConnection(c: LprCamera) {
       statusBuf[0] = 0;
       try { fns.IsConnected(handle, statusBuf); } catch { /* ignore */ }
       const up = statusBuf[0] === 1;
-      if (up && !conn.connected) { conn.connected = true; log(`cam ${cid} connected — barrier relay ready`); }
+      if (up && !conn.connected) { conn.connected = true; conn.everConnected = true; log(`cam ${cid} connected — barrier relay ready`); }
       else if (!up && conn.connected) { conn.connected = false; log(`cam ${cid} connection dropped — relay will use a fresh handle until it recovers`); }
     }, 1000);
   } catch (e: any) {
@@ -169,61 +258,42 @@ export function resync() {
   const wanted = listCameras().filter(usesRelay);
   for (const [id, conn] of [...connections]) {
     const c = wanted.find((x) => x.id === id);
-    if (!c || camKey(c) !== conn.key) closeConnection(id);
+    // A handle that came up and then DROPPED cannot pulse anything, and holding
+    // it made every barrier attempt fail until the next save. Drop it here so
+    // the connect below can replace it.
+    if (!c || camKey(c) !== conn.key || isDead(conn)) closeConnection(id);
+  }
+  // Forget failures for cameras that are gone, so the map can't grow forever.
+  for (const id of [...lastFailure.keys()]) {
+    if (!wanted.some((c) => c.id === id)) lastFailure.delete(id);
   }
   for (const c of wanted) {
-    if (!connections.has(c.id)) openConnection(c);
+    if (!connections.has(c.id)) scheduleConnect(c);
   }
+}
+
+/** A handle that was up and is now down — dead, not merely still connecting. */
+function isDead(conn: Conn): boolean {
+  return conn.everConnected && !conn.connected;
 }
 
 /**
- * Run `fn` against a connected SDK handle for a camera, reusing the warm one
- * when we have it and otherwise opening a short-lived handle just for this call.
+ * Has the native SDK been loaded into this process?
  *
- * Extracted from pulseBarrier so the whitelist module (camera-whitelist.ts) can
- * share the exact same connection strategy instead of duplicating it — one
- * place that knows how to reach a camera, one place to fix if that changes.
- *
- * Never throws: every failure comes back as { ok:false, error }, because a gate
- * flow must not die on a network hiccup.
+ * Matters only on the way out: once VzLPRSDK.dll is loaded, app.exit() HANGS in
+ * teardown — measured, and the event loop is already dead by then, so no JS
+ * backstop can run. Quitting has to know this BEFORE it commits (see forceQuit
+ * in index.ts).
  */
-export function withCameraHandle<T>(
-  cameraId: number,
-  fn: (handle: number, fns: any) => T,
-): { ok: true; value: T; via: 'reused' | 'temp' } | { ok: false; error: string } {
-  if (!ensureLib()) return { ok: false, error: 'sdk_unavailable' };
-
-  const conn = connections.get(cameraId);
-  if (conn && !conn.stopped) {
-    try { return { ok: true, value: fn(conn.handle, fns), via: 'reused' }; }
-    catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
-  }
-
-  const cam = listCameras().find((c) => c.id === cameraId);
-  if (!cam?.host) return { ok: false, error: 'camera_has_no_host' };
-  const port = Number(cam.devicePort) || 80;
-  let handle = 0;
-  try {
-    handle = fns.Open(cam.host, port, cam.deviceUser ?? '', cam.devicePassword ?? '');
-    if (handle === 0) return { ok: false, error: 'open_failed' };
-    return { ok: true, value: fn(handle, fns), via: 'temp' };
-  } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
-  } finally {
-    if (handle !== 0) {
-      const h = handle;
-      setTimeout(() => { try { fns.Close(h); } catch { /* ignore */ } }, 800);
-    }
-  }
+export function isSdkLoaded(): boolean {
+  return setupOk;
 }
 
-/** Register extra SDK entry points on the shared lib (used by camera-whitelist
- *  to add the WhiteList* family without loading the DLL a second time). Returns
- *  null when the SDK isn't available at all. */
-export function extendSdk(register: (lib: any, koffiRef: any) => void): any | null {
-  if (!ensureLib()) return null;
-  try { register(lib, koffi); return fns; }
-  catch (e: any) { log(`extendSdk failed: ${e?.message ?? e}`); return null; }
+/** How many warm SDK handles are held. Exposed for the relay-latency harness,
+ *  which pins that a camera which never answered leaves NOTHING behind — a
+ *  half-registered handle would be reused by the next barrier pulse. */
+export function warmConnectionCount(): number {
+  return connections.size;
 }
 
 export interface BarrierResult { ok: boolean; error?: string; via?: 'reused' | 'temp' }
@@ -236,20 +306,33 @@ export interface BarrierResult { ok: boolean; error?: string; via?: 'reused' | '
  * have one (the fast common case); otherwise opens a short-lived handle just for
  * the pulse. Best-effort — returns { ok:false } (never throws) if the
  * SDK/camera/relay is unavailable, so a gate-open never crashes the flow.
+ *
+ * ASYNC only because of the cold path. The warm path pulses without awaiting
+ * anything, and it is the path a working rig takes for every car. The cold path
+ * has to socket-probe first: the native Open behind it blocks the whole main
+ * process until the SDK's own timeout (~6s measured), which on a lane with an
+ * offline camera meant every car froze the app — plate ingest, UI and all — to
+ * arrive at the failure a probe reaches in half a second.
  */
-export function pulseBarrier(cameraId: number, opts: { channel?: number; durationMs?: number } = {}): BarrierResult {
+export async function pulseBarrier(cameraId: number, opts: { channel?: number; durationMs?: number } = {}): Promise<BarrierResult> {
   if (!ensureLib()) return { ok: false, error: 'sdk_unavailable' };
   if (!fns.SetIOOutputAuto) return { ok: false, error: 'SetIOOutputAuto_unavailable' };
   const channel = opts.channel ?? 0;
   const durationMs = Math.min(5000, Math.max(500, Math.round(opts.durationMs ?? 1000)));
 
-  // Fast path: reuse the warm, already-connected handle.
+  // Fast path: reuse the warm, already-connected handle. A handle that came up
+  // and then dropped is NOT usable — pulsing it fails on every car until
+  // something reconnects — so it's discarded and the cold path taken instead.
   const conn = connections.get(cameraId);
-  if (conn && !conn.stopped) {
+  if (conn && !conn.stopped && !isDead(conn)) {
     try {
       const r = fns.SetIOOutputAuto(conn.handle, channel, durationMs);
       return r === 0 ? { ok: true, via: 'reused' } : { ok: false, error: `SetIOOutputAuto=${r}`, via: 'reused' };
     } catch (e: any) { return { ok: false, error: e?.message ?? String(e), via: 'reused' }; }
+  }
+  if (conn && isDead(conn)) {
+    log(`cam ${cameraId} warm handle had dropped — pulsing over a fresh one`);
+    closeConnection(cameraId);
   }
 
   // No warm connection — open a short-lived handle just to pulse the relay, then
@@ -257,10 +340,20 @@ export function pulseBarrier(cameraId: number, opts: { channel?: number; duratio
   const cam = listCameras().find((c) => c.id === cameraId);
   if (!cam?.host) return { ok: false, error: 'camera_has_no_host' };
   const port = Number(cam.devicePort) || 80;
+
+  // Confirm something is actually listening before the blocking Open. Deliberately
+  // a FRESH probe rather than the connect backoff: refusing to raise a barrier
+  // because of a failure recorded half a minute ago would leave a car sitting at a
+  // camera that has since come back.
+  const probe = await tcpProbe(cam.host, port, CONNECT_PROBE_TIMEOUT_MS);
+  if (!probe.ok) {
+    return { ok: false, error: `camera unreachable at ${cam.host}:${port} (${probe.code})`, via: 'temp' };
+  }
+
   let handle = 0;
   try {
     handle = fns.Open(cam.host, port, cam.deviceUser ?? '', cam.devicePassword ?? '');
-    if (handle === 0) return { ok: false, error: 'open_failed' };
+    if (handle === 0) return { ok: false, error: 'open_failed', via: 'temp' };
     const r = fns.SetIOOutputAuto(handle, channel, durationMs);
     return r === 0 ? { ok: true, via: 'temp' } : { ok: false, error: `SetIOOutputAuto=${r}`, via: 'temp' };
   } catch (e: any) {
@@ -273,10 +366,28 @@ export function pulseBarrier(cameraId: number, opts: { channel?: number; duratio
   }
 }
 
-/** Boot: open warm relay connections for all credentialed cameras. */
-export function startCameraRelay() { resync(); }
+/**
+ * Boot: warm up every credentialed camera, then keep checking.
+ *
+ * The tick is what makes recovery automatic. A camera that was unplugged at boot,
+ * or whose connection dropped overnight, used to stay cold until somebody saved a
+ * camera — meaning the barrier fell back to opening a fresh handle per car, and
+ * did so via the same 6-second blocking call. It costs one socket probe per cold
+ * camera per minute, and nothing at all for ones already connected.
+ */
+export function startCameraRelay() {
+  resync();
+  if (!reconnectTimer) {
+    reconnectTimer = setInterval(resync, RECONNECT_TICK_MS);
+    // Don't hold the event loop open on quit.
+    reconnectTimer.unref?.();
+  }
+}
 
 export function stopCameraRelay() {
+  if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+  connecting.clear();
+  lastFailure.clear();
   for (const id of [...connections.keys()]) closeConnection(id);
   // NOTE: intentionally NOT calling VzLPRClient_Cleanup() — segfaults on teardown.
 }

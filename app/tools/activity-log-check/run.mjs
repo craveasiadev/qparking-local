@@ -7,17 +7,12 @@
 import { readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { runUnderElectron, APP_DIR } from '../run-under-electron.mjs';
+import { runUnderElectron } from '../run-under-electron.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, '.results');
 const RESULT = path.join(OUT_DIR, 'activity.json');
 
-const DIST_DB = path.join(APP_DIR, 'dist', 'main', 'services', 'db.js');
-if (!existsSync(DIST_DB)) {
-  console.error(`Missing ${path.relative(APP_DIR, DIST_DB)} — run "npm run build:main" first.`);
-  process.exit(2);
-}
 
 rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });

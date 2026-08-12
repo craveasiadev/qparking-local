@@ -482,7 +482,6 @@ export async function syncCloudCustomers(): Promise<SyncResult> {
 				// Absent from a SaaS that predates the reconstruct — the UI then
 				// falls back to the legacy type, i.e. exactly the old behaviour.
 				siteRole: row.site_role ?? null,
-				type: row.type ?? null,
 				isEnabled: row.is_enabled == null ? true : !!row.is_enabled,
 				vehiclesCount: Number(row.vehicles_count ?? 0),
 				activePassesCount: Number(row.active_passes_count ?? 0),
@@ -611,11 +610,9 @@ function mapApiRowToParkingSpace(parkingSpaceRow: any, fetchedAt: string): Parki
 		spaceCode: parkingSpaceRow.space_code ?? null,
 		status: parkingSpaceRow.status,
 		customerName: parkingSpaceRow.customer_name ?? null,
-		vehiclePlate: parkingSpaceRow.vehicle_plate ?? null,
 		// Absent from a SaaS that predates the reconstruct — the UI then falls
 		// back to the legacy pass_type, i.e. exactly the old behaviour.
 		bayType: parkingSpaceRow.bay_type ?? null,
-		passType: parkingSpaceRow.pass_type ?? null,
 		passId: parkingSpaceRow.pass_id ?? null,
 		startDate: parkingSpaceRow.start_date ?? null,
 		endDate: parkingSpaceRow.end_date ?? null,

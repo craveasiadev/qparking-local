@@ -244,6 +244,54 @@ try {
     // by re-checking the invariant after a fresh statement round-trip.
     const stillNoDual = db.prepare("SELECT COUNT(*) AS n FROM cameras WHERE direction='dual'").get().n;
     check('re-check: still no dual rows', stillNoDual === 0, String(stillNoDual));
+  } else if (testCase === 'webhook-port') {
+    // ─── 2026-08-11: the LPR webhook port moves onto the camera ─────────────
+    // It used to be ONE box-wide setting. Cameras turned out to differ in what
+    // their firmware will let you point at, so the port became a camera field
+    // and the box binds a listener per port in use.
+    //
+    // The upgrade hazard is silent and total: a site that had changed the
+    // box-wide value has its cameras PHYSICALLY configured for that port, and
+    // snapping them to the new column default would leave the box listening
+    // where nothing pushes — every screen healthy, not one car recorded. So an
+    // existing camera inherits the value the site was already using.
+    seedLegacyCameras(dbPath, [['North', 'entry'], ['South', 'exit']]);
+    const seed = new Database(dbPath);
+    seed.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+    seed.prepare("INSERT INTO settings (key, value) VALUES ('lprWebhookPort', '6007')").run();
+    seed.close();
+
+    const dbmod = require(DIST_DB);
+    const db = dbmod.getDb();
+
+    check('cameras.webhook_port exists after the upgrade',
+      columnsOf(db, 'cameras').includes('webhook_port'), columnsOf(db, 'cameras').join(','));
+    const ports = dbmod.listCameras().map((c) => c.webhookPort);
+    check('every existing camera inherited the box-wide port it was already using',
+      ports.length === 2 && ports.every((p) => p === 6007), JSON.stringify(ports));
+
+    // The setting itself must be GONE from AppSettings — a leftover key would
+    // still read as a real setting to any caller that asked, and there is no
+    // longer anything that honours it.
+    check('lprWebhookPort is no longer part of AppSettings',
+      !('lprWebhookPort' in dbmod.getSettings()),
+      JSON.stringify(Object.keys(dbmod.getSettings()).filter((k) => /lpr/i.test(k))));
+
+    // A port set per camera afterwards must survive a re-run of the backfill —
+    // otherwise the next app start would stamp the legacy value back over it.
+    // Re-run = a fresh module instance (db.js memoises its handle), which is as
+    // close to a real restart as this harness gets: every migration re-runs.
+    const north = dbmod.listCameras().find((c) => c.name === 'North');
+    dbmod.upsertCamera({ ...north, webhookPort: 6123 });
+    db.prepare('UPDATE cameras SET webhook_port = 6001 WHERE name = ?').run('South');
+    delete require.cache[require.resolve(DIST_DB)];
+    const restarted = require(DIST_DB);
+    restarted.getDb();
+    const afterRerun = Object.fromEntries(restarted.listCameras().map((c) => [c.name, c.webhookPort]));
+    check('re-running the upgrade leaves an operator-set port alone',
+      afterRerun.North === 6123, JSON.stringify(afterRerun));
+    check('…and only rows still on the default are backfilled',
+      afterRerun.South === 6007, JSON.stringify(afterRerun));
   } else {
     // ─── The real migration, via the built main-process db module ──────────
     seedLegacy(dbPath, { withAuditColumns: testCase === 'carry' });

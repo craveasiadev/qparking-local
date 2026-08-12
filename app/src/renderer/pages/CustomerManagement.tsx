@@ -22,10 +22,11 @@ const PAGE_SIZE = 20;
  */
 type Filter = 'all' | 'resident' | 'staff' | 'season' | 'guest' | 'disabled';
 
-/** What they ARE at this site. Falls back to the old global resident/visitor
- *  flag for a box that has not synced since roles arrived. */
+/** What they ARE at this site — the role of the pass they hold here. Guest when
+ *  the cloud has not told us yet, which is the least-privileged standing. The old
+ *  global resident/visitor flag it used to fall back on no longer exists. */
 function roleOf(customer: CloudCustomer): string {
-  return customer.siteRole ?? (customer.type === 'resident' ? 'resident' : 'guest');
+  return customer.siteRole ?? 'guest';
 }
 
 export function CustomerManagement() {

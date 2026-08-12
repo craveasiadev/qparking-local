@@ -299,7 +299,7 @@ backend · `/main/` (root) → Electron glue · `/shared/` → shared types.
 | `cloud-queue.ts` | **Push** to the Laravel API: a persistent, backoff-retried queue (`sync_queue` table) for session entry/update/exit/delete and payment transactions. Plate images ride along as base64, gated by `company_settings.sync_capture_images`. |
 | `camera-push.ts` | Mirrors the local camera registry up to the cloud (read-only mirror; cameras stay owned locally). |
 | `device-push.ts` | Mirrors terminals + lanes up to the cloud. |
-| `device-sync.ts` | Manual, operator-triggered two-way equipment sync (push local → cloud, or pull cloud → local) fired from the Cameras/Lanes/Terminals pages — never automatic. |
+| `device-sync.ts` | Manual, operator-triggered two-way equipment sync (push local → cloud, or pull cloud → local) fired from the Cameras/Lanes/Terminals pages — never automatic. Cameras carry their full LAN wiring since 2026-08-12 (SDK login + port, webhook port + secret, the two secrets encrypted cloud-side), so a pull produces cameras that WORK rather than cameras that need every password re-typed. A null from the cloud means "nothing to say" and never overwrites a local value. |
 
 ### How the backend calls the Laravel API (`cloud-api.ts`)
 
@@ -718,10 +718,13 @@ npm run dev
 > 'isPackaged')`). `scripts/dev-electron.mjs` deletes that variable before
 > launching, so `npm run dev` works from any terminal.
 
-**Dev vs packaged isolation:** dev uses `%APPDATA%/qparking-local-dev/` with
-offset ports (LPR on **7001**); packaged uses `%APPDATA%/qparking-local/` with
-normal ports (LPR on **6001**). This lets a dev build run side-by-side with the
-installed one.
+**Dev vs packaged isolation:** dev uses `%APPDATA%/qparking-local-dev/`, packaged
+uses `%APPDATA%/qparking-local/`, so the two keep entirely separate databases.
+The LPR listener ports are NOT offset — both builds bind the ports their cameras
+are configured for (**6001** by default), so a camera pointed at 6001 behaves
+identically either way. Running both copies at once therefore means the second
+one's bind fails with `EADDRINUSE`; it says so in an Activity Log row and on the
+Cameras page rather than crashing, but only the first copy receives plates.
 
 ---
 
@@ -765,8 +768,14 @@ The portable build is handy for testing on a new PC: copy the file, double-click
 
 ## Camera webhook contract
 
+The port is **per camera** (`cameras.webhook_port`, 6001 by default) — firmware
+varies in what it will let you set, so a site can end up with cameras pushing to
+different ports, and the box binds one listener per port in use. 6001 is always
+bound, even with no camera on it, so a push from an unregistered camera still
+produces an `unknown_camera` row naming the IP to register.
+
 ```
-POST http://<this-pc>:6001/lpr/event
+POST http://<this-pc>:<camera's webhook port>/lpr/event
 Content-Type: application/json
 X-Webhook-Secret: <per-camera-secret>
 

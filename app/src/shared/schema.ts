@@ -81,7 +81,15 @@ export interface LprCamera {
    *  Live display reads — a clean video feed with no web page / token. */
   deviceUser: string | null;
   devicePassword: string | null;
+  /** The port on the CAMERA the box connects TO for the SDK video pull (80).
+   *  Opposite direction to `webhookPort` below — do not confuse them. */
   devicePort: number | null;
+  /** The port THIS server listens on for this camera's plate pushes.
+   *
+   *  Per camera because firmware varies in what it will let you set, so a site
+   *  can end up with cameras pushing to different ports. The box binds a
+   *  listener for every distinct port in use. Required; 6001 by default. */
+  webhookPort: number;
   /**
    * Who this camera lets through.
    *
@@ -392,9 +400,6 @@ export interface CloudCustomer {
    *  the role of the pass they hold here. NULL on a box that has not synced
    *  since the cloud started sending it. */
   siteRole: string | null;
-  /** @deprecated Global 'resident' | 'visitor' flag, stamped once at creation
-   *  and never updated, so it drifts from `siteRole`. */
-  type: string | null;
   isEnabled: boolean;
   vehiclesCount: number;
   /** Active passes AT THIS SITE only. */
@@ -447,13 +452,9 @@ export interface ParkingSpace {
   /** Free-form status — 'available' | 'occupied' | 'reserved' | 'vip' | 'maintenance' | … */
   status: string;
   customerName: string | null;
-  vehiclePlate: string | null;
   /** What the bay is SET ASIDE for: 'visitor' | 'resident' | 'season' | 'staff'.
    *  The operator's designation, which holds whether or not anyone is in it. */
   bayType: string | null;
-  /** @deprecated Denormalised from whoever holds the bay — empty when nobody
-   *  does. `bayType` is the designation. */
-  passType: string | null;
   passId: string | null;
   startDate: string | null;
   endDate: string | null;
@@ -571,8 +572,6 @@ export interface AppSettings {
   qparkingBaseUrl: string;
   /** Tenant API key issued by qparking for this VPS/site. */
   qparkingApiKey: string;
-  /** Local HTTP port for LPR camera webhooks. */
-  lprWebhookPort: number;
   /**
    * How long after a car EXITS to keep ignoring fresh entry reads of the same
    * plate. Default 60s; 0 disables the guard entirely.

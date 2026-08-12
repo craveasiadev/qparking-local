@@ -33,6 +33,18 @@ export async function pushCamera(cameraId: number): Promise<{ ok: boolean; error
       // survives a Push and comes back on a Pull like every other camera field.
       access_mode: camera.accessMode,
       host: camera.host,
+      // ── LAN wiring, mirrored since 2026-08-12 ─────────────────────────────
+      // These used to stay on this box, which meant a Pull produced cameras that
+      // looked right and did not work: no SDK login, so the barrier never moved;
+      // no webhook port/secret, so plate pushes hit a port nothing listened on or
+      // were rejected. Rebuilding a site then meant re-typing every camera's
+      // password by hand. The cloud stores the two secrets encrypted and returns
+      // them only to this site's own box.
+      device_user: camera.deviceUser,
+      device_password: camera.devicePassword,
+      device_port: camera.devicePort,
+      webhook_port: camera.webhookPort,
+      webhook_secret: camera.webhookSecret,
       enabled: camera.enabled,
       has_snapshot: false,
       // Which lane this camera watches — cloud resolves to a UUID so

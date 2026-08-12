@@ -11,6 +11,23 @@ import { useCurrentSite } from "../../context/SiteContext";
 
 const PAGE_SIZE = 10;
 
+/** Mirrors the `cameras.webhook_port` column default in the main process. */
+const DEFAULT_WEBHOOK_PORT = 6001;
+
+/** The port most cameras here already push to — what a new one should default to. */
+function commonWebhookPort(cameras: LprCamera[]): number {
+	const tally = new Map<number, number>();
+	for (const camera of cameras) {
+		if (camera.webhookPort > 0) tally.set(camera.webhookPort, (tally.get(camera.webhookPort) ?? 0) + 1);
+	}
+	let best = DEFAULT_WEBHOOK_PORT;
+	let bestCount = 0;
+	for (const [port, count] of tally) {
+		if (count > bestCount) { best = port; bestCount = count; }
+	}
+	return best;
+}
+
 const EMPTY: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> = {
 	name: "",
 	laneId: null,
@@ -20,6 +37,7 @@ const EMPTY: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> = 
 	deviceUser: "",
 	devicePassword: "",
 	devicePort: 80,
+	webhookPort: DEFAULT_WEBHOOK_PORT,
 	webhookSecret: "",
 	enabled: true,
 };
@@ -30,7 +48,7 @@ export function Cameras() {
 	const [editing, setEditing] = useState<Partial<LprCamera> | null>(null);
 	const [formError, setFormError] = useState<string | null>(null);
 	const [confirm, confirmDialog] = useConfirm();
-	const [diag, setDiag] = useState<{ port: number; addresses: string[] } | null>(null);
+	const [diag, setDiag] = useState<{ ports: number[]; addresses: string[] } | null>(null);
 	const [webhookOpen, setWebhookOpen] = useState(false);
 	const [search, setSearch] = useState("");
 	const [dirFilter, setDirFilter] = useState<"all" | "entry" | "exit">("all");
@@ -88,6 +106,15 @@ export function Cameras() {
 					`This app opens the barrier itself, which needs the camera's ${missing.join(", ")}. ` +
 						`Fill those in — without them the plate is read and the session recorded, but the boom never moves.`,
 				);
+				return;
+			}
+
+			// A port outside 1–65535 cannot be bound, and 0 would bind a RANDOM
+			// free port — the camera would push into nothing and every car would
+			// stall at the barrier with nothing on screen to explain it.
+			const webhookPort = Number(editing.webhookPort);
+			if (!Number.isInteger(webhookPort) || webhookPort < 1 || webhookPort > 65535) {
+				setFormError("Webhook port is required and must be between 1 and 65535 (6001 unless the camera's firmware forces another).");
 				return;
 			}
 
@@ -172,7 +199,12 @@ export function Cameras() {
 						<button
 							onClick={() => {
 								setFormError(null);
-								setEditing({ ...EMPTY });
+								// A new camera starts on the port its siblings already use, not
+								// the bare default: a site that had to move off 6001 has its
+								// cameras physically configured for the other port, and an
+								// operator adding the fourth camera would otherwise get a
+								// silent one — pushing to a port only this row expects.
+								setEditing({ ...EMPTY, webhookPort: commonWebhookPort(cameras) });
 							}}
 							className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide"
 						>
@@ -194,23 +226,44 @@ export function Cameras() {
 						</span>
 						<span className="inline-flex items-center gap-2 text-[11px] text-gray-400">
 							<span className="font-mono">
-								port {diag.port} · {diag.addresses.length} address{diag.addresses.length === 1 ? "" : "es"}
+								{diag.ports.length === 1 ? `port ${diag.ports[0]}` : `ports ${diag.ports.join(", ")}`} ·{" "}
+								{diag.addresses.length} address{diag.addresses.length === 1 ? "" : "es"}
 							</span>
 							<ChevronDown size={15} className={`transition-transform ${webhookOpen ? "rotate-180" : ""}`} />
 						</span>
 					</button>
 					{webhookOpen && (
 						<div className="px-4 pb-4 border-t border-gray-100">
-							<p className="mt-3 text-sm text-gray-700">Point your cameras at one of these URLs (use the IP that matches the camera's LAN):</p>
+							<p className="mt-3 text-sm text-gray-700">
+								Each camera pushes to its own port (set in the camera's form). Point it at the address below that matches its LAN:
+							</p>
+							{/* Per CAMERA, not per port: the operator is holding one camera's
+							    config screen and needs that camera's exact URL. Grouping by
+							    port instead would make them work out which group applies. */}
 							<ul className="mt-2 space-y-1 font-mono text-xs">
-								{diag.addresses.map((ip) => (
-									<li key={ip} className="flex items-center justify-between gap-2 bg-gray-50 rounded-md px-3 py-2">
-										<code>
-											POST http://{ip}:{diag.port}/lpr/event
-										</code>
-										<CopyButton text={`http://${ip}:${diag.port}/lpr/event`} />
+								{cameras.map((cam) => (
+									<li key={cam.id} className="bg-gray-50 rounded-md px-3 py-2">
+										<span className="font-sans text-[11px] font-semibold text-gray-500">{cam.name}</span>
+										{diag.addresses.map((ip) => (
+											<span key={ip} className="mt-0.5 flex items-center justify-between gap-2">
+												<code>POST http://{ip}:{cam.webhookPort}/lpr/event</code>
+												<CopyButton text={`http://${ip}:${cam.webhookPort}/lpr/event`} />
+											</span>
+										))}
+										{/* The port is configured but nothing is listening on it —
+										    almost always a second instance holding it (a packaged
+										    build running alongside `npm run dev`). Silent otherwise:
+										    the camera's push is refused by the OS and the app has
+										    no read to report. */}
+										{!diag.ports.includes(cam.webhookPort) && (
+											<span className="mt-1 block font-sans text-[11px] font-semibold text-red-600">
+												Port {cam.webhookPort} is not listening — this camera's plate pushes cannot arrive. Another copy of
+												qparking-local may be holding the port.
+											</span>
+										)}
 									</li>
 								))}
+								{cameras.length === 0 && <li className="text-gray-500 font-sans">No cameras yet — add one to get its push URL.</li>}
 							</ul>
 						</div>
 					)}
@@ -289,7 +342,12 @@ export function Cameras() {
 						<button
 							onClick={() => {
 								setFormError(null);
-								setEditing({ ...EMPTY });
+								// A new camera starts on the port its siblings already use, not
+								// the bare default: a site that had to move off 6001 has its
+								// cameras physically configured for the other port, and an
+								// operator adding the fourth camera would otherwise get a
+								// silent one — pushing to a port only this row expects.
+								setEditing({ ...EMPTY, webhookPort: commonWebhookPort(cameras) });
 							}}
 							className="mt-4 inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold uppercase tracking-wide"
 						>
@@ -637,6 +695,27 @@ function CameraForm({
               rtsp://<host>:8557/h264 and transcodes it for the Live display. */}
 					<Field label="Camera host / LAN IP">
 						<input className="input font-mono" value={value.host ?? ""} onChange={(e) => set("host", e.target.value)} placeholder="192.168.1.50" />
+					</Field>
+					{/* The other half of the wiring: the port THIS box listens on for
+					    this camera's plate pushes — the opposite direction to "Device
+					    port" below, which is a port on the camera. Per camera because
+					    firmware varies in what it will let you change; leave it at 6001
+					    unless the camera cannot be pointed there. The box binds a
+					    listener for every port in use. */}
+					<Field label="Webhook port">
+						<input
+							type="number"
+							className="input"
+							required
+							min={1}
+							max={65535}
+							value={value.webhookPort ?? DEFAULT_WEBHOOK_PORT}
+							onChange={(e) => set("webhookPort", Number(e.target.value))}
+						/>
+						<p className="mt-1 text-[11px] text-gray-500">
+							The port this server listens on for this camera's plate pushes. 6001 unless the camera's firmware forces
+							another. Its full push URL is on the Cameras page under <strong>Webhook endpoint</strong>.
+						</p>
 					</Field>
 					{/* Device login is NOT needed for video (RTSP is token-free). It's used
               only to open the camera's onboard IO relay for "Open barrier" — leave

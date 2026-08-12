@@ -6,10 +6,12 @@
  * Deliberately does NOT speak the W4G protocol: it opens a socket and closes it
  * the instant the connection succeeds. That's enough to tell "port open and
  * reachable" from "wrong IP / port / device off".
+ *
+ * The socket work itself lives in tcp-probe.ts, shared with the camera relay;
+ * what belongs HERE is the translation of a socket error code into something an
+ * operator standing at a barrier can act on.
  */
-import { Socket } from 'node:net';
-
-const PROBE_TIMEOUT_MS = 3_000;
+import { tcpProbe } from './tcp-probe';
 
 export interface TerminalPingResult { ok: boolean; latencyMs?: number; error?: string }
 
@@ -25,26 +27,10 @@ function explainNetError(raw: string): string {
   return s;
 }
 
-export function pingTerminalHost(host: string, port: number): Promise<TerminalPingResult> {
-  return new Promise((resolve) => {
-    if (!host) { resolve({ ok: false, error: 'no_host' }); return; }
-    const startedAt = Date.now();
-    const sock = new Socket();
-    let settled = false;
-    const done = (r: TerminalPingResult) => {
-      if (settled) return;
-      settled = true;
-      try { sock.destroy(); } catch { /* ignore */ }
-      resolve(r);
-    };
-    sock.setTimeout(PROBE_TIMEOUT_MS);
-    sock.once('connect', () => done({ ok: true, latencyMs: Date.now() - startedAt }));
-    sock.once('timeout', () => done({ ok: false, error: explainNetError('ETIMEDOUT'), latencyMs: Date.now() - startedAt }));
-    sock.once('error', (err: any) => done({ ok: false, error: explainNetError(err?.message ?? String(err)), latencyMs: Date.now() - startedAt }));
-    try {
-      sock.connect(port, host);
-    } catch (err: any) {
-      done({ ok: false, error: explainNetError(err?.message ?? String(err)), latencyMs: Date.now() - startedAt });
-    }
-  });
+export async function pingTerminalHost(host: string, port: number): Promise<TerminalPingResult> {
+  if (!host) return { ok: false, error: 'no_host' };
+  const probe = await tcpProbe(host, port);
+  return probe.ok
+    ? { ok: true, latencyMs: probe.latencyMs }
+    : { ok: false, error: explainNetError(probe.code ?? ''), latencyMs: probe.latencyMs };
 }

@@ -95,12 +95,12 @@ import {
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
   findSeasonPassByPlate,
-  getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind,
+  getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind, closeDb,
   listActivityLogs, insertActivityLog,
 } from './services/db';
 import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
-import { startLprServer, lprEvents, getLatestFrame } from './services/lpr-webhook';
+import { startLprServers, stopLprServers, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
   syncRatePolicies, syncParkingSpaces, syncSeasonPasses,
   syncCloudCustomers, syncCloudVehicles,
@@ -118,7 +118,7 @@ import {
 import { retryAllFailedSync } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
-import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier } from './services/camera-relay';
+import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier, isSdkLoaded } from './services/camera-relay';
 import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers } from './services/camera-rtsp';
 import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
 import {
@@ -161,17 +161,16 @@ app.whenReady().then(async () => {
     outcome: 'ok',
     resourceType: 'app_settings',
     description: `qparking-local ${app.getVersion()} started (${IS_DEV_MODE ? 'dev' : 'packaged'})`
-      + ` · LPR port ${settings.lprWebhookPort} · TNG ${settings.tngEnabled ? 'on' : 'off'}`,
-    changes: { version: app.getVersion(), dev: IS_DEV_MODE, lprPort: settings.lprWebhookPort, tngEnabled: !!settings.tngEnabled },
+      + ` · TNG ${settings.tngEnabled ? 'on' : 'off'}`,
+    changes: { version: app.getVersion(), dev: IS_DEV_MODE, tngEnabled: !!settings.tngEnabled },
   });
-  // Dev and packaged builds both bind the operator-configured LPR port
-  // (default 6001) so a camera pointed at 6001 works the same either way.
-  // If a packaged install is already running when you start `npm run dev`,
-  // the dev listener's bind fails with EADDRINUSE — startLprServer() logs
-  // that and keeps the rest of the app working rather than crashing.
-  const lprPort = settings.lprWebhookPort;
-  console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listener → :${lprPort}`);
-  startLprServer(lprPort);
+  // One listener per port the cameras push to (each camera carries its own; the
+  // 6001 default is always bound). Dev and packaged builds bind the same set, so
+  // a camera works the same either way — and if a packaged install is already
+  // running when you start `npm run dev`, the dev bind fails with EADDRINUSE,
+  // which startLprServers() reports and survives rather than crashing.
+  const lprPorts = startLprServers();
+  console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listeners → :${lprPorts.join(', :')}`);
   startParkingFlow();
   // Cloud pull at boot, then hand over to autoSync()'s recurring pull (cadence
   // from company_settings.sync_interval_minutes, which this first pull is what
@@ -201,7 +200,52 @@ app.whenReady().then(async () => {
   createTray();
 });
 
-app.on('before-quit', () => { stopAutoSync(); stopRtspGrabbers(); stopCameraRelay(); });
+/**
+ * Shut the background services down. Includes the LPR listeners, which used to be
+ * left bound: on a quit that doesn't fully terminate (see forceQuit) they are the
+ * thing that keeps the ports occupied.
+ */
+function stopBackgroundServices() {
+  try { stopAutoSync(); } catch { /* ignore */ }
+  try { stopRtspGrabbers(); } catch { /* ignore */ }
+  try { stopCameraRelay(); } catch { /* ignore */ }
+  try { stopLprServers(); } catch { /* ignore */ }
+}
+
+/** Any quit route that isn't the tray's — Windows shutdown, a task-manager close,
+ *  macOS Cmd-Q. Teardown only: forceQuit() handles the rest for the tray. */
+
+app.on('before-quit', stopBackgroundServices);
+
+/**
+ * Quit for real.
+ *
+ * Once the vendor LPR SDK is loaded, app.exit(0) does NOT terminate this process:
+ * it hangs inside teardown (koffi loads VzLPRSDK.dll, and we deliberately never
+ * call its Cleanup because that segfaults). Measured — and the event loop is
+ * already dead at that point, so a setTimeout backstop after app.exit() can never
+ * fire. The decision has to be made BEFORE.
+ *
+ * That matters because a process left alive still holds this box's LPR listener
+ * ports: the operator's next launch binds nothing and the box is silently deaf to
+ * every camera — plates read, boom never moves, no error on any screen.
+ *
+ * So: tear down cleanly (which is what releases the ports and flushes the DB),
+ * then exit the normal way when that is known to work, and TERMINATE when it
+ * isn't. SIGKILL to our own pid is immediate and skips the native teardown that
+ * hangs; nothing is lost, because every DB write is committed synchronously and
+ * closeDb() has just checkpointed.
+ */
+function forceQuit() {
+  stopBackgroundServices();
+  closeDb();
+  if (isSdkLoaded()) {
+    console.log('[quit] vendor SDK loaded — terminating rather than exiting (app.exit hangs in native teardown)');
+    process.kill(process.pid, 'SIGKILL');
+    return;
+  }
+  app.exit(0);
+}
 
 app.on('window-all-closed', () => {
   // Keep the process alive on Windows so the background services keep running.
@@ -246,7 +290,7 @@ function createTray() {
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Open dashboard', click: showWindow },
       { type: 'separator' },
-      { label: 'Quit', click: () => { app.exit(0); } },
+      { label: 'Quit', click: forceQuit },
     ]));
     tray.on('double-click', showWindow);
   } catch { /* tray fails on some Linux DEs — non-fatal */ }
@@ -272,11 +316,16 @@ function createTray() {
  * throws, because a dead relay must not take down the session flow. The usual
  * cause is missing device credentials, which describeCameraRisk() flags on the
  * Cameras page.
+ *
+ * Async, and deliberately NOT awaited by its callers: the session row is already
+ * written and the decision already made, so the boom is raised alongside the rest
+ * of the entry/exit bookkeeping rather than in front of it. On a warm relay that
+ * is one tick; on a cold one it is a socket probe (see pulseBarrier).
  */
-function pulseBarrierFor(payload: any, side: 'entry' | 'exit'): void {
+async function pulseBarrierFor(payload: any, side: 'entry' | 'exit'): Promise<void> {
   const cameraId = payload?.cameraId ?? payload?.event?.cameraId ?? payload?.session?.entryCameraId;
   if (!cameraId) return;
-  const relay = pulseBarrier(cameraId);
+  const relay = await pulseBarrier(cameraId);
   sendToRenderer('log', {
     terminalId: 0,
     direction: relay.ok ? 'info' : 'error',
@@ -365,7 +414,7 @@ function wireRendererEvents() {
   // never reaches here. So this is the one place that raises the boom on entry.
   parkingEvents.on('entry', (p: any) => {
     // THIS app authorised the entry, so this app raises the barrier.
-    pulseBarrierFor(p, 'entry');
+    void pulseBarrierFor(p, 'entry');
     // Audit the entry HERE, on the box, at the moment the barrier goes up. The
     // cloud used to be the only writer of this row (on the pushed record), which
     // meant a WAN outage or a not-yet-synced box had no entry history at all.
@@ -664,7 +713,7 @@ function wireRendererEvents() {
     // 'free' (pass / grace / zero-rate) or 'manual_release' (operator decision).
     // A decline, a timeout, a missing terminal or any refusal never emits
     // 'exit-completed' at all — the car stays put with its session open.
-    pulseBarrierFor(p, 'exit');
+    void pulseBarrierFor(p, 'exit');
   });
 
   // Sync status → renderer for the Dashboard panel.
@@ -855,9 +904,21 @@ ipcMain.handle('cameras:save', async (_e, input) => {
   // refresh the RTSP video feed and warm relay connection if host/creds changed.
   resyncRtspGrabbers();
   resyncCameraRelay();
+  // The webhook port lives on the camera, so saving one can introduce a port
+  // nothing is listening on yet. Without this the operator sets the port, the
+  // camera pushes to it, and the OS refuses the connection — the app's most
+  // deceptive failure, since every screen looks healthy. Ports still in use by
+  // another camera are left bound untouched (see startLprServers).
+  startLprServers();
   return saved;
 });
-ipcMain.handle('cameras:delete', (_e, id: number) => { deleteCamera(id); resyncRtspGrabbers(); resyncCameraRelay(); });
+ipcMain.handle('cameras:delete', (_e, id: number) => {
+  deleteCamera(id);
+  resyncRtspGrabbers();
+  resyncCameraRelay();
+  // Frees the port if no other camera pushes to it.
+  startLprServers();
+});
 // Latest frame the camera pushed with a plate event — Live display fallback
 // for WebSocket/RTSP-only cameras with no pullable HTTP snapshot URL.
 ipcMain.handle('cameras:latest-frame', (_e, cameraId: number) => getLatestFrame(cameraId));
@@ -1232,14 +1293,6 @@ ipcMain.handle('site:get-current', () => getCurrentSite());
 ipcMain.handle('settings:save', (_e, patch) => {
   const prev = getSettings();
   const next = saveSettings(patch);
-  // Restart the LPR listener ONLY when the port actually changes value. The
-  // renderer saves the whole settings object, so patch.lprWebhookPort is
-  // present on every save — restarting each time needlessly drops the listener
-  // and races the re-bind (close() doesn't free the port instantly while live
-  // /live MJPEG streams are open → EADDRINUSE → ingest silently stops).
-  if (next.lprWebhookPort !== prev.lprWebhookPort) {
-    startLprServer(next.lprWebhookPort);
-  }
   // W4G TNG callback listener: same rule — only touch it when the master switch
   // or the callback port(s) actually change value.
   const tngChanged =
@@ -1288,6 +1341,9 @@ ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: strin
   const previousName = previousId ? getSite(previousId)?.name ?? null : null;
   saveSettings({ qparkingBaseUrl: input.baseUrl, qparkingApiKey: input.apiKey });
   resetLocalDataForRebind({ wipeEquipment: !!input.wipeEquipment });
+  // Wiping equipment takes the cameras with it, so the ports they asked for are
+  // no longer wanted — release everything except the always-bound default.
+  if (input.wipeEquipment) startLprServers();
   const pull = await syncAll();               // syncSite adopts + binds the new site
   const site = getCurrentSite();
   // The single most destructive thing an operator can do on this box — it wipes
@@ -1451,7 +1507,7 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
   if (!camera && lane) camera = listCameras().find((c) => c.laneId === lane.id && c.enabled) ?? null;
   const laneName = lane?.name ?? camera?.name ?? 'MANUAL OPEN';
   const reason = opts.reason ?? 'manual-operator-open';
-  const relay = camera ? pulseBarrier(camera.id) : { ok: false, error: 'no_camera' };
+  const relay = camera ? await pulseBarrier(camera.id) : { ok: false, error: 'no_camera' };
   // Audited HERE rather than in the pages that call it, so every caller is
   // covered by construction — the Live-display tile used to write this row
   // itself, which meant the identical action from the Cameras page ("test
@@ -1528,8 +1584,11 @@ ipcMain.handle('devices:push-cloud', async (_e, type: DeviceType) => {
 ipcMain.handle('devices:pull-cloud', async (_e, type: DeviceType) => {
   const result = await pullDevicesFromCloud(type);
   // A pull rewrites local camera/lane rows and their links — refresh the
-  // capture pipelines so grabbers/relay track the new set.
-  if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); }
+  // capture pipelines so grabbers/relay track the new set, and rebind the
+  // listeners: a pull can DELETE a camera (freeing its port) or re-create one on
+  // the default port, and the webhook port is a local column the cloud never
+  // sends.
+  if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); startLprServers(); }
   // A pull REPLACES this box's equipment config. Without a row, "who changed the
   // camera wiring?" had no answer — the per-device save rows only cover edits
   // made on the device pages themselves.

@@ -29,7 +29,10 @@ export function LiveDisplay() {
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
   const [loading, setLoading] = useState(false);
-  const [port, setPort] = useState<number | null>(null);
+  // Every listener serves /live/<id>, so a tile prefers its OWN camera's port
+  // and falls back to any bound one — a port that lost its bind (another copy of
+  // the app holding it) shouldn't blank the whole wall.
+  const [ports, setPorts] = useState<number[]>([]);
   const [nonce, setNonce] = useState(0); // bumped on refresh to remount tiles → reconnect feeds
   // Latest plate read per camera — overlaid on the matching tile. Keyed by
   // cameraId so a fresh read for cam A never clobbers cam B's readout.
@@ -49,7 +52,7 @@ export function LiveDisplay() {
       ]);
       setCameras(cams);
       setLanes(lns);
-      if (diag?.port) setPort(diag.port);
+      if (diag?.ports) setPorts(diag.ports);
       setNonce((n) => n + 1);
     } finally { setLoading(false); }
   }
@@ -103,7 +106,7 @@ export function LiveDisplay() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {cameras.map((c) => (
-            <LiveTile key={`${c.id}:${nonce}`} cam={c} port={port}
+            <LiveTile key={`${c.id}:${nonce}`} cam={c} port={ports.includes(c.webhookPort) ? c.webhookPort : (ports[0] ?? null)}
               lane={lanes.find((l) => l.id === c.laneId) ?? null}
               lastPlate={plates[c.id]} />
           ))}

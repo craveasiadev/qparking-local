@@ -511,13 +511,22 @@ try {
   // Driven over real HTTP because that is the only path the coercion sits on —
   // the lprEvents.emit() helper the checks above use bypasses it entirely.
   const webhook = require('../../dist/main/services/lpr-webhook');
+  // The listen port belongs to the CAMERA now (2026-08-11), so the harness gets
+  // its private port by putting the fixtures on it: startLprServers() binds
+  // whatever set the cameras ask for. It also always binds 6001; a failed bind
+  // there (a real install running on this machine) is reported and survived, so
+  // it can't fail the run.
   const PORT = 6099;
-  webhook.startLprServer(PORT);
+  const ALT_PORT = 6098;
+  for (const existing of db.listCameras()) db.upsertCamera({ ...existing, webhookPort: PORT });
+  const boundPorts = webhook.startLprServers();
+  check('webhook: the port the cameras ask for is the port that gets bound',
+    boundPorts.includes(PORT), JSON.stringify(boundPorts));
 
-  const postTo = (path, body) => new Promise((resolve) => {
+  const postToPort = (port, path, body) => new Promise((resolve) => {
     const payload = Buffer.from(JSON.stringify(body));
     const req = require('node:http').request(
-      { host: '127.0.0.1', port: PORT, path, method: 'POST',
+      { host: '127.0.0.1', port, path, method: 'POST',
         headers: { 'content-type': 'application/json', 'content-length': payload.length } },
       (res) => {
         const c = [];
@@ -530,13 +539,20 @@ try {
         });
       },
     );
-    req.on('error', () => resolve({}));
+    req.on('error', (e) => resolve({ error: e.code ?? String(e) }));
     req.end(payload);
   });
+  const postTo = (path, body) => postToPort(PORT, path, body);
   const post = (body) => postTo('/lpr/event', body);
 
   // Give the listener a moment to bind before the first request.
   await new Promise((r) => setTimeout(r, 250));
+
+  // …and only now is the bind result knowable: startLprServers() returns the set
+  // it is holding, which is one tick optimistic (listen() is async), so a port
+  // that lost its bind is still in that array. This is the honest check.
+  check('webhook: the port is still held once the bind has resolved',
+    webhook.activeLprPorts().includes(PORT), JSON.stringify(webhook.activeLprPorts()));
 
   const dualOnExit = await post({ cameraId: camExit.id, plate: 'COERCE01', direction: 'dual' });
   check('webhook: retired "dual" is coerced to the camera direction',
@@ -630,21 +646,61 @@ try {
   db.deleteCamera(staleRow.id);
   db.deleteCamera(liveRow.id);
 
-  webhook.stopLprServer();
+  // ─── one listener per camera port (2026-08-11) ────────────────────────────
+  // The port was ONE box-wide value until cameras turned out to differ in what
+  // their firmware will let you set. Two cameras on two ports must both be able
+  // to push — and the port must be released when no camera wants it, or a box
+  // would accumulate open listeners for every port ever typed.
+  const altCam = db.upsertCamera({
+    name: 'ALT-PORT-CAM', laneId: null, direction: 'exit',
+    accessMode: 'open', host: '10.0.0.99',
+    deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookPort: ALT_PORT, webhookSecret: null, enabled: true,
+  });
+  check('webhook: a camera saved with its own port persists it',
+    db.getCamera(altCam.id).webhookPort === ALT_PORT, String(db.getCamera(altCam.id).webhookPort));
+  const withAlt = webhook.startLprServers();
+  check('webhook: rebinding adds the new port and KEEPS the existing one',
+    withAlt.includes(ALT_PORT) && withAlt.includes(PORT), JSON.stringify(withAlt));
+  await new Promise((r) => setTimeout(r, 250));
+  const onAlt = await postToPort(ALT_PORT, '/lpr/event', { cameraId: altCam.id, plate: 'ALTPORT01' });
+  check('webhook: a read pushed to the second port is accepted',
+    onAlt.ok === true && onAlt.direction === 'exit', JSON.stringify(onAlt));
+  // The first port must be untouched by the rebind — rebinding a live listener
+  // would drop the /live video streams it carries and risk EADDRINUSE against
+  // its own closing socket.
+  const stillOnFirst = await postToPort(PORT, '/lpr/event', { cameraId: camExit.id, plate: 'ALTPORT02' });
+  check('webhook: …and the first port still works after the rebind',
+    stillOnFirst.ok === true, JSON.stringify(stillOnFirst));
+  db.deleteCamera(altCam.id);
+  const afterDelete = webhook.startLprServers();
+  check('webhook: deleting the camera releases its port',
+    !afterDelete.includes(ALT_PORT) && afterDelete.includes(PORT), JSON.stringify(afterDelete));
+  const refused = await postToPort(ALT_PORT, '/lpr/event', { cameraId: camExit.id, plate: 'ALTPORT03' });
+  check('webhook: …so nothing answers on it any more',
+    !!refused.error, JSON.stringify(refused));
+
+  webhook.stopLprServers();
 
   // ─── cloud pull: what survives and what doesn't ──────────────────────────
   // NOTE: reconcileCamerasFromCloud([]) DELETES EVERY CAMERA, so this block runs
   // last — anything after it would be testing against an empty table.
   // reconcileCamerasFromCloud deletes local rows the cloud doesn't have and
-  // re-inserts the ones it does. The cloud carries no credentials, so a
-  // re-inserted row comes back without them — and since this app opens every
-  // barrier, that row is a dead entrance until they're re-entered. The risk flag
-  // is the only thing that surfaces it, which is why it's pinned below.
+  // re-inserts the ones it does. Since 2026-08-12 the cloud also carries the LAN
+  // wiring — SDK login + port, webhook port + secret — so a re-inserted camera
+  // comes back USABLE. Before that it came back credential-less, which made it a
+  // dead entrance: sessions recorded, boom never moved.
+  //
+  // The other half of that contract is pinned here too: a null from the cloud
+  // means "nothing to say", never "clear it". An older SaaS that stores none of
+  // these fields must not wipe a working camera on the first pull.
   const wlCam = db.upsertCamera({
     name: 'PULL-TEST', laneId: null, direction: 'entry',
     accessMode: 'pass_only',
     host: '10.0.0.40', deviceUser: 'admin', devicePassword: 's3cret', devicePort: 8080,
-    webhookSecret: 'hook-1', enabled: true,
+    // A NON-default webhook port on purpose: 6001 would pass the "left alone"
+    // check below even if the pull had overwritten it with the column default.
+    webhookPort: 6007, webhookSecret: 'hook-1', enabled: true,
   });
   const wlExternal = db.getCamera(wlCam.id).externalId;
 
@@ -657,9 +713,28 @@ try {
   check('cloud pull: access mode is restored from the cloud row',
     afterUpdate?.accessMode === 'pass_only',
     JSON.stringify({ a: afterUpdate?.accessMode }));
-  check('cloud pull: LAN-only credentials survive the update path',
-    afterUpdate?.deviceUser === 'admin' && afterUpdate?.devicePassword === 's3cret',
-    JSON.stringify({ u: afterUpdate?.deviceUser }));
+  check('cloud pull: credentials the cloud omits are LEFT ALONE, not wiped',
+    afterUpdate?.deviceUser === 'admin' && afterUpdate?.devicePassword === 's3cret'
+      && afterUpdate?.devicePort === 8080 && afterUpdate?.webhookSecret === 'hook-1'
+      && afterUpdate?.webhookPort === 6007,
+    JSON.stringify({ u: afterUpdate?.deviceUser, dp: afterUpdate?.devicePort, wp: afterUpdate?.webhookPort, ws: afterUpdate?.webhookSecret }));
+
+  // …and when the cloud DOES carry them, they win — that is what makes a pull
+  // enough to set a box up.
+  db.reconcileCamerasFromCloud([
+    {
+      externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only',
+      host: '10.0.0.40', enabled: true, laneExternalId: null,
+      deviceUser: 'operator', devicePassword: 'rotated', devicePort: 8081,
+      webhookPort: 6009, webhookSecret: 'hook-2',
+    },
+  ]);
+  const afterMirror = db.listCameras().find((c) => c.externalId === wlExternal);
+  check('cloud pull: credentials the cloud DOES carry are applied',
+    afterMirror?.deviceUser === 'operator' && afterMirror?.devicePassword === 'rotated'
+      && afterMirror?.devicePort === 8081 && afterMirror?.webhookPort === 6009
+      && afterMirror?.webhookSecret === 'hook-2',
+    JSON.stringify({ u: afterMirror?.deviceUser, dp: afterMirror?.devicePort, wp: afterMirror?.webhookPort, ws: afterMirror?.webhookSecret }));
 
   // The cloud turning it OFF must turn it off locally too — otherwise the mirror
   // is one-way and a lane could never be un-restricted from the portal.
@@ -678,21 +753,40 @@ try {
   check('cloud pull: a camera absent from the cloud is deleted outright',
     !db.listCameras().some((c) => c.externalId === wlExternal));
 
-  // …and if that external_id later returns, access_mode comes back FROM THE
-  // CLOUD (that's what mirroring bought us) — but the LAN-only credentials do
-  // not, because they never left this box. A pass-only camera therefore returns
-  // restricted-but-unreachable, which describeCameraRisk() is there to flag
-  // rather than let it fail silently at the barrier.
+  // …and when that external_id returns carrying its wiring, the camera comes
+  // back READY: access_mode, credentials, ports and secret all restored, and no
+  // risk flag, because there is nothing left to type in. This is the case that
+  // makes "reinstall the box, pull from cloud" a complete recovery.
   db.reconcileCamerasFromCloud([
-    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
+    {
+      externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only',
+      host: '10.0.0.40', enabled: true, laneExternalId: null,
+      deviceUser: 'admin', devicePassword: 's3cret', devicePort: 8080,
+      webhookPort: 6007, webhookSecret: 'hook-1',
+    },
   ]);
   const afterReinsert = db.listCameras().find((c) => c.externalId === wlExternal);
   check('cloud pull: a re-created camera gets its access mode back from the cloud',
     afterReinsert?.accessMode === 'pass_only',
     JSON.stringify({ a: afterReinsert?.accessMode }));
-  check('cloud pull: …but NOT the LAN-only credentials, and the risk is flagged',
-    !afterReinsert?.deviceUser && !!afterReinsert?.risk,
-    JSON.stringify({ u: afterReinsert?.deviceUser, risk: afterReinsert?.risk }));
+  check('cloud pull: …and its credentials, ports and secret, with no risk left to flag',
+    afterReinsert?.deviceUser === 'admin' && afterReinsert?.devicePassword === 's3cret'
+      && afterReinsert?.devicePort === 8080 && afterReinsert?.webhookPort === 6007
+      && afterReinsert?.webhookSecret === 'hook-1' && !afterReinsert?.risk,
+    JSON.stringify({ u: afterReinsert?.deviceUser, wp: afterReinsert?.webhookPort, risk: afterReinsert?.risk }));
+
+  // A camera re-created by an OLDER SaaS that carries no wiring is still the
+  // dead-entrance case, and the risk flag is the only thing that surfaces it.
+  db.reconcileCamerasFromCloud([]);
+  db.reconcileCamerasFromCloud([
+    { externalId: wlExternal, name: 'PULL-TEST', direction: 'entry', accessMode: 'pass_only', host: '10.0.0.40', enabled: true, laneExternalId: null },
+  ]);
+  const bareReinsert = db.listCameras().find((c) => c.externalId === wlExternal);
+  check('cloud pull: a re-created camera with NO cloud wiring is flagged as unusable',
+    !bareReinsert?.deviceUser && !!bareReinsert?.risk,
+    JSON.stringify({ u: bareReinsert?.deviceUser, risk: bareReinsert?.risk }));
+  check('cloud pull: …and lands on the default webhook port rather than 0',
+    bareReinsert?.webhookPort === 6001, String(bareReinsert?.webhookPort));
 
   // A camera the cloud introduces that this box has never seen, with no
   // access_mode on the row (an older SaaS), must land on the SAFE default.

@@ -4,16 +4,12 @@
 import { readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { runUnderElectron, APP_DIR } from '../run-under-electron.mjs';
+import { runUnderElectron } from '../run-under-electron.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, '.results');
 const RESULT = path.join(OUT_DIR, 'fees.json');
 
-if (!existsSync(path.join(APP_DIR, 'dist', 'main', 'services', 'parking-flow.js'))) {
-  console.error('Missing dist/main/services/parking-flow.js — run "npm run build:main" first.');
-  process.exit(2);
-}
 
 rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });

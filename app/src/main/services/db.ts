@@ -36,6 +36,23 @@ import { randomUUID } from "node:crypto";
 
 let db: Database.Database | null = null;
 
+/**
+ * Flush and close the database.
+ *
+ * Called on the way out. Every write here is already committed synchronously, so
+ * nothing is lost without this — but the app's quit path may have to TERMINATE
+ * the process rather than exit it (the vendor SDK hangs Electron's teardown), and
+ * checkpointing first means the next launch opens a tidy database instead of
+ * replaying a WAL.
+ */
+export function closeDb(): void {
+	if (!db) return;
+	const open = db;
+	db = null;
+	try { open.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* nothing to flush */ }
+	try { open.close(); } catch { /* already gone */ }
+}
+
 export function getDb(): Database.Database {
 	if (db) return db;
 	const dbPath = path.join(app.getPath("userData"), "qparking-local.db");
@@ -237,6 +254,10 @@ function applySchema(db: Database.Database) {
       -- camera firmware also auto-opens switches that off on the device.
       barrier_control TEXT NOT NULL DEFAULT 'app',
       host TEXT,
+      -- The port THIS server listens on for this camera's plate pushes. Per
+      -- camera because camera firmware varies in what it will let you set: the
+      -- box binds a listener for every distinct port in use (see startLprServers).
+      webhook_port INTEGER NOT NULL DEFAULT 6001,
       webhook_secret TEXT,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -886,6 +907,10 @@ function applySchema(db: Database.Database) {
 		// falls back to the legacy pass_type, so an un-synced box is unchanged.
 		["parking_spaces", "bay_type TEXT"],
 		["cloud_customers", "site_role TEXT"],
+		// Per-camera webhook port (2026-08-11). The default matches the box-wide
+		// setting it replaced, so a standard install keeps the port its cameras
+		// are already pushing to; anything else is backfilled below.
+		["cameras", "webhook_port INTEGER NOT NULL DEFAULT 6001"],
 		["season_passes", "plan TEXT"],
 	] as const) {
 		try {
@@ -894,6 +919,24 @@ function applySchema(db: Database.Database) {
 			/* already there */
 		}
 	}
+	// The webhook port moved from ONE box-wide setting onto each camera
+	// (2026-08-11). An install that changed the box-wide value has its cameras
+	// physically configured for THAT port, so they inherit it rather than
+	// snapping to the 6001 default and going deaf — a silent failure, since the
+	// box would sit listening on a port nothing pushes to.
+	//
+	// Only rows still holding the column default are touched, so re-running this
+	// cannot stamp over a port an operator has since set per camera.
+	try {
+		const legacy = db.prepare("SELECT value FROM settings WHERE key = 'lprWebhookPort'").get() as { value?: string } | undefined;
+		const port = Number(legacy?.value);
+		if (Number.isInteger(port) && port > 0 && port < 65536 && port !== 6001) {
+			db.prepare("UPDATE cameras SET webhook_port = ? WHERE webhook_port = 6001").run(port);
+		}
+	} catch {
+		/* no settings row yet — a fresh install, where the default is correct */
+	}
+
 	// Backfill existing rows to their legacy `local-{id}` id — the cloud already
 	// stores them keyed on `local-{id}`, so this preserves today's mappings.
 	for (const table of ["cameras", "lanes", "terminals"] as const) {
@@ -1097,7 +1140,6 @@ function migrateDualCameraDirection(db: Database.Database): void {
 const DEFAULT_SETTINGS: AppSettings = {
 	qparkingBaseUrl: "",
 	qparkingApiKey: "",
-	lprWebhookPort: 6001,
 	// 60s (was 90s until 2026-08-07). Long enough to swallow a departing car's
 	// duplicate reads, short enough that a genuine quick return isn't refused.
 	// Operator-tunable on the Settings page.
@@ -1209,6 +1251,19 @@ export function logTerminal(terminalId: number, direction: "send" | "recv" | "er
 
 // ─── cameras ───────────────────────────────────────────────────────────────
 
+/**
+ * The port this box will LISTEN on for a camera's plate pushes.
+ *
+ * Clamped here rather than trusted, because the value arrives from a renderer
+ * number input and the failure it causes is silent: port 0 binds a random free
+ * port, and anything above 65535 refuses to bind at all — either way the camera
+ * pushes into nothing and cars sit at the barrier.
+ */
+function normaliseWebhookPort(port: unknown): number {
+	const value = Number(port);
+	return Number.isInteger(value) && value > 0 && value < 65536 ? value : 6001;
+}
+
 function rowToCamera(row: any): LprCamera {
 	return {
 		id: row.id,
@@ -1226,6 +1281,10 @@ function rowToCamera(row: any): LprCamera {
 		deviceUser: row.device_user ?? null,
 		devicePassword: row.device_password ?? null,
 		devicePort: row.device_port ?? null,
+		// A row written before the column existed reads as the default rather
+		// than 0/NULL: binding port 0 would take a random free port and the
+		// camera would never find it.
+		webhookPort: Number(row.webhook_port) > 0 ? Number(row.webhook_port) : 6001,
 		enabled: !!row.enabled,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -1274,7 +1333,7 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 	if (camera.id) {
 		// external_id is immutable device identity — never rewritten on edit.
 		db.prepare(
-			`UPDATE cameras SET name=?, lane_id=?, direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE cameras SET name=?, lane_id=?, direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		).run(
 			camera.name,
 			camera.laneId,
@@ -1284,6 +1343,7 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 			camera.deviceUser,
 			camera.devicePassword,
 			camera.devicePort,
+			normaliseWebhookPort(camera.webhookPort),
 			camera.webhookSecret,
 			camera.enabled ? 1 : 0,
 			camera.id,
@@ -1293,7 +1353,7 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 	const externalId = camera.externalId ?? `dev-${randomUUID()}`;
 	const info = db
 		.prepare(
-			`INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, host, device_user, device_password, device_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, host, device_user, device_password, device_port, webhook_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		)
 		.run(
 			externalId,
@@ -1305,6 +1365,7 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 			camera.deviceUser,
 			camera.devicePassword,
 			camera.devicePort,
+			normaliseWebhookPort(camera.webhookPort),
 			camera.webhookSecret,
 			camera.enabled ? 1 : 0,
 		);
@@ -1465,6 +1526,16 @@ export interface CloudCameraRow {
 	host: string | null;
 	enabled: boolean;
 	laneExternalId: string | null;
+	/** The camera's SDK login + port, and the box-side webhook port/secret —
+	 *  mirrored since 2026-08-12 so a pull restores a WORKING camera.
+	 *
+	 *  null means the cloud has nothing to say (an older cloud, or a camera that
+	 *  never had one), NOT "clear it". See reconcileCamerasFromCloud. */
+	deviceUser: string | null;
+	devicePassword: string | null;
+	devicePort: number | null;
+	webhookPort: number | null;
+	webhookSecret: string | null;
 }
 
 /**
@@ -1521,11 +1592,11 @@ export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
 		for (const local of db.prepare("SELECT id, external_id FROM cameras").all() as { id: number; external_id: string }[]) {
 			if (!keep.has(local.external_id)) db.prepare("DELETE FROM cameras WHERE id = ?").run(local.id);
 		}
-		// lane_id left for relinkDevices(). access_mode now travels with the cloud
-		// row (2026-08-06), so a pull RESTORES it exactly like name/direction/host
-		// — that is the point of mirroring it. The SDK credentials and webhook
-		// secret are still LAN-only and never leave this box, so a surviving row
-		// keeps its own and a re-created one comes back without them.
+		// lane_id left for relinkDevices(). access_mode travels with the cloud row
+		// (2026-08-06) and the LAN wiring does too (2026-08-12: SDK login + port,
+		// webhook port + secret) — so a pull RESTORES a camera that WORKS, which is
+		// the point of mirroring any of it. Before that, a rebuilt box produced
+		// cameras that looked correct and moved no barrier.
 		//
 		// barrier_control is gone (2026-08-07) — this app opens the barrier for
 		// every car it authorises, so there is nothing left for a pull to derive
@@ -1533,19 +1604,42 @@ export function reconcileCamerasFromCloud(rows: CloudCameraRow[]): void {
 		//
 		// A camera the cloud does NOT have is deleted outright (documented,
 		// destructive). If that external_id later reappears it comes back as a
-		// fresh INSERT — access_mode restored from the cloud, but WITHOUT its
-		// credentials, so it is flagged by describeCameraRisk() until they are
-		// re-entered.
-		const upd = db.prepare(
-			"UPDATE cameras SET name=?, direction=?, access_mode=?, host=?, enabled=?, lane_external_id=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?",
-		);
-		const ins = db.prepare(
-			"INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, host, enabled, lane_external_id) VALUES (?,?,NULL,?,?,?,?,?)",
-		);
+		// fresh INSERT, now carrying its credentials.
+		//
+		// COALESCE, not assignment, on every mirrored-wiring column: a null from
+		// the cloud means "nothing to say" — an older cloud that doesn't store the
+		// field, or a camera pushed before it did — and must leave this box's own
+		// value alone. Overwriting with null would take a working camera offline on
+		// the first pull, which is the exact failure this change set out to remove.
+		const upd = db.prepare(`
+			UPDATE cameras SET
+				name=?, direction=?, access_mode=?, host=?, enabled=?, lane_external_id=?,
+				device_user=COALESCE(?, device_user),
+				device_password=COALESCE(?, device_password),
+				device_port=COALESCE(?, device_port),
+				webhook_port=COALESCE(?, webhook_port),
+				webhook_secret=COALESCE(?, webhook_secret),
+				updated_at=CURRENT_TIMESTAMP
+			WHERE external_id=?
+		`);
+		const ins = db.prepare(`
+			INSERT INTO cameras (
+				external_id, name, lane_id, direction, access_mode, host, enabled, lane_external_id,
+				device_user, device_password, device_port, webhook_port, webhook_secret
+			) VALUES (?,?,NULL,?,?,?,?,?,?,?,?,COALESCE(?, 6001),?)
+		`);
 		for (const r of rows) {
 			const accessMode = r.accessMode === "pass_only" ? "pass_only" : "open";
-			if (upd.run(r.name, r.direction, accessMode, r.host, r.enabled ? 1 : 0, r.laneExternalId, r.externalId).changes === 0) {
-				ins.run(r.externalId, r.name, r.direction, accessMode, r.host, r.enabled ? 1 : 0, r.laneExternalId);
+			const changed = upd.run(
+				r.name, r.direction, accessMode, r.host, r.enabled ? 1 : 0, r.laneExternalId,
+				r.deviceUser, r.devicePassword, r.devicePort, r.webhookPort, r.webhookSecret,
+				r.externalId,
+			).changes;
+			if (changed === 0) {
+				ins.run(
+					r.externalId, r.name, r.direction, accessMode, r.host, r.enabled ? 1 : 0, r.laneExternalId,
+					r.deviceUser, r.devicePassword, r.devicePort, r.webhookPort, r.webhookSecret,
+				);
 			}
 		}
 	});
@@ -2840,7 +2934,6 @@ function rowToCloudCustomer(row: any): CloudCustomer {
 		email: row.email ?? null,
 		phone: row.phone ?? null,
 		siteRole: row.site_role ?? null,
-		type: row.type ?? null,
 		isEnabled: !!row.is_enabled,
 		vehiclesCount: row.vehicles_count ?? 0,
 		activePassesCount: row.active_passes_count ?? 0,
@@ -2859,11 +2952,11 @@ export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM cloud_customers").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
-        id, full_name, email, phone, site_role, type, is_enabled,
+        id, full_name, email, phone, site_role, is_enabled,
         vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const c of customers) {
-			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.type, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
+			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
 		}
 	});
 	tx();
@@ -2974,9 +3067,7 @@ function rowToParkingSpace(row: any): ParkingSpace {
 		spaceCode: row.space_code ?? null,
 		status: row.status ?? "available",
 		customerName: row.customer_name ?? null,
-		vehiclePlate: row.vehicle_plate ?? null,
 		bayType: row.bay_type ?? null,
-		passType: row.pass_type ?? null,
 		passId: row.pass_id ?? null,
 		startDate: row.start_date ?? null,
 		endDate: row.end_date ?? null,
@@ -2996,9 +3087,9 @@ export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
 		db.prepare("DELETE FROM parking_spaces").run();
 		const insert = db.prepare(`INSERT INTO parking_spaces (
         id, building, level, zone, space_number, space_code, status,
-        customer_name, vehicle_plate, bay_type, pass_type, pass_id,
+        customer_name, bay_type, pass_id,
         start_date, end_date, notes, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const parkingSpace of parkingSpaces) {
 			insert.run(
 				parkingSpace.id,
@@ -3009,9 +3100,7 @@ export function replaceParkingSpaces(parkingSpaces: ParkingSpace[]): void {
 				parkingSpace.spaceCode,
 				parkingSpace.status,
 				parkingSpace.customerName,
-				parkingSpace.vehiclePlate,
 				parkingSpace.bayType,
-				parkingSpace.passType,
 				parkingSpace.passId,
 				parkingSpace.startDate,
 				parkingSpace.endDate,

@@ -144,8 +144,30 @@ function handleLiveStream(cameraId: number, req: http.IncomingMessage, res: http
   res.on('error', cleanup);
 }
 
-let server: http.Server | null = null;
-let activePort = 0;
+/**
+ * The port a camera pushes to when nothing says otherwise — the default of the
+ * `cameras.webhook_port` column, and the box-wide setting that column replaced.
+ *
+ * ALWAYS bound, even with no camera registered on it, because the useful
+ * diagnostic on a fresh install is the `unknown_camera` audit row telling the
+ * operator which IP pushed and what host to register. Nothing bound means the
+ * camera's push is refused by the OS and the box has nothing at all to say.
+ */
+export const DEFAULT_LPR_WEBHOOK_PORT = 6001;
+
+/**
+ * One listener per distinct port a camera pushes to.
+ *
+ * There USED to be a single box-wide port, which assumed every camera on a site
+ * can be pointed at the same one. Firmware varies in what it will let you
+ * change — some builds hard-code their push port the way others hard-code the
+ * push PATH (see isPlateEndpoint) — so the port moved onto the camera and this
+ * binds the whole set.
+ *
+ * Each entry keeps its own sockets so one port can be rebound (a camera's port
+ * edited) without disturbing the others, or the /live MJPEG streams they carry.
+ */
+const servers = new Map<number, { server: http.Server; sockets: Set<import('node:net').Socket> }>();
 
 // ─── rejected-webhook reporting throttle ────────────────────────────────────
 // One audit row per camera per window. A camera with a stale secret re-posts on
@@ -252,10 +274,42 @@ function isPlateEndpoint(url: string | undefined): boolean {
     || path.includes('plateresult');
 }
 
-export function startLprServer(port: number) {
-  stopLprServer();
-  activePort = port;
-  server = http.createServer((req, res) => {
+/**
+ * Bind (or rebind) the listeners so they match the cameras that are registered.
+ *
+ * Idempotent and safe to call on every camera change: a port already listening
+ * is left strictly alone — rebinding it would drop the live MJPEG streams and
+ * risk an EADDRINUSE against its own closing socket — while ports no longer
+ * used by any camera are closed, and new ones bound.
+ *
+ * Disabled cameras are INCLUDED deliberately. Their reads are rejected further
+ * in with a `camera_disabled` audit row, and that row is the only way an
+ * operator ever finds out a camera they forgot to enable is otherwise wired
+ * correctly. Not binding the port would turn that into silence.
+ *
+ * Returns the ports it is now HOLDING, which is optimistic by one tick: listen()
+ * resolves asynchronously, so a port that loses its bind drops out a moment
+ * later. activeLprPorts() / diagnose() are the authority after that.
+ */
+export function startLprServers(): number[] {
+  const wanted = new Set<number>([DEFAULT_LPR_WEBHOOK_PORT]);
+  for (const camera of listCameras()) {
+    const port = Number(camera.webhookPort);
+    if (Number.isInteger(port) && port > 0 && port < 65536) wanted.add(port);
+  }
+
+  for (const port of [...servers.keys()]) {
+    if (!wanted.has(port)) closeLprServer(port);
+  }
+  for (const port of wanted) {
+    if (!servers.has(port)) bindLprServer(port);
+  }
+  return [...servers.keys()].sort((a, b) => a - b);
+}
+
+function bindLprServer(port: number) {
+  const sockets = new Set<import('node:net').Socket>();
+  const server = http.createServer((req, res) => {
     if (req.method === 'POST' && isPlateEndpoint(req.url)) {
       handleEvent(req, res).catch((e) => {
         res.statusCode = 500;
@@ -279,6 +333,17 @@ export function startLprServer(port: number) {
     res.statusCode = 404;
     res.end('not found');
   });
+  // Track sockets so closeLprServer() can actually free the port: server.close()
+  // only stops accepting NEW connections, and a /live MJPEG stream never ends on
+  // its own — the port would stay held and an immediate rebind would hit
+  // EADDRINUSE against ourselves.
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  // Registered before listen() resolves, so a second call in the same tick can't
+  // bind the same port twice. A failed bind removes it again (see 'error').
+  servers.set(port, { server, sockets });
   // Graceful port-conflict handler. Without this, EADDRINUSE bubbles up as
   // an unhandled exception and crashes the whole main process (the operator
   // sees a JavaScript-error dialog with no obvious recovery). This is a real
@@ -300,31 +365,44 @@ export function startLprServer(port: number) {
       code: err?.code ?? null,
       message: err?.message ?? String(err),
     });
-    // Discard the crashed server so subsequent startLprServer() calls can
-    // retry cleanly. Don't rethrow — that's what causes the app-crash dialog.
-    try { server?.close(); } catch { /* ignore */ }
-    server = null;
-    activePort = 0;
+    // Discard the crashed server so a later startLprServers() can retry this
+    // port cleanly. Don't rethrow — that's what causes the app-crash dialog.
+    try { server.close(); } catch { /* ignore */ }
+    if (servers.get(port)?.server === server) servers.delete(port);
   });
   server.listen(port, '0.0.0.0', () => {
     console.log(`[lpr] listening on :${port}`);
   });
 }
 
-export function stopLprServer() {
-  if (server) {
-    // Destroy any open /live MJPEG streams first. server.close() only stops
-    // accepting NEW connections — these long-lived streams would otherwise keep
-    // the socket (and the port) alive, so an immediate re-bind on the same port
-    // hits EADDRINUSE. Clients (the Live display tiles) auto-reconnect.
-    for (const set of mjpegClients.values()) {
-      for (const res of set) { try { res.destroy(); } catch { /* ignore */ } }
-      set.clear();
-    }
-    mjpegClients.clear();
-    try { server.close(); } catch { /* ignore */ }
-    server = null;
+/** Close one listener and free its port, streams and all. */
+function closeLprServer(port: number) {
+  const entry = servers.get(port);
+  if (!entry) return;
+  servers.delete(port);
+  // Destroy the sockets before closing: the long-lived /live MJPEG streams would
+  // otherwise hold the port open indefinitely. The Live display tiles
+  // auto-reconnect, so a viewer sees a blink at worst.
+  for (const socket of entry.sockets) {
+    try { socket.destroy(); } catch { /* ignore */ }
   }
+  entry.sockets.clear();
+  try { entry.server.close(); } catch { /* ignore */ }
+}
+
+/** Close every listener — app shutdown, and the harnesses' teardown. */
+export function stopLprServers() {
+  for (const port of [...servers.keys()]) closeLprServer(port);
+  for (const set of mjpegClients.values()) {
+    for (const res of set) { try { res.destroy(); } catch { /* ignore */ } }
+    set.clear();
+  }
+  mjpegClients.clear();
+}
+
+/** The ports currently bound, ascending. */
+export function activeLprPorts(): number[] {
+  return [...servers.keys()].sort((a, b) => a - b);
 }
 
 
@@ -684,5 +762,9 @@ export function diagnose() {
       if (nic.family === 'IPv4' && !nic.internal) addresses.push(nic.address);
     }
   }
-  return { port: activePort, addresses, cameras: listCameras().length };
+  const ports = activeLprPorts();
+  // `ports` is the set actually LISTENING, which is not the same as the set the
+  // cameras are configured for — a port that failed to bind is missing from it,
+  // and that gap is exactly what the Cameras page needs to show.
+  return { ports, addresses, cameras: listCameras().length };
 }

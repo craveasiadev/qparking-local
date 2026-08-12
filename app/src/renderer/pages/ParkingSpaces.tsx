@@ -52,7 +52,7 @@ const BAY_TYPE_BADGE: Record<string, string> = {
  * badge and the tallies say so, which is honest and fixed by one sync.
  */
 function bayDesignation(space: ParkingSpace): string | null {
-  return space.bayType ?? space.passType ?? null;
+  return space.bayType ?? null;
 }
 
 function fmtDate(v: string | null): string {
@@ -181,7 +181,7 @@ export function ParkingSpaces() {
     if (typeFilter !== 'all' && bayDesignation(s) !== typeFilter) return false;
     if (levelFilter !== '' && (s.level ?? '').trim() !== levelFilter) return false;
     if (q) {
-      const hay = `${s.spaceCode ?? ''} ${s.spaceNumber ?? ''} ${s.building ?? ''} ${s.level ?? ''} ${s.zone ?? ''} ${s.customerName ?? ''} ${s.vehiclePlate ?? ''} ${bayDesignation(s) ?? ''}`.toLowerCase();
+      const hay = `${s.spaceCode ?? ''} ${s.spaceNumber ?? ''} ${s.building ?? ''} ${s.level ?? ''} ${s.zone ?? ''} ${s.customerName ?? ''} ${bayDesignation(s) ?? ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
