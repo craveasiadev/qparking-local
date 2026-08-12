@@ -52,7 +52,7 @@ const SECTIONS: NavSection[] = [
     items: [
       { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
       { id: 'live', label: 'Live display', icon: MonitorPlay },
-      { id: 'sessions', label: 'Sessions', icon: ListOrdered },
+      { id: 'sessions', label: 'Parking Activity', icon: ListOrdered },
       { id: 'transactions', label: 'Transactions', icon: Receipt },
       { id: 'cameras', label: 'LPR cameras', icon: Camera },
       { id: 'terminals', label: 'Payment terminals', icon: CreditCard },
@@ -177,7 +177,7 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
     case 'exit-tng-not-configured':
       return {
         title: 'Charge refused — payment callbacks are not running',
-        detail: `${d?.reason ? `${String(d.reason).charAt(0).toUpperCase()}${String(d.reason).slice(1)}. ` : ''}Nothing was charged and the barrier stays closed: a tap would have deducted money this app could not record. Fix it in Settings, then retrigger the exit — or release the car manually from Sessions.`,
+        detail: `${d?.reason ? `${String(d.reason).charAt(0).toUpperCase()}${String(d.reason).slice(1)}. ` : ''}Nothing was charged and the barrier stays closed: a tap would have deducted money this app could not record. Fix it in Settings, then retrigger the exit — or release the car manually from Parking Activity.`,
       };
     case 'exit-charge-crashed':
       return { title: 'Payment failed unexpectedly', detail: d?.message ? String(d.message) : 'The charge crashed mid-way. Retrigger the exit.' };
@@ -190,7 +190,7 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
     case 'exit-blacklisted':
       return {
         title: `Blocked vehicle at the exit — ${d?.plate ?? 'unknown plate'}`,
-        detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}The barrier stays closed and nothing was charged — the car is held. Speak to the driver, then either lift the ban in the cloud or release the session manually from Sessions.`,
+        detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}The barrier stays closed and nothing was charged — the car is held. Speak to the driver, then either lift the ban in the cloud or release the session manually from Parking Activity.`,
       };
     case 'entry-blacklisted':
       return {
@@ -256,7 +256,7 @@ export function App() {
         const m = describeWarning(d?.kind, d);
         pushAlert({ tone: 'error', title: m.title, detail: m.detail });
       } else if (kind === 'exit-declined') {
-        pushAlert({ tone: 'error', title: 'Card declined', detail: 'The payment was declined — the barrier stays closed. Ask the driver to retry, or release the car manually from Sessions.' });
+        pushAlert({ tone: 'error', title: 'Card declined', detail: 'The payment was declined — the barrier stays closed. Ask the driver to retry, or release the car manually from Parking Activity.' });
       }
     });
     return off;
@@ -293,7 +293,7 @@ export function App() {
         severity: 'medium',
         outcome: 'ok',
         resourceType: 'app_settings',
-        description: `Dev mode ${next ? 'ENABLED' : 'disabled'}${next ? ' — the session simulator is now available on the Sessions page' : ''}`,
+        description: `Dev mode ${next ? 'ENABLED' : 'disabled'}${next ? ' — the session simulator is now available on the Parking Activity page' : ''}`,
         changes: { devMode: next },
       }).catch(() => null);
       setDevHint(next ? 'Dev mode ON' : 'Dev mode OFF');

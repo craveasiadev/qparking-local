@@ -419,7 +419,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            Sessions
+            Parking Activity
             <InfoTip title="About this page" kind="info">
               One row per car visit: when it came in, when it left, how long it
               stayed and what it paid. Click a row to see the camera photos and
