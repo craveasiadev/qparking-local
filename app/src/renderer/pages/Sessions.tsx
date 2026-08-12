@@ -139,25 +139,23 @@ function DevSimulator({ lanes, onSessionCreated }: { lanes: ParkingLane[]; onSes
     setBusy('entry');
     try {
       const r = await window.bridge.simulateEntry(lid, plate.trim(), toIso(entryLocal));
-      if (!r?.ok) push('warn', `✗ entry: ${r?.error ?? 'failed'}`);
-      else {
+      // Three distinct outcomes, and they used to be reported as one. `ok` only
+      // ever meant "the plate event was dispatched", so a refusal printed "Entry
+      // stored … (session #undefined)" right under its own warning — and wrote a
+      // session.entry audit row for a car that never got in.
+      if (!r?.ok) {
+        push('warn', `✗ entry: ${r?.error ?? 'failed'}`);
+      } else if (r.refused) {
+        push('warn', `✗ entry refused — ${r.refused} · nothing stored, barrier not pulsed (see the flow log for the reason)`);
+      } else if (r.sessionId) {
         push('in', `Entry stored — ${fmtDateTime(toIso(entryLocal))} (session #${r.sessionId})`);
-        // Same local audit write as the other session actions on this page
-        // (delete / manual release / edit) — lands in the Activity Log
-        // immediately, stamped at the moment the button was pressed.
-        await window.bridge.insertActivityLog({
-          eventKey: 'session.entry',
-          action: 'entry',
-          category: 'session',
-          severity: 'high',
-          siteId: site?.id ?? null,
-          outcome: 'ok',
-          resourceType: 'parking_record',
-          resourceId: String(r.sessionId),
-          description: `Entry · ${plate.trim().toUpperCase()} · stamped ${fmtDateTime(toIso(entryLocal))}`,
-        });
         refreshRef.current?.();
+      } else {
+        push('info', `Entry dispatched — no session and no refusal within 3s; check the flow log`);
       }
+      // No audit row written here. The flow audits session.entry itself the moment
+      // the barrier goes up (see index.ts), so this one was a duplicate on success
+      // — and on a refusal it recorded an entry that never happened.
     } finally { setBusy(null); }
   }
 

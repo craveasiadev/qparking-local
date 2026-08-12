@@ -238,7 +238,10 @@ export interface BridgeApi {
 	 *  that gate's controller. */
 	retriggerSessionPaymentByPlate(plate: string, laneId?: number | null): Promise<{ ok: boolean; error?: string }>;
 	/** DEV/QA: open a session stamped with a chosen entry time (no gate/terminal). */
-	simulateEntry(laneId: number, plate: string, entryIso: string): Promise<{ ok: boolean; error?: string; sessionId?: number }>;
+	/** `ok` means the event was dispatched. What the FLOW decided is `sessionId`
+	 *  (a car got in) or `refused` (the guard that turned it away) — both absent
+	 *  when neither arrived inside the wait, which the flow log explains. */
+	simulateEntry(laneId: number, plate: string, entryIso: string): Promise<{ ok: boolean; error?: string; sessionId?: number; refused?: string }>;
 	/** DEV/QA: run the real exit flow (fee + terminal) at a chosen exit time. */
 	simulateExit(laneId: number, plate: string, exitIso: string): Promise<{ ok: boolean; error?: string; cameraId?: number }>;
 	/** Read a session capture (entry/exit image) off disk as base64 for display —

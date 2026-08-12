@@ -4,7 +4,7 @@
     {
       "name": "first save side-effects finish inside 1000ms",
       "pass": true,
-      "detail": "28ms"
+      "detail": "16ms"
     },
     {
       "name": "a repeat save is not re-charged for the failed connect (<1000ms)",
@@ -14,7 +14,7 @@
     {
       "name": "editing the host still returns immediately (<1000ms)",
       "pass": true,
-      "detail": "13ms"
+      "detail": "7ms"
     },
     {
       "name": "deleting a camera returns immediately (<1000ms)",
@@ -24,7 +24,7 @@
     {
       "name": "a cold pulse on an unreachable camera gives up inside 2000ms",
       "pass": true,
-      "detail": "540ms"
+      "detail": "531ms"
     },
     {
       "name": "…and reports the camera as unreachable rather than a bare open_failed",
@@ -45,7 +45,7 @@
   "timings": [
     {
       "label": "first save (cold: may load the SDK)",
-      "ms": 28,
+      "ms": 16,
       "note": ""
     },
     {
@@ -55,7 +55,7 @@
     },
     {
       "label": "save with a changed host (new connect attempt)",
-      "ms": 13,
+      "ms": 7,
       "note": ""
     },
     {
@@ -65,7 +65,7 @@
     },
     {
       "label": "cold pulseBarrier on an unreachable camera",
-      "ms": 540,
+      "ms": 531,
       "note": "{\"ok\":false,\"error\":\"camera unreachable at 192.168.243.244:80 (ETIMEDOUT)\",\"via\":\"temp\"}"
     }
   ],

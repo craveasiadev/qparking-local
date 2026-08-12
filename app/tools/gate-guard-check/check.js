@@ -337,9 +337,23 @@ try {
   check('access mode persists as pass_only', db.getCamera(poIn.id).accessMode === 'pass_only');
   check('access mode defaults to open on an ordinary camera', db.getCamera(cam.id).accessMode === 'open');
 
+  // Dates relative to TODAY, not literals: an upcoming pass has to still be
+  // upcoming whenever this harness is run.
+  const dayKey = (offsetDays) => {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  const TOMORROW = dayKey(1);
+
   db.replaceAllSeasonPasses([
     mkPlatePass('p-res', 'RES0001', { passType: 'resident', startDate: null, endDate: null }),
     mkPlatePass('p-gone', 'OLD0099', { startDate: '2020-01-01', endDate: '2020-12-31' }),
+    // Sold, paid for, starts TOMORROW. The cloud sends it ahead of time so the
+    // operator can see it on the Vehicles page; the barrier must still refuse it
+    // until its start date, which is what these checks pin.
+    mkPlatePass('p-soon', 'SOON0001', { startDate: TOMORROW, endDate: dayKey(31) }),
     mkPlatePass('p-ban', 'BAN0042', { passType: 'resident', startDate: null, endDate: null }),
     mkPlatePass('p-lapsed-a', 'PART0011'),
     mkPlatePass('p-lapsed-b', 'REN0012', { passType: 'free_access', isFree: true }),
@@ -369,6 +383,45 @@ try {
   // 3. Expired pass is not a pass (operator decision 2026-08-05: they renew).
   readOn(poIn.id, 'OLD0099', 'entry');
   check('pass-only: an EXPIRED pass is refused like any stranger', !isInside('OLD0099'));
+
+  // 3b. A pass that has not STARTED yet is not a pass either. This is the case
+  // that only became reachable once the cloud began sending upcoming passes
+  // (2026-08-12): before that the box never held one, so "does the gate check the
+  // start date" was untestable here — and unanswerable for an operator, who saw
+  // the holder's cars listed with no pass at all.
+  readOn(poIn.id, 'SOON0001', 'entry');
+  check('pass-only: a pass that starts TOMORROW is refused today', !isInside('SOON0001'));
+  check('pass-only: …and reports entry-not-authorised, not a silent drop',
+    warned.some((w) => w.kind === 'entry-not-authorised' && w.plate === 'SOON0001'));
+  check('lookup: an upcoming pass is invisible to the gate right now',
+    db.findSeasonPassByPlate('SOON0001') === null);
+  // …and the very same cached row IS honoured once its term begins, so what was
+  // refused above is the DATE and nothing else.
+  check('lookup: …but honoured for a stay on its start date',
+    db.findSeasonPassByPlate('SOON0001', {
+      entryAt: `${TOMORROW}T09:00:00+08:00`,
+      exitAt: `${TOMORROW}T18:00:00+08:00`,
+    })?.passId === 'p-soon');
+  check('lookup: …and it is still the cache that holds it, so the page can show it',
+    db.listSeasonPasses().some((row) => row.plateNumber === 'SOON0001' && row.startDate === TOMORROW));
+
+  // 3c. The DEV SIMULATOR, at a date the pass IS valid. This is the exact case an
+  // operator reported: entry time set to the pass's start date, on a pass-only
+  // lane, refused with entry-not-authorised — because the pass question was asked
+  // about "now" while the session was stamped for the 13th.
+  const simmed = await flow.simulateEntryAt(poLane.id, 'SOON0001', `${TOMORROW}T12:00:00+08:00`);
+  check('simulator: an entry stamped on the pass start date is ADMITTED',
+    !!simmed.sessionId && !simmed.refused, JSON.stringify(simmed));
+  check('simulator: …and it returns the real session id, not ok-with-nothing',
+    simmed.sessionId === db.findOpenSessionByPlate('SOON0001')?.id, JSON.stringify(simmed));
+  // …while the same simulator at TODAY's date is still refused, and says so
+  // instead of reporting a stored session.
+  db.deleteSession(db.findOpenSessionByPlate('SOON0001').id);
+  const simmedToday = await flow.simulateEntryAt(poLane.id, 'SOON0001', new Date().toISOString());
+  check('simulator: an entry stamped TODAY is refused, before the pass starts',
+    simmedToday.refused === 'entry-not-authorised' && !simmedToday.sessionId, JSON.stringify(simmedToday));
+  check('simulator: …and no session is left behind for it',
+    !db.findOpenSessionByPlate('SOON0001'));
 
   // 4. Blacklist still wins over a valid pass — order matters.
   db.replaceAllBlockedPlates([{ plateNumber: 'BAN0042', vehicleId: 'v-1', reason: 'towed', fetchedAt: nowIso }]);

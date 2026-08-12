@@ -301,13 +301,26 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
   // now" — see cloud-sync.ts. On a deny-by-default gate that means a brand-new
   // resident is refused until the operator syncs.
   const camera = getCamera(event.cameraId);
-  // No window argument = "valid at this instant" (see findSeasonPassByPlate).
-  // Looked up ONCE here: both the pass_only gate and the quota check below
-  // need the same answer, and asking twice invites them to disagree.
-  const pass = findSeasonPassByPlate(event.plate);
+  // The pass is judged AT THE ENTRY INSTANT. For a real read that is "now"; for
+  // the dev simulator it is the entry time typed into it.
+  //
+  // It used to be "now" unconditionally, which made a pass that starts tomorrow
+  // impossible to QA: the simulator stamped the session 13 Aug, the pass question
+  // was asked about today, and a legitimate holder came back
+  // entry-not-authorised. The session was then still logged as stored, so the
+  // simulator flatly contradicted itself.
+  //
+  // Looked up ONCE here: both the pass_only gate and the quota check below need
+  // the same answer, and asking twice invites them to disagree.
+  const entryInstant = event.entryAtOverride ?? null;
+  const pass = findSeasonPassByPlate(
+    event.plate,
+    entryInstant ? { entryAt: entryInstant, exitAt: entryInstant } : undefined,
+  );
 
   if (camera?.accessMode === 'pass_only' && !pass) {
-    flog(`ENTRY REFUSED (NO PASS): plate=${event.plate} camera="${camera.name}" is set to Only Pass Allow and this plate holds no pass valid right now → no session created, barrier NOT pulsed. Issue a pass in the cloud and press Sync now, or turn the toggle off.`);
+    const when = entryInstant ? `valid at the simulated entry time (${entryInstant})` : 'valid right now';
+    flog(`ENTRY REFUSED (NO PASS): plate=${event.plate} camera="${camera.name}" is set to Only Pass Allow and this plate holds no pass ${when} → no session created, barrier NOT pulsed. Issue a pass in the cloud and press Sync now, or turn the toggle off.`);
     parkingEvents.emit('warning', {
       kind: 'entry-not-authorised',
       plate: event.plate,
@@ -1435,10 +1448,15 @@ function laneCameraFacing(laneId: number, direction: 'entry' | 'exit') {
  * silently drifted from the real flow — most visibly, it never pulsed the
  * barrier. Refusals now surface the same way a real refusal does: as a
  * parkingEvents 'warning' the UI shows as a staff alert.
+ *
+ * It also used to return `{ ok: true }` the instant it dispatched the event, which
+ * meant "the event was sent", not "a car got in" — so the UI logged "Entry stored
+ * … (session #undefined)" directly underneath a refusal warning. It now waits for
+ * the flow's own outcome and returns the session id, or the refusal.
  */
 export async function simulateEntryAt(
   laneId: number, plate: string, entryIso: string,
-): Promise<{ ok: boolean; error?: string; cameraId?: number }> {
+): Promise<{ ok: boolean; error?: string; cameraId?: number; sessionId?: number; refused?: string }> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'lane_not_found' };
   const norm = normalisePlate(plate);
@@ -1460,8 +1478,42 @@ export async function simulateEntryAt(
     entryAtOverride: new Date(entryMs).toISOString(),
   };
   flog(`DEV SIMULATE ENTRY: lane="${lane.name}" plate=${norm} entryAt=${entryIso} via camera=${cam.id} "${cam.name}" — dispatching as a real plate event`);
+  // Listen BEFORE dispatching: handlePlateEvent can resolve within the same tick
+  // chain, and a listener attached afterwards would miss the outcome and report a
+  // timeout on a perfectly good entry.
+  const outcome = awaitEntryOutcome(norm);
   lprEvents.emit('plate', event);
-  return { ok: true, cameraId: cam.id };
+  return { ok: true, cameraId: cam.id, ...(await outcome) };
+}
+
+/**
+ * What the flow decided about this plate's entry — the session it opened, or the
+ * refusal it emitted. Resolves empty if neither arrives, which is not an error in
+ * itself: an earlier guard (rescan window, lane busy) can drop a read without a
+ * warning, and the flow log says which.
+ *
+ * Exists so the dev simulator can report the truth instead of assuming success.
+ */
+function awaitEntryOutcome(plate: string, timeoutMs = 3_000): Promise<{ sessionId?: number; refused?: string }> {
+  return new Promise((resolve) => {
+    const finish = (result: { sessionId?: number; refused?: string }) => {
+      clearTimeout(timer);
+      parkingEvents.off('entry', onEntry);
+      parkingEvents.off('warning', onWarning);
+      resolve(result);
+    };
+    const onEntry = (payload: any) => {
+      if (normalisePlate(String(payload?.session?.plate ?? '')) !== plate) return;
+      finish({ sessionId: payload?.session?.id });
+    };
+    const onWarning = (payload: any) => {
+      if (normalisePlate(String(payload?.plate ?? '')) !== plate) return;
+      finish({ refused: String(payload?.kind ?? 'refused') });
+    };
+    const timer = setTimeout(() => finish({}), timeoutMs);
+    parkingEvents.on('entry', onEntry);
+    parkingEvents.on('warning', onWarning);
+  });
 }
 
 /**
