@@ -14,7 +14,7 @@
     {
       "name": "…and its payload omits site_id rather than blocking on it",
       "pass": true,
-      "detail": "{\"plate_number\":\"NOPOLICY1\",\"entry_time\":\"2026-08-12T09:09:33.020Z\"}"
+      "detail": "{\"plate_number\":\"NOPOLICY1\",\"entry_time\":\"2026-08-13T00:59:08.126Z\"}"
     },
     {
       "name": "…and carries the plate the cloud correlates by",
@@ -34,7 +34,7 @@
     {
       "name": "markSyncOk stamps cloud_synced_at on the session",
       "pass": true,
-      "detail": "2026-08-12 09:09:33.023"
+      "detail": "2026-08-13 00:59:08.128"
     },
     {
       "name": "…clears any previous error",
@@ -54,7 +54,7 @@
     {
       "name": "recording the exit makes the session need pushing again",
       "pass": true,
-      "detail": "updatedAt=2026-08-12 09:09:33.024 cloudSyncedAt=2026-08-12 09:09:33.023"
+      "detail": "updatedAt=2026-08-13 00:59:08.128 cloudSyncedAt=2026-08-13 00:59:08.128"
     },
     {
       "name": "…while KEEPING the previous acknowledgement (stale, not absent)",
@@ -69,7 +69,7 @@
     {
       "name": "…and the exit fields the cloud page renders",
       "pass": true,
-      "detail": "{\"plate_number\":\"NOPOLICY1\",\"entry_time\":\"2026-08-12T09:09:33.020Z\",\"exit_time\":\"2026-08-12T10:09:33.020Z\",\"fee_amount\":\"0.00\",\"duration_minutes\":60,\"status\":\"exited\",\"free_reason\":\"no-policy\"}"
+      "detail": "{\"plate_number\":\"NOPOLICY1\",\"entry_time\":\"2026-08-13T00:59:08.126Z\",\"exit_time\":\"2026-08-13T01:59:08.126Z\",\"fee_amount\":\"0.00\",\"duration_minutes\":60,\"status\":\"exited\",\"free_reason\":\"no-policy\"}"
     },
     {
       "name": "markSyncFailed records the reason on the session",
