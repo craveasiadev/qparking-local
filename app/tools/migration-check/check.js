@@ -227,7 +227,7 @@ try {
     // The surviving meaning of 'dual': a LANE with both an entry and an exit
     // camera. Retiring the camera value must not have taken this with it.
     if (mixed) {
-      const lane = dbmod.upsertLane({ name: 'Shared barrier', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+      const lane = dbmod.upsertLane({ name: 'Shared barrier', policyId: null, terminalId: null, enabled: true });
       const entryCam = dirs.find((c) => c.name === 'North entry');
       const exitCam = dirs.find((c) => c.name === 'North exit');
       const ids = db.prepare('SELECT id, name FROM cameras').all();

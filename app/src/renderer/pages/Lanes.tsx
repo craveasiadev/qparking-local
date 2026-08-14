@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Cpu, Search, Monitor } from 'lucide-react';
+import { Plus, Trash2, Map as MapIcon, X, Camera as CamIcon, CreditCard, Gauge, Search, Monitor } from 'lucide-react';
 import type { ParkingLane, PaymentTerminal, RatePolicy, LprCamera, LcdDisplay } from '@shared/types';
 import { useConfirm } from '../hooks/useConfirm';
 import { usePagedList } from '../hooks/usePagination';
@@ -11,7 +11,7 @@ import { useCurrentSite } from '../context/SiteContext';
 const PAGE_SIZE = 10;
 
 const EMPTY: Omit<ParkingLane, 'id' | 'externalId'> = {
-  name: '', policyId: null, terminalId: null, lcdId: null, gateRelayAddress: null, enabled: true,
+  name: '', policyId: null, terminalId: null, lcdId: null, enabled: true,
 };
 
 /** A lane's direction is derived from its cameras (the single source of
@@ -218,7 +218,6 @@ export function Lanes() {
                   {showPlan && <Chip icon={Gauge}>plan: {s?.policyName ?? 'site default'}</Chip>}
                   {showTerm && <Chip icon={CreditCard} muted={!t}>device: {t?.name ?? 'none'}</Chip>}
                   {l.lcdId != null && <Chip icon={Monitor}>lcd: {lcds.find((d) => d.id === l.lcdId)?.name ?? 'unknown'}</Chip>}
-                  {l.gateRelayAddress && <Chip icon={Cpu} mono>{l.gateRelayAddress}</Chip>}
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -349,7 +348,6 @@ export function Lanes() {
                   <p className="text-[11px] text-gray-500">Give each lane its own panel. Two lanes sharing one screen would overwrite each other's fare mid-transaction.</p>
                 )}
               </div>
-              <Field label="Gate relay (optional)"><input className="input font-mono" value={editing.gateRelayAddress ?? ''} onChange={(e) => setEditing({ ...editing, gateRelayAddress: e.target.value })} placeholder="GPIO addr / relay URL" /></Field>
               <Field label="Enabled">
                 <label className="inline-flex items-center gap-2 mt-2 text-sm"><input type="checkbox" checked={editing.enabled ?? true} onChange={(e) => setEditing({ ...editing, enabled: e.target.checked })} /> active</label>
               </Field>

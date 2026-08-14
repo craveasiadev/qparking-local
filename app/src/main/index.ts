@@ -465,7 +465,7 @@ function wireRendererEvents() {
       sendToRenderer('log', {
         terminalId: 0,
         direction: 'error',
-        message: `BLACKLISTED plate ${p?.plate} — ${kind === 'entry-blacklisted' ? 'entered (alert only; entry barrier is not app-driven)' : 'exit refused, car held at barrier'}`,
+        message: `BLACKLISTED plate ${p?.plate} — ${kind === 'entry-blacklisted' ? 'entry refused, no session and the barrier was NOT pulsed' : 'exit refused, car held at barrier'}`,
         payload: p,
       });
       // Audit trail: a refused gate attempt is exactly what the Activity Log

@@ -287,9 +287,11 @@ function applySchema(db: Database.Database) {
       policy_id TEXT,
       terminal_id INTEGER,
       lcd_id INTEGER,
-      gate_relay_address TEXT,
       enabled INTEGER NOT NULL DEFAULT 1
     );
+    -- No gate_relay_address: dropped 2026-08-14 (see ParkingLane in schema.ts).
+    -- Boxes created before then keep the orphan column; it is nullable and no
+    -- statement names it any more, so it is simply never written or read.
 
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1530,7 +1532,6 @@ function rowToLane(row: any): ParkingLane {
 		// column existed SQLite yields undefined, which would serialise across IPC
 		// as a missing key and break the renderer's `lcdId ?? ''` select binding.
 		lcdId: row.lcd_id ?? null,
-		gateRelayAddress: row.gate_relay_address,
 		enabled: !!row.enabled,
 	};
 }
@@ -1568,12 +1569,11 @@ export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?:
 	const db = getDb();
 	if (lane.id) {
 		// external_id is immutable device identity — never rewritten on edit.
-		db.prepare(`UPDATE lanes SET name=?, policy_id=?, terminal_id=?, lcd_id=?, gate_relay_address=?, enabled=? WHERE id=?`).run(
+		db.prepare(`UPDATE lanes SET name=?, policy_id=?, terminal_id=?, lcd_id=?, enabled=? WHERE id=?`).run(
 			lane.name,
 			lane.policyId,
 			lane.terminalId,
 			lane.lcdId ?? null,
-			lane.gateRelayAddress,
 			lane.enabled ? 1 : 0,
 			lane.id,
 		);
@@ -1582,8 +1582,8 @@ export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?:
 	}
 	const externalId = lane.externalId ?? `dev-${randomUUID()}`;
 	const info = db
-		.prepare(`INSERT INTO lanes (external_id, name, policy_id, terminal_id, lcd_id, gate_relay_address, enabled) VALUES (?,?,?,?,?,?,?)`)
-		.run(externalId, lane.name, lane.policyId, lane.terminalId, lane.lcdId ?? null, lane.gateRelayAddress, lane.enabled ? 1 : 0);
+		.prepare(`INSERT INTO lanes (external_id, name, policy_id, terminal_id, lcd_id, enabled) VALUES (?,?,?,?,?,?)`)
+		.run(externalId, lane.name, lane.policyId, lane.terminalId, lane.lcdId ?? null, lane.enabled ? 1 : 0);
 	const id = Number(info.lastInsertRowid);
 	syncLaneLinkExternalIds(id);
 	return getLane(id)!;
@@ -1686,7 +1686,6 @@ export interface CloudLcdRow {
 export interface CloudLaneRow {
 	externalId: string;
 	name: string;
-	gateRelayAddress: string | null;
 	enabled: boolean;
 	terminalExternalId: string | null;
 	/** The panel this lane drives. null = the cloud has no link stored (an older
@@ -1755,14 +1754,14 @@ export function reconcileLanesFromCloud(rows: CloudLaneRow[]): void {
 		// terminal_id / lcd_id left for relinkDevices(); direction is derived from
 		// cameras.
 		const upd = db.prepare(
-			"UPDATE lanes SET name=?, policy_id=?, gate_relay_address=?, enabled=?, terminal_external_id=?, lcd_external_id=? WHERE external_id=?",
+			"UPDATE lanes SET name=?, policy_id=?, enabled=?, terminal_external_id=?, lcd_external_id=? WHERE external_id=?",
 		);
 		const ins = db.prepare(
-			"INSERT INTO lanes (external_id, name, policy_id, terminal_id, gate_relay_address, enabled, terminal_external_id, lcd_external_id) VALUES (?,?,?,NULL,?,?,?,?)",
+			"INSERT INTO lanes (external_id, name, policy_id, terminal_id, enabled, terminal_external_id, lcd_external_id) VALUES (?,?,?,NULL,?,?,?)",
 		);
 		for (const r of rows) {
-			if (upd.run(r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId, r.lcdExternalId, r.externalId).changes === 0) {
-				ins.run(r.externalId, r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId, r.lcdExternalId);
+			if (upd.run(r.name, r.policyId, r.enabled ? 1 : 0, r.terminalExternalId, r.lcdExternalId, r.externalId).changes === 0) {
+				ins.run(r.externalId, r.name, r.policyId, r.enabled ? 1 : 0, r.terminalExternalId, r.lcdExternalId);
 			}
 		}
 	});

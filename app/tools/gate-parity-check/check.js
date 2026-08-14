@@ -47,7 +47,7 @@ const check = (name, pass, detail = null) => out.checks.push({ name, pass, detai
 			exitGracePeriodSeconds: 90,
 		});
 
-		const lane = db.upsertLane({ name: 'L1', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+		const lane = db.upsertLane({ name: 'L1', policyId: null, terminalId: null, enabled: true });
 		const cam = db.upsertCamera({
 			name: 'C1', laneId: lane.id, direction: 'entry', host: '10.0.0.9',
 			deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,

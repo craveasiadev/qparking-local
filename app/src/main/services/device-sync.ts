@@ -80,7 +80,6 @@ async function fetchCloudLanes(): Promise<CloudLaneRow[]> {
   return (data.data ?? []).map((r: any): CloudLaneRow => ({
     externalId: String(r.external_id),
     name: String(r.name ?? ''),
-    gateRelayAddress: r.gate_relay_address ?? null,
     enabled: !!r.enabled,
     terminalExternalId: r.terminal_external_id ?? null,
     // Absent on a cloud that predates the LCD mirror — reads as "no panel",

@@ -213,9 +213,12 @@ export interface ParkingLane {
    *  terminal this is useful in BOTH directions: an entry lane shows the plate
    *  and a welcome, an exit lane shows the plate and the fare. */
   lcdId: number | null;
-  /** Optional GPIO/relay address for the gate barrier. */
-  gateRelayAddress: string | null;
   enabled: boolean;
+  // REMOVED 2026-08-14: `gateRelayAddress` — an optional "GPIO addr / relay URL"
+  // that nothing ever read. The barrier is raised by pulsing the LPR camera's
+  // own onboard IO relay (camera-relay.ts, keyed on the camera's host +
+  // credentials), so a lane-level relay address had no consumer on either side:
+  // the cloud stored it, mirrored it back, and never showed it either.
 }
 
 // ─── sessions ────────────────────────────────────────────────────────────────

@@ -96,7 +96,6 @@ export async function pushLane(laneId: number): Promise<PushResult> {
     terminal_external_id: terminal ? terminal.externalId : null,
     lcd_external_id: lcd ? lcd.externalId : null,
     rate_policy_id: lane.policyId,
-    gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,
   });
 }

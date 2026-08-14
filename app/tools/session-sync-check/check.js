@@ -43,7 +43,7 @@ try {
   // ─── 1. a lane with NO rate policy still queues ────────────────────────────
   // Deliberately the exact shape of the box that lost its sessions: lane has no
   // policyId, and rate_policies is empty so there's no site default either.
-  const bareLane = db.upsertLane({ name: 'No Policy', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const bareLane = db.upsertLane({ name: 'No Policy', policyId: null, terminalId: null, enabled: true });
   const noPolicy = db.getSiteDefaultRatePolicy?.() ?? null;
   check('precondition: no site-default rate policy exists', !noPolicy, JSON.stringify(noPolicy));
 
@@ -149,7 +149,7 @@ try {
   // only on (camera, plate) let the imageless post win and dropped the
   // picture-bearing one, so plates kept working while every session silently
   // lost its photo. attachSessionCapture is what puts the late half back.
-  const capLane = db.upsertLane({ name: 'Capture', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const capLane = db.upsertLane({ name: 'Capture', policyId: null, terminalId: null, enabled: true });
 
   // Entry: the session already exists when the picture lands.
   const cap1 = db.createEntrySession('CAPTURE01', capLane.id, 7, null);

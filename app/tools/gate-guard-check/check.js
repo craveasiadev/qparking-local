@@ -32,15 +32,16 @@ try {
   const flow = require('../../dist/main/services/parking-flow');
   const { lprEvents } = require('../../dist/main/services/lpr-webhook');
 
-  // Keep every outward-facing side effect off: no cloud creds, no turnstile, no
-  // payment device. We only care about whether a session row gets created.
+  // Keep every outward-facing side effect off: no cloud creds, no barrier
+  // relay, no payment device. We only care about whether a session row gets
+  // created.
   db.saveSettings({
     qparkingBaseUrl: '', qparkingApiKey: '',
     tngEnabled: false,
     exitGracePeriodSeconds: 90,
   });
 
-  const lane = db.upsertLane({ name: 'L1', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const lane = db.upsertLane({ name: 'L1', policyId: null, terminalId: null, enabled: true });
   const cam = db.upsertCamera({
     name: 'C1', laneId: lane.id, direction: 'entry', host: '10.0.0.9',
     deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
@@ -257,7 +258,7 @@ try {
     newDayFixedFeeCents: null, rateBasis: 'occupancy', flatMultiRate: 'sum',
     firstBlockOncePerEntry: false, policyDailyCapCents: null, isSiteDefault: false,
   });
-  const lane2 = db.upsertLane({ name: 'L2', policyId: 'pass-tail', terminalId: null, gateRelayAddress: null, enabled: true });
+  const lane2 = db.upsertLane({ name: 'L2', policyId: 'pass-tail', terminalId: null, enabled: true });
   const camExit = db.upsertCamera({
     name: 'C2', laneId: lane2.id, direction: 'exit', host: '10.0.0.10',
     deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
@@ -323,7 +324,7 @@ try {
   // A 'pass_only' camera asks ONE question at both ends: does this plate hold a
   // pass valid right now? Everything else — sessions, fees, terminals — is
   // irrelevant on such a lane.
-  const poLane = db.upsertLane({ name: 'L-PASSONLY', policyId: 'pass-tail', terminalId: null, gateRelayAddress: null, enabled: true });
+  const poLane = db.upsertLane({ name: 'L-PASSONLY', policyId: 'pass-tail', terminalId: null, enabled: true });
   const poIn = db.upsertCamera({
     name: 'PO-IN', laneId: poLane.id, direction: 'entry', accessMode: 'pass_only',
     host: '10.0.0.20', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
@@ -480,7 +481,7 @@ try {
   // by WHICH event fires: 'entry' / 'exit-completed' mean the boom rises, a
   // 'warning' means it stays down. These checks pin that there is no second
   // opinion left to consult — no payload flag, no camera setting.
-  const acLane = db.upsertLane({ name: 'L-APPCTRL', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const acLane = db.upsertLane({ name: 'L-APPCTRL', policyId: null, terminalId: null, enabled: true });
   const acIn = db.upsertCamera({
     name: 'AC-IN', laneId: acLane.id, direction: 'entry',
     accessMode: 'open',
@@ -537,13 +538,13 @@ try {
   // entry-only lane: it drove a real exit through the entry camera, closing the
   // session and pulsing the entry boom at a gate no car can leave through.
   // Reported from QA: "even if I select the entry lane, it still allows exit."
-  const inOnly = db.upsertLane({ name: 'L-IN-ONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const inOnly = db.upsertLane({ name: 'L-IN-ONLY', policyId: null, terminalId: null, enabled: true });
   const inOnlyCam = db.upsertCamera({
     name: 'IN-ONLY', laneId: inOnly.id, direction: 'entry', accessMode: 'open',
     host: '10.0.0.32', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
     webhookSecret: null, enabled: true,
   });
-  const outOnly = db.upsertLane({ name: 'L-OUT-ONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true });
+  const outOnly = db.upsertLane({ name: 'L-OUT-ONLY', policyId: null, terminalId: null, enabled: true });
   db.upsertCamera({
     name: 'OUT-ONLY', laneId: outOnly.id, direction: 'exit', accessMode: 'open',
     host: '10.0.0.33', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,

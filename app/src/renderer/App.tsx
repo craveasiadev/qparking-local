@@ -207,7 +207,7 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
     case 'entry-blacklisted':
       return {
         title: `Blocked vehicle at the entry — ${d?.plate ?? 'unknown plate'}`,
-        detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}Entry refused — no session was opened and the turnstile stayed down. If the vehicle barrier let it through anyway it will still be refused at the exit. Lift the ban in the cloud to admit it.`,
+        detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}Entry refused — no session was opened and the barrier was not pulsed. If the camera's own auto-open rule let the car through anyway it will still be refused at the exit. Lift the ban in the cloud to admit it.`,
       };
     default:
       return { title: 'Parking-flow warning', detail: kind || 'Unknown warning' };

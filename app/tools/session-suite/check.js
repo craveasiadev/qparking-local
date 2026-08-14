@@ -113,7 +113,7 @@ async function main() {
   const terminalOff = db.upsertTerminal({ name: 'W4G-off', host: '10.0.0.51', port: 80, timeoutSeconds: 30, enabled: false });
 
   const lane = (name, policyId, terminalId) => db.upsertLane({
-    name, policyId, terminalId, gateRelayAddress: null, enabled: true,
+    name, policyId, terminalId, enabled: true,
   });
   const L = {
     paid: lane('L-PAID', 'charge', terminal.id),          // charges, device wired
@@ -839,7 +839,7 @@ async function main() {
   // simulator resolves the ENTRY-facing camera on the lane, so a lane that
   // already has an ordinary entry camera would answer for that one instead.
   const simPassLane = db.upsertLane({
-    name: 'L-SIM-PASSONLY', policyId: null, terminalId: null, gateRelayAddress: null, enabled: true,
+    name: 'L-SIM-PASSONLY', policyId: null, terminalId: null, enabled: true,
   });
   const simPassCam = db.upsertCamera({
     name: 'SIM-PASSONLY', laneId: simPassLane.id, direction: 'entry',

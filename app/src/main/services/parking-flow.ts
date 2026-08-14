@@ -264,11 +264,11 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
 
   // ─── Blacklist at entry ──────────────────────────────────────────────
   // A banned plate opens NOTHING: no session row, no cloud mirror, no WELCOME,
-  // no turnstile. Checked before createEntrySession so the refusal leaves no
+  // no barrier pulse. Checked before createEntrySession so the refusal leaves no
   // trace to clean up — "blocked" reading as "Entry stored" in the table was
   // exactly the wrong signal.
   //
-  // The car may still roll in past a camera-driven barrier this app can't veto,
+  // The car may still roll in if the camera's own auto-open rule is left on,
   // so the safety net is at the other end: handleExit checks the deny list
   // BEFORE it requires an open session, meaning a banned plate is identified as
   // BLOCKED at the exit whether or not an entry was ever recorded.

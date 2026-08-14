@@ -39,7 +39,7 @@ Captured plate images go to `%APPDATA%\qparking-local\plates\<date>\`.
 When a car **enters**:
 1. LPR camera reads the plate, POSTs to `/lpr/event`.
 2. We create a parking session (plate + entry timestamp).
-3. (Optional) pulse the gate-relay / raise the turnstile.
+3. Raise the barrier by pulsing the LPR camera's onboard IO relay.
 
 When a car **exits**:
 1. Exit-lane LPR camera reads the plate, POSTs to `/lpr/event`.

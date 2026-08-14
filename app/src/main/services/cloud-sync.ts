@@ -943,9 +943,9 @@ function announceRefreshedMirrors(results: Record<string, SyncResult>): void {
 // terminals) stays manual; see the boot comment in index.ts.
 
 // Remote gate-open command poll REMOVED: the cloud can't reach a site's LAN,
-// and the poll-based dispatch only fired the gate simulator + face turnstile —
-// it never drove the real LPR barrier relay — so it did nothing useful for a
-// physical-barrier site. Gates open locally (entry / paid-exit / manual).
+// and the poll-based dispatch only fired the gate simulator — it never drove
+// the real LPR barrier relay — so it did nothing useful for a physical-barrier
+// site. Gates open locally (entry / paid-exit / manual).
 
 // ─── push: rate edits up to the SaaS ─────────────────────────────────────────
 
