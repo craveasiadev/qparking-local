@@ -3,6 +3,7 @@ import { RefreshCw, AlertCircle, Loader2, ChevronDown, ChevronRight, Clock, Star
 import { InfoTip } from '../components/InfoTip';
 import type { RatePolicy, TariffRule } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { fmtDateTime, dateInAppTz, APP_TZ } from '../lib/datetime';
@@ -20,6 +21,9 @@ export function ParkingPolicies() {
 
   async function refresh() { setList(await window.bridge.listRatePolicies()); }
   useEffect(() => { void refresh(); }, []);
+  // Rates only come down on a FULL pull (boot / "Sync now" / rebind), so this
+  // is the one moment the list can change under the operator's feet.
+  useReloadOnCloudSync(['policies'], refresh);
 
   const [sync, syncing] = useAsyncAction(async () => {
     const r = await window.bridge.syncRatePoliciesNow();

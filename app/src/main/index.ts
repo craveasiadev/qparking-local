@@ -733,6 +733,12 @@ function wireRendererEvents() {
   // on boot, a manual "Sync now", or a rebind.
   cloudPullEvents.on('pulled', (state) => sendToRenderer('cloud-pull', state));
 
+  // Which mirrors that pull actually refreshed → renderer, so the page the
+  // operator is standing on re-reads its list. Without it a sync writes fresh
+  // rows into SQLite while the open page keeps showing what it read on mount,
+  // and a pass issued in the cloud looks like it never arrived.
+  cloudPullEvents.on('mirrors', (mirrors) => sendToRenderer('cloud-mirrors', mirrors));
+
   // Live parking-flow debug log → renderer. Lets the operator see exactly
   // which guard fired (or didn't) without needing to open DevTools — shown
   // in a sticky strip at the bottom of the app.

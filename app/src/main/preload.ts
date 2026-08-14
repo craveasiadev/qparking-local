@@ -146,7 +146,7 @@ const api: BridgeApi = {
   tngTestPayCancel: (orderId: string, target?: { host?: string; port?: number }) => ipcRenderer.invoke('tng:test-pay-cancel', orderId, target),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'sync-status' | 'cloud-pull' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'sync-status' | 'cloud-pull' | 'cloud-mirrors' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };

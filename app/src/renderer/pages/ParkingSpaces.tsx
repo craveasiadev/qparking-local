@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Grid3x3, RefreshCw, Loader2, Search, X, Clock, Layers } from 'lucide-react';
 import type { ParkingSpace } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { InfoTip } from '../components/InfoTip';
 import { fmtDateTime } from '../lib/datetime';
 import { toast } from '../toast';
@@ -129,6 +130,9 @@ export function ParkingSpaces() {
 
   async function refresh() { setSpaces(await window.bridge.listParkingSpaces()); }
   useEffect(() => { void refresh(); }, []);
+  // Bays are re-pulled by the header "Sync now" and by the recurring tick —
+  // show what just landed instead of the rows read on mount.
+  useReloadOnCloudSync(['spaces'], refresh);
 
   const [sync, syncing] = useAsyncAction(async () => {
     const r = await window.bridge.syncParkingSpacesNow();

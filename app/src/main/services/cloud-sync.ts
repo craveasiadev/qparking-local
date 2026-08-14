@@ -40,7 +40,7 @@ import {
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
 import { drainNow, getSyncStatus } from "./cloud-queue";
-import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site, ActivityLog, CompanySetting } from "../../shared/types";
+import type { RatePolicy, TariffRule, SeasonPass, BlockedPlate, CloudCustomer, CloudVehicle, ParkingSpace, Site, ActivityLog, CompanySetting, CloudMirror } from "../../shared/types";
 
 export interface SyncResult {
 	ok: boolean;
@@ -710,6 +710,7 @@ export async function syncAll(): Promise<{
 	]);
 	const results = { policies, passes, blockedPlates, customers, vehicles, spaces, site, activity, sessions, companySetting };
 	stampPullOutcome(results, "full");
+	announceRefreshedMirrors(results);
 	return results;
 }
 
@@ -775,6 +776,7 @@ export async function syncEssentials(): Promise<EssentialSyncResults> {
 	]);
 	const results = { customers, vehicles, spaces, outbound };
 	stampPullOutcome(results, "essential");
+	announceRefreshedMirrors(results);
 	return results;
 }
 
@@ -885,6 +887,30 @@ function stampPullOutcome(results: Record<string, SyncResult>, scope: PullScope)
 		pullErrorOwner = scope;
 	}
 	cloudPullEvents.emit("pulled", cloudPullState);
+}
+
+/**
+ * Announce WHICH mirrors just came down, so an open page can re-read the list
+ * it is showing instead of rendering the rows it loaded on mount. index.ts
+ * forwards this to the renderer as 'cloud-mirrors'.
+ *
+ * A separate event from 'pulled' on purpose. That one drives the header STAMP
+ * and is deliberately silent after a clean light tick (see stampPullOutcome) —
+ * yet that tick still rewrites customers, vehicles and bays, which is exactly
+ * what a page would need to re-read. Tying page reloads to the stamp would
+ * therefore miss the hourly refresh.
+ *
+ * Only mirrors that came back ok are announced: a failed pull left its cache
+ * untouched, so there is nothing new to show. `fetched: 0` still counts —
+ * every mirror is replace-all, so an empty payload means the list really is
+ * empty now. 'outbound' is dropped: it's a push, not a mirror (the Dashboard
+ * already tracks the queue on the 'sync-status' event).
+ */
+function announceRefreshedMirrors(results: Record<string, SyncResult>): void {
+	const refreshed = Object.entries(results)
+		.filter(([mirror, result]) => result.ok && mirror !== "outbound")
+		.map(([mirror]) => mirror as CloudMirror);
+	if (refreshed.length > 0) cloudPullEvents.emit("mirrors", refreshed);
 }
 
 // ─── when cloud-owned mirrors refresh ────────────────────────────────────────

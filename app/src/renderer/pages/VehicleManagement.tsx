@@ -5,6 +5,7 @@ import {
 import { InfoTip } from '../components/InfoTip';
 import type { CloudVehicle, SeasonPass } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { toast } from '../toast';
@@ -91,6 +92,11 @@ export function VehicleManagement() {
   });
 
   useEffect(() => { void load(); }, []);
+  // Both caches behind this page are cloud mirrors, and a header "Sync now"
+  // refreshes them without the page knowing. Re-read on either — a pass issued
+  // in the cloud must show up here as soon as it has been pulled, not only
+  // after someone presses this page's own Refresh.
+  useReloadOnCloudSync(['vehicles', 'passes'], load);
 
 
   const counts = useMemo(() => ({

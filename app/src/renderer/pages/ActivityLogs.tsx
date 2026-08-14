@@ -4,6 +4,7 @@ import {
 	RefreshCw, CloudUpload, X, Search,
 } from "lucide-react";
 import { useAsyncAction } from "../hooks/useAsyncAction";
+import { useReloadOnCloudSync } from "../hooks/useReloadOnCloudSync";
 import { usePagedList } from "../hooks/usePagination";
 import { PaginationBar } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
@@ -119,6 +120,10 @@ export function ActivityLogs() {
 	useEffect(() => {
 		loadActivityLogs();
 	}, []);
+	// The activity mirror is push-then-replace-all on a full pull, so after a
+	// "Sync now" every row on screen is stale — including the "Not pushed yet"
+	// flags, which is the column an operator watches here.
+	useReloadOnCloudSync(["activity"], loadActivityLogs);
 
 	const q = search.trim().toLowerCase();
 	const filteredActivityLogs = useMemo(() => {

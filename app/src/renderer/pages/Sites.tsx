@@ -17,6 +17,7 @@ import {
 import type { Site } from '@shared/types';
 import { useEffect, useState } from 'react';
 import { InfoTip } from '../components/InfoTip';
+import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 
 const STATUS_STYLE: Record<Site['status'], { dot: string; text: string; label: string }> = {
   active: { dot: 'bg-emerald-500', text: 'text-emerald-700', label: 'Active' },
@@ -45,9 +46,10 @@ export function Sites() {
     }
   }
 
-  // Load the synced site once on mount. It's already kept fresh in the DB by
-  // the 60s background syncSite(), so a single read is enough — no polling.
+  // Load the synced site once on mount, then re-read whenever a pull refreshes
+  // the site row (header "Sync now", boot, rebind) — no polling either way.
   useEffect(() => { void load().finally(() => setLoading(false)); }, []);
+  useReloadOnCloudSync(['site'], load);
 
   // Manual re-read of the cached site row (the background sync keeps it fresh;
   // this just pulls the latest into view without waiting for the next tick).

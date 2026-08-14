@@ -62,6 +62,22 @@ export interface SyncStatus {
 	issues: SyncIssue[];
 }
 
+/** The cloud-owned caches a pull refreshes — one key per mirror in syncAll()'s
+ *  report. Broadcast on the 'cloud-mirrors' event after every pull so a page
+ *  showing one of these lists can re-read it instead of rendering whatever it
+ *  loaded on mount. */
+export type CloudMirror =
+	| "site"
+	| "companySetting"
+	| "policies"
+	| "passes"
+	| "blockedPlates"
+	| "customers"
+	| "vehicles"
+	| "spaces"
+	| "activity"
+	| "sessions";
+
 /** Per-item outcome of pushing one local equipment row up to the cloud
  *  registry (lane / terminal / camera), surfaced in the Settings sync report. */
 export interface EquipmentPushItem {
@@ -497,7 +513,7 @@ export interface BridgeApi {
 
 	// Stream events to renderer (returns an unsubscribe fn)
 	onEvent(
-		channel: "session" | "log" | "plate-detected" | "sync-status" | "cloud-pull" | "parking-flow-log" | "app-update-progress",
+		channel: "session" | "log" | "plate-detected" | "sync-status" | "cloud-pull" | "cloud-mirrors" | "parking-flow-log" | "app-update-progress",
 		cb: (payload: unknown) => void,
 	): () => void;
 }

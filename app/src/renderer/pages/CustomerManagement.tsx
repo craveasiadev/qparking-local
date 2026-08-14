@@ -5,6 +5,7 @@ import {
 import { InfoTip } from '../components/InfoTip';
 import type { CloudCustomer } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { toast } from '../toast';
@@ -46,6 +47,9 @@ export function CustomerManagement() {
   });
 
   useEffect(() => { void load(); }, []);
+  // A header "Sync now" (or the recurring tick) refreshes this mirror behind
+  // the page's back — re-read it so the list on screen is the one just pulled.
+  useReloadOnCloudSync(['customers'], load);
 
   const counts = useMemo(() => ({
     all: customers.length,
