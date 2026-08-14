@@ -393,7 +393,7 @@ function rm(cents: number | null | undefined): string {
 /** Equipment page's plural device type → the cloud's ResourceType vocabulary. */
 function deviceResourceType(type: DeviceType): ActivityLogResourceType {
   const byType: Record<DeviceType, ActivityLogResourceType> = {
-    cameras: 'camera_device', lanes: 'local_lane', terminals: 'local_terminal',
+    cameras: 'camera_device', lanes: 'local_lane', terminals: 'local_terminal', lcds: 'local_lcd',
   };
   return byType[type] ?? 'app_settings';
 }
@@ -1629,7 +1629,10 @@ ipcMain.handle('devices:pull-cloud', async (_e, type: DeviceType) => {
   // listeners: a pull can DELETE a camera (freeing its port) or re-create one on
   // the default port, and the webhook port is a local column the cloud never
   // sends.
-  if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); startLprServers(); }
+  // The panel links are rebuilt too: a pull can add, move, disable or delete a
+  // display, and a link left pointing at the old address would keep pushing
+  // frames into the dark until the app restarted.
+  if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); startLprServers(); reloadLcdLinks(); }
   // A pull REPLACES this box's equipment config. Without a row, "who changed the
   // camera wiring?" had no answer — the per-device save rows only cover edits
   // made on the device pages themselves.

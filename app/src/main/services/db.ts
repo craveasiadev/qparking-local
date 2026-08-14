@@ -934,6 +934,9 @@ function applySchema(db: Database.Database) {
 		["cameras", "lane_external_id TEXT"],
 		["lanes", "external_id TEXT"],
 		["lanes", "terminal_external_id TEXT"],
+		// 2026-08-14: the lane→panel link, mirrored the same way as the terminal
+		// one so a Pull restores which screen belongs to which barrier.
+		["lanes", "lcd_external_id TEXT"],
 		["terminals", "external_id TEXT"],
 		// Pass pool + quota (2026-08-10). Existing installs default to 1 car per
 		// pass, which is exactly today's behaviour — one plate, one pass, one car.
@@ -982,16 +985,34 @@ function applySchema(db: Database.Database) {
 			/* ignore */
 		}
 	}
-	// Backfill link external_ids from the current numeric FKs (each referenced
-	// row's external_id is now `local-{fk}` per the backfill above).
+	// Backfill link external_ids from the current numeric FKs, READING the
+	// referenced row's own external_id rather than assuming `local-{fk}`.
+	//
+	// The assumption held only for rows that predate external ids. Anything
+	// added since carries a `dev-{uuid}` id (see upsertLane / upsertLcd), and
+	// this runs on every startup — so a lane wired to a newer terminal or panel
+	// would have been stamped with an id that matches nothing, and the next
+	// relinkDevices() would quietly drop the link it was meant to preserve.
 	try {
-		db.exec(`UPDATE cameras SET lane_external_id = 'local-' || lane_id WHERE (lane_external_id IS NULL OR lane_external_id = '') AND lane_id IS NOT NULL`);
+		db.exec(
+			`UPDATE cameras SET lane_external_id = (SELECT l.external_id FROM lanes l WHERE l.id = cameras.lane_id)
+			 WHERE (lane_external_id IS NULL OR lane_external_id = '') AND lane_id IS NOT NULL`,
+		);
 	} catch {
 		/* ignore */
 	}
 	try {
 		db.exec(
-			`UPDATE lanes SET terminal_external_id = 'local-' || terminal_id WHERE (terminal_external_id IS NULL OR terminal_external_id = '') AND terminal_id IS NOT NULL`,
+			`UPDATE lanes SET terminal_external_id = (SELECT t.external_id FROM terminals t WHERE t.id = lanes.terminal_id)
+			 WHERE (terminal_external_id IS NULL OR terminal_external_id = '') AND terminal_id IS NOT NULL`,
+		);
+	} catch {
+		/* ignore */
+	}
+	try {
+		db.exec(
+			`UPDATE lanes SET lcd_external_id = (SELECT d.external_id FROM lcds d WHERE d.id = lanes.lcd_id)
+			 WHERE (lcd_external_id IS NULL OR lcd_external_id = '') AND lcd_id IS NOT NULL`,
 		);
 	} catch {
 		/* ignore */
@@ -1010,6 +1031,11 @@ function applySchema(db: Database.Database) {
 	}
 	try {
 		db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_terminals_external ON terminals(external_id)`);
+	} catch {
+		/* ignore */
+	}
+	try {
+		db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lcds_external ON lcds(external_id)`);
 	} catch {
 		/* ignore */
 	}
@@ -1337,7 +1363,9 @@ export function deleteLcd(id: number) {
 	const tx = db.transaction(() => {
 		// Clear the FK first. A lane left pointing at a deleted panel would make
 		// lcd-display look it up on every plate event and log a miss forever.
-		db.prepare("UPDATE lanes SET lcd_id = NULL WHERE lcd_id = ?").run(id);
+		// The external-id copy goes with it, or the next relink would resurrect
+		// the link against a panel a later pull happens to re-create.
+		db.prepare("UPDATE lanes SET lcd_id = NULL, lcd_external_id = NULL WHERE lcd_id = ?").run(id);
 		db.prepare("DELETE FROM lcds WHERE id = ?").run(id);
 	});
 	tx();
@@ -1516,6 +1544,26 @@ export function getLane(id: number): ParkingLane | null {
 	return row ? rowToLane(row) : null;
 }
 
+/**
+ * Re-derive a lane's *_external_id link columns from its numeric FKs.
+ *
+ * The numeric FK is the local source of truth; the external ids are the durable
+ * transport copy (see relinkDevices). They have to be rewritten on every lane
+ * save, because relinkDevices resolves the FKs FROM them after any pull — a
+ * stale copy would quietly undo the terminal or panel the operator just picked
+ * the next time some other device type is pulled.
+ */
+function syncLaneLinkExternalIds(laneId: number): void {
+	getDb()
+		.prepare(
+			`UPDATE lanes SET
+				terminal_external_id = (SELECT t.external_id FROM terminals t WHERE t.id = lanes.terminal_id),
+				lcd_external_id      = (SELECT d.external_id FROM lcds d WHERE d.id = lanes.lcd_id)
+			 WHERE id = ?`,
+		)
+		.run(laneId);
+}
+
 export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?: number; externalId?: string }): ParkingLane {
 	const db = getDb();
 	if (lane.id) {
@@ -1529,13 +1577,16 @@ export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?:
 			lane.enabled ? 1 : 0,
 			lane.id,
 		);
+		syncLaneLinkExternalIds(lane.id);
 		return getLane(lane.id)!;
 	}
 	const externalId = lane.externalId ?? `dev-${randomUUID()}`;
 	const info = db
 		.prepare(`INSERT INTO lanes (external_id, name, policy_id, terminal_id, lcd_id, gate_relay_address, enabled) VALUES (?,?,?,?,?,?,?)`)
 		.run(externalId, lane.name, lane.policyId, lane.terminalId, lane.lcdId ?? null, lane.gateRelayAddress, lane.enabled ? 1 : 0);
-	return getLane(Number(info.lastInsertRowid))!;
+	const id = Number(info.lastInsertRowid);
+	syncLaneLinkExternalIds(id);
+	return getLane(id)!;
 }
 
 export function deleteLane(id: number) {
@@ -1613,11 +1664,19 @@ export function relinkDevices(): void {
 		// Unmatched / null links resolve to NULL and re-resolve on a later relink.
 		db.exec(`UPDATE cameras SET lane_id = (SELECT l.id FROM lanes l WHERE l.external_id = cameras.lane_external_id)`);
 		db.exec(`UPDATE lanes SET terminal_id = (SELECT t.id FROM terminals t WHERE t.external_id = lanes.terminal_external_id)`);
+		db.exec(`UPDATE lanes SET lcd_id = (SELECT d.id FROM lcds d WHERE d.external_id = lanes.lcd_external_id)`);
 	});
 	tx();
 }
 
 export interface CloudTerminalRow {
+	externalId: string;
+	name: string;
+	host: string;
+	port: number;
+	enabled: boolean;
+}
+export interface CloudLcdRow {
 	externalId: string;
 	name: string;
 	host: string;
@@ -1630,6 +1689,10 @@ export interface CloudLaneRow {
 	gateRelayAddress: string | null;
 	enabled: boolean;
 	terminalExternalId: string | null;
+	/** The panel this lane drives. null = the cloud has no link stored (an older
+	 *  cloud, or a lane genuinely without a screen) — resolved to lcd_id NULL by
+	 *  relinkDevices, same as the terminal link. */
+	lcdExternalId: string | null;
 	policyId: string | null;
 }
 export interface CloudCameraRow {
@@ -1689,14 +1752,43 @@ export function reconcileLanesFromCloud(rows: CloudLaneRow[]): void {
 		for (const local of db.prepare("SELECT id, external_id FROM lanes").all() as { id: number; external_id: string }[]) {
 			if (!keep.has(local.external_id)) db.prepare("DELETE FROM lanes WHERE id = ?").run(local.id);
 		}
-		// terminal_id left for relinkDevices(); direction is derived from cameras.
-		const upd = db.prepare("UPDATE lanes SET name=?, policy_id=?, gate_relay_address=?, enabled=?, terminal_external_id=? WHERE external_id=?");
+		// terminal_id / lcd_id left for relinkDevices(); direction is derived from
+		// cameras.
+		const upd = db.prepare(
+			"UPDATE lanes SET name=?, policy_id=?, gate_relay_address=?, enabled=?, terminal_external_id=?, lcd_external_id=? WHERE external_id=?",
+		);
 		const ins = db.prepare(
-			"INSERT INTO lanes (external_id, name, policy_id, terminal_id, gate_relay_address, enabled, terminal_external_id) VALUES (?,?,?,NULL,?,?,?)",
+			"INSERT INTO lanes (external_id, name, policy_id, terminal_id, gate_relay_address, enabled, terminal_external_id, lcd_external_id) VALUES (?,?,?,NULL,?,?,?,?)",
 		);
 		for (const r of rows) {
-			if (upd.run(r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId, r.externalId).changes === 0) {
-				ins.run(r.externalId, r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId);
+			if (upd.run(r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId, r.lcdExternalId, r.externalId).changes === 0) {
+				ins.run(r.externalId, r.name, r.policyId, r.gateRelayAddress, r.enabled ? 1 : 0, r.terminalExternalId, r.lcdExternalId);
+			}
+		}
+	});
+	tx();
+}
+
+/**
+ * Same contract as reconcileTerminalsFromCloud: match the cloud set exactly by
+ * external_id, preserving numeric ids for survivors so a lane's lcd_id (and any
+ * live TCP link keyed on it) stays valid. A panel the cloud no longer has is
+ * DELETED here; the lanes that pointed at it are re-resolved to NULL by the
+ * relinkDevices() the caller runs next.
+ */
+export function reconcileLcdsFromCloud(rows: CloudLcdRow[]): void {
+	const db = getDb();
+	const tx = db.transaction(() => {
+		const keep = new Set(rows.map((r) => r.externalId));
+		for (const local of db.prepare("SELECT id, external_id FROM lcds").all() as { id: number; external_id: string }[]) {
+			if (!keep.has(local.external_id)) db.prepare("DELETE FROM lcds WHERE id = ?").run(local.id);
+		}
+		const upd = db.prepare("UPDATE lcds SET name=?, host=?, port=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE external_id=?");
+		const ins = db.prepare("INSERT INTO lcds (external_id, name, host, port, enabled) VALUES (?,?,?,?,?)");
+		for (const r of rows) {
+			const port = normaliseLcdPort(r.port);
+			if (upd.run(r.name, r.host, port, r.enabled ? 1 : 0, r.externalId).changes === 0) {
+				ins.run(r.externalId, r.name, r.host, port, r.enabled ? 1 : 0);
 			}
 		}
 	});

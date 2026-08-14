@@ -1,5 +1,5 @@
 /**
- * Mirror local equipment (payment terminals + parking lanes) up to qparking
+ * Mirror local equipment (payment terminals, parking lanes, LCD panels) up to qparking
  * SaaS so HQ / multi-site dashboards can see what each branch has deployed.
  * Best-effort like camera-push.ts: a failure here doesn't block the operator
  * from saving the local change.
@@ -9,7 +9,7 @@
  * does NOT need a rate policy assigned first. Optional links (terminal, gate
  * relay, …) are sent as null when unset.
  */
-import { getLane, getTerminal, deriveLaneDirection, isBoundToCurrentSite } from './db';
+import { getLane, getLcd, getTerminal, deriveLaneDirection, isBoundToCurrentSite } from './db';
 import { getCloudApi, describeRequestError } from './cloud-api';
 import type { EquipmentPushItem } from '../../shared/types';
 
@@ -61,12 +61,32 @@ export async function pushTerminal(terminalId: number): Promise<PushResult> {
   });
 }
 
+/** Push a single LCD panel. Address + on/off is the whole of a panel's config,
+ *  and none of it is secret, so this mirrors the row as-is. */
+export async function pushLcd(lcdId: number): Promise<PushResult> {
+  const lcd = getLcd(lcdId);
+  if (!lcd) return { ok: false, error: 'unknown_lcd' };
+
+  return postToCloud('/local-lcds/upsert', {
+    external_id: lcd.externalId,
+    name: lcd.name,
+    host: lcd.host,
+    port: lcd.port,
+    enabled: lcd.enabled,
+  });
+}
+
 /** Push a single lane. Pushed unconditionally — a rate policy is NOT required;
  *  the cloud attributes it to the site behind the bearer token. */
 export async function pushLane(laneId: number): Promise<PushResult> {
   const lane = getLane(laneId);
   if (!lane) return { ok: false, error: 'unknown_lane' };
   const terminal = lane.terminalId ? getTerminal(lane.terminalId) : null;
+  // getLcd, not getLaneLcd: a DISABLED panel is still the panel wired to this
+  // lane, and the wiring is what the cloud mirrors. Filtering it out here would
+  // make a pull silently unwire the lane the moment someone switched the panel
+  // off for maintenance.
+  const lcd = lane.lcdId ? getLcd(lane.lcdId) : null;
 
   return postToCloud('/local-lanes/upsert', {
     external_id: lane.externalId,
@@ -74,6 +94,7 @@ export async function pushLane(laneId: number): Promise<PushResult> {
     // Derived from the lane's cameras (may be 'dual', or null if none wired).
     direction: deriveLaneDirection(lane.id),
     terminal_external_id: terminal ? terminal.externalId : null,
+    lcd_external_id: lcd ? lcd.externalId : null,
     rate_policy_id: lane.policyId,
     gate_relay_address: lane.gateRelayAddress,
     enabled: lane.enabled,

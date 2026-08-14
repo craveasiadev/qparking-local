@@ -6,14 +6,15 @@ import { toast } from '../toast';
 
 /**
  * The manual "Push to cloud" / "Pull from cloud" pair shown on each device page
- * (Cameras / Lanes / Terminals). Both are destructive mirrors, so each first
- * previews the diff, shows a "cannot be undone" confirmation with the counts,
- * and only syncs on confirm. `onDone` refreshes the host page's list.
+ * (Cameras / Lanes / Terminals / LCD Displays). Both are destructive mirrors, so
+ * each first previews the diff, shows a "cannot be undone" confirmation with the
+ * counts, and only syncs on confirm. `onDone` refreshes the host page's list.
  */
 const NOUN: Record<DeviceSyncType, string> = {
   cameras: 'cameras',
   lanes: 'lanes',
   terminals: 'terminals',
+  lcds: 'displays',
 };
 
 export function DeviceSyncButtons({ type, onDone }: { type: DeviceSyncType; onDone?: () => void | Promise<void> }) {
@@ -103,6 +104,7 @@ export function DeviceSyncButtons({ type, onDone }: { type: DeviceSyncType; onDo
                       passwords they no longer need. */}
                   {type === 'cameras' && " Camera logins, ports and webhook secrets come back with them, so pulled cameras are ready to use."}
                   {type === 'terminals' && ' The connection timeout is local-only and returns to its default on any terminal the cloud re-creates.'}
+                  {type === 'lcds' && " A lane pointing at a display the cloud doesn't have is left with no screen — re-pick it on the Lanes page."}
                 </p>
               )}
               <p className="text-[11px] font-semibold uppercase tracking-wide text-red-600">This cannot be undone.</p>

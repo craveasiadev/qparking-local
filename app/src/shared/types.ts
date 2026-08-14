@@ -74,8 +74,8 @@ export interface EquipmentPushItem {
 	error?: string;
 }
 
-/** One of the three manually-synced equipment types (per device page). */
-export type DeviceSyncType = "cameras" | "lanes" | "terminals";
+/** One of the manually-synced equipment types (one per device page). */
+export type DeviceSyncType = "cameras" | "lanes" | "terminals" | "lcds";
 
 /** Diff counts shown in the Push/Pull confirmation modal before committing. */
 export interface DeviceSyncPreview {
@@ -113,7 +113,7 @@ export type ActivityLogCategory =
 
 export type ActivityLogResourceType =
 	| "adjustment" | "refund" | "role" | "impersonation"
-	| "gate_open_command" | "camera_device" | "local_lane" | "local_terminal"
+	| "gate_open_command" | "camera_device" | "local_lane" | "local_terminal" | "local_lcd"
 	| "parking_record" | "rate_policy" | "transaction" | "vehicle" | "app_settings";
 
 /** Free-text on the wire (a plain 16-char column), but keep to this set so the
