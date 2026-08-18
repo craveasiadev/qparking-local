@@ -428,7 +428,7 @@ function applySchema(db: Database.Database) {
       -- 1 with no bay). Sent pre-computed by the cloud: the box has no bay
       -- table to derive it from, and the barrier cannot wait on the WAN.
       concurrent_limit INTEGER NOT NULL DEFAULT 1,
-      -- resident | staff | season | guest — recorded so gate refusals and the
+      -- resident | staff | season | visitor — recorded so gate refusals and the
       -- activity log can say WHO was turned away, not just that someone was.
       role TEXT,
       -- The plan the pass was sold on, in the operator's own words. NULL on v1
@@ -453,6 +453,9 @@ function applySchema(db: Database.Database) {
       email TEXT,
       phone TEXT,
       site_role TEXT,
+      -- The term behind site_role: same pass, its status and its last day.
+      pass_status TEXT,
+      pass_ends_at TEXT,
       is_enabled INTEGER NOT NULL DEFAULT 1,
       vehicles_count INTEGER NOT NULL DEFAULT 0,
       active_passes_count INTEGER NOT NULL DEFAULT 0,
@@ -948,6 +951,11 @@ function applySchema(db: Database.Database) {
 		// falls back to the legacy pass_type, so an un-synced box is unchanged.
 		["parking_spaces", "bay_type TEXT"],
 		["cloud_customers", "site_role TEXT"],
+		// Pass term on the directory rows (2026-08-18). NULL until the next pull,
+		// and the pages render that as "—", so an un-synced box shows no date
+		// rather than a wrong one.
+		["cloud_customers", "pass_status TEXT"],
+		["cloud_customers", "pass_ends_at TEXT"],
 		// Per-camera webhook port (2026-08-11). The default matches the box-wide
 		// setting it replaced, so a standard install keeps the port its cameras
 		// are already pushing to; anything else is backfilled below.
@@ -2863,10 +2871,11 @@ export function isBoundToCurrentSite(): boolean {
  * Wipe this install's site-specific data so the box can be re-provisioned to a
  * different cloud site. Always clears operational data (sessions, the payment
  * ledger, terminal logs, the outbound sync queue) and the cloud mirrors
- * (policies + rules, passes, spaces, activity logs, cached site rows). Physical
- * equipment (cameras / lanes / terminals) is cleared only when the operator
- * opts in, since the same hardware box may serve the new site. The site binding
- * is re-established by the caller after the first sync against the new key.
+ * (policies + rules, passes, spaces, activity logs, cached site + company rows).
+ * Physical equipment (cameras / lanes / terminals / LCD panels) is cleared only
+ * when the operator opts in, since the same hardware box may serve the new site. The
+ * site binding is re-established by the caller after the first sync against the
+ * new key.
  */
 export function resetLocalDataForRebind(opts: { wipeEquipment: boolean }): void {
 	const db = getDb();
@@ -2886,12 +2895,22 @@ export function resetLocalDataForRebind(opts: { wipeEquipment: boolean }): void 
 		db.exec("DELETE FROM parking_spaces");
 		db.exec("DELETE FROM activity_logs");
 		db.exec("DELETE FROM sites");
+		// The company mirror goes too. upsertCompanySetting() self-cleans on the
+		// next successful pull, but a pull that FAILS would otherwise leave the
+		// PREVIOUS company's flags in force against the new site — the only mirror
+		// that failed stale rather than empty. Callers already treat the empty
+		// table as "use the built-in defaults" (see getCompanySetting).
+		db.exec("DELETE FROM company_settings");
 		// The bound-site marker is stale until the caller re-binds post-sync.
 		db.prepare("DELETE FROM settings WHERE key = ?").run(BOUND_SITE_KEY);
 		if (opts.wipeEquipment) {
 			db.exec("DELETE FROM cameras");
 			db.exec("DELETE FROM lanes");
 			db.exec("DELETE FROM terminals");
+			// Panels go with the rest of the hardware. Lanes are already gone
+			// above, so no lane is left pointing at a deleted lcd_id — but the
+			// caller must still drop the live TCP links (see site:rebind).
+			db.exec("DELETE FROM lcds");
 		}
 	});
 	tx();
@@ -3143,6 +3162,8 @@ function rowToCloudCustomer(row: any): CloudCustomer {
 		email: row.email ?? null,
 		phone: row.phone ?? null,
 		siteRole: row.site_role ?? null,
+		passStatus: row.pass_status ?? null,
+		passEndsAt: row.pass_ends_at ?? null,
 		isEnabled: !!row.is_enabled,
 		vehiclesCount: row.vehicles_count ?? 0,
 		activePassesCount: row.active_passes_count ?? 0,
@@ -3161,11 +3182,11 @@ export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM cloud_customers").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
-        id, full_name, email, phone, site_role, is_enabled,
+        id, full_name, email, phone, site_role, pass_status, pass_ends_at, is_enabled,
         vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const c of customers) {
-			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
+			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.passStatus, c.passEndsAt, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
 		}
 	});
 	tx();

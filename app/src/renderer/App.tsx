@@ -3,7 +3,7 @@ import {
   LayoutDashboard, CreditCard, Camera, Map, ListOrdered, Tag, Settings as SettingsIcon,
   Terminal as TerminalIcon, ChevronUp, ChevronDown, Activity,
   Grid3x3, MonitorPlay, MapPin, AlertTriangle, CheckCircle2, X, Receipt,
-  Users, Car, RefreshCw, Loader2, Monitor,
+  Users, UserPlus, Car, RefreshCw, Loader2, Monitor,
 } from 'lucide-react';
 import { Dashboard } from './pages/Dashboard';
 import { Terminals } from './pages/Terminals';
@@ -18,6 +18,7 @@ import { LiveDisplay } from './pages/LiveDisplay';
 import { Settings } from './pages/Settings';
 import { ParkingSpaces } from './pages/ParkingSpaces';
 import { CustomerManagement } from './pages/CustomerManagement';
+import { VisitorManagement } from './pages/VisitorManagement';
 import { VehicleManagement } from './pages/VehicleManagement';
 import { ActivityLogs } from './pages/ActivityLogs';
 import { NotConnectedNotice } from './components/NotConnectedNotice';
@@ -28,7 +29,7 @@ import { subscribeToast } from './toast';
 type Page =
   | 'dashboard' | 'live' | 'cameras' | 'terminals' | 'lcds' | 'lanes' | 'sessions' | 'transactions'
   // Parking Management
-  | 'parking-spaces' | 'customers' | 'vehicles'
+  | 'parking-spaces' | 'customers' | 'visitors' | 'vehicles'
   // Pricing & Tariffs
   | 'policies'
   // System
@@ -72,6 +73,11 @@ const SECTIONS: NavSection[] = [
       // The cloud calls a physical slot a "bay" (code/routes/DB still say
       // `space`).
       { id: 'customers', label: 'Customers', icon: Users },
+      // Directly under Customers, as in the cloud operator menu. They are one
+      // mirror split on role — residents/staff/season here, visitors there — so
+      // staff never have to guess which of the two a person is in: the role
+      // decides it, and the pages say so in their empty states.
+      { id: 'visitors', label: 'Visitors', icon: UserPlus },
       { id: 'parking-spaces', label: 'Bays', icon: Grid3x3 },
       // Three entries, like the cloud — but the third is Vehicles, not Plans.
       //
@@ -416,6 +422,7 @@ export function App() {
           {page === 'transactions' && <Transactions />}
           {page === 'parking-spaces' && <ParkingSpaces />}
           {page === 'customers' && <CustomerManagement />}
+          {page === 'visitors' && <VisitorManagement />}
           {page === 'vehicles' && <VehicleManagement />}
           {page === 'policies' && <ParkingPolicies />}
           {page === 'activity_logs' && <ActivityLogs />}

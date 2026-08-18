@@ -483,6 +483,11 @@ export async function syncCloudCustomers(): Promise<SyncResult> {
 				// Absent from a SaaS that predates the reconstruct — the UI then
 				// falls back to the legacy type, i.e. exactly the old behaviour.
 				siteRole: row.site_role ?? null,
+				// Absent from a SaaS that predates the pass-term fields — reads as
+				// "no date known", which the pages render as "—" rather than
+				// inventing a term the cloud never sent.
+				passStatus: row.pass_status ?? null,
+				passEndsAt: row.pass_ends_at ?? null,
 				isEnabled: row.is_enabled == null ? true : !!row.is_enabled,
 				vehiclesCount: Number(row.vehicles_count ?? 0),
 				activePassesCount: Number(row.active_passes_count ?? 0),
@@ -797,7 +802,14 @@ const DEFAULT_SYNC_INTERVAL_MIN = 60;
  *  takes effect on next app restart, same as before this function grew guards. */
 function resolveSyncIntervalMin(): number {
 	const configured = Number(getCompanySetting()?.syncIntervalMinutes);
-	if (configured <= 0) return DEFAULT_SYNC_INTERVAL_MIN;
+	// NaN is tested FIRST and explicitly, because `<= 0` cannot catch it: every
+	// comparison against NaN is false, so a missing company_settings row used to
+	// fall through to Math.max(1, NaN) = NaN — and setInterval coerces NaN to a
+	// 1ms delay, turning the hourly pull into a back-to-back loop for the life of
+	// the process. Reachable on any box whose boot pull failed (fresh install, no
+	// key yet, no network): the timer is armed regardless, and autoSync() is
+	// idempotent, so the runaway interval then survives the box being provisioned.
+	if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_SYNC_INTERVAL_MIN;
 	return Math.max(MIN_SYNC_INTERVAL_MIN, configured);
 }
 

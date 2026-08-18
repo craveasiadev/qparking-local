@@ -40,7 +40,7 @@ const ROLE_TONE: Record<string, string> = {
   resident: 'bg-sky-100 text-sky-800',
   staff: 'bg-violet-100 text-violet-800',
   season: 'bg-teal-100 text-teal-800',
-  guest: 'bg-amber-100 text-amber-800',
+  visitor: 'bg-amber-100 text-amber-800',
 };
 
 export function VehicleManagement() {

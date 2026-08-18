@@ -299,7 +299,7 @@ export function Settings() {
               </p>
               <label className="flex items-start gap-2 text-sm text-gray-700">
                 <input type="checkbox" className="mt-0.5" checked={wipeEquipment} onChange={(e) => setWipeEquipment(e.target.checked)} />
-                <span>Also remove configured cameras, lanes and payment terminals (leave unchecked if the same hardware serves the new site).</span>
+                <span>Also remove configured cameras, lanes, payment terminals and LCD displays (leave unchecked if the same hardware serves the new site).</span>
               </label>
             </div>
             <footer className="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">

@@ -1388,9 +1388,20 @@ ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: strin
   const previousName = previousId ? getSite(previousId)?.name ?? null : null;
   saveSettings({ qparkingBaseUrl: input.baseUrl, qparkingApiKey: input.apiKey });
   resetLocalDataForRebind({ wipeEquipment: !!input.wipeEquipment });
-  // Wiping equipment takes the cameras with it, so the ports they asked for are
-  // no longer wanted — release everything except the always-bound default.
-  if (input.wipeEquipment) startLprServers();
+  // Wiping equipment deletes the rows but not the live plumbing those rows
+  // started, so tear all of it down — the same set devices:pull-cloud rebuilds,
+  // for the same reason. The ffmpeg grabbers and the SDK relay handles would
+  // otherwise keep streaming from, and holding a login against, cameras that
+  // belong to the previous site; the LPR listeners would keep ports bound that
+  // nothing asks for any more (all but the always-bound default are released);
+  // and an LCD link left up would go on pushing frames to a panel this box no
+  // longer owns.
+  if (input.wipeEquipment) {
+    resyncRtspGrabbers();
+    resyncCameraRelay();
+    startLprServers();
+    reloadLcdLinks();
+  }
   const pull = await syncAll();               // syncSite adopts + binds the new site
   const site = getCurrentSite();
   // The single most destructive thing an operator can do on this box — it wipes

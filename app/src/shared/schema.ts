@@ -423,7 +423,7 @@ export interface SeasonPass {
   /** How many of this pass's plates may be inside at once — one per bay, or 1
    *  with no bay. Pre-computed by the cloud; the box never derives it. */
   concurrentLimit: number;
-  /** resident | staff | season | guest */
+  /** resident | staff | season | visitor */
   role: string | null;
   /** The plan the pass was sold on, in the operator's own words ("3 Slot
    *  Resident", "Staff"). NULL on v1 payloads, which carry no plan. */
@@ -442,10 +442,20 @@ export interface CloudCustomer {
   fullName: string | null;
   email: string | null;
   phone: string | null;
-  /** What they ARE at THIS site: 'resident' | 'staff' | 'season' | 'guest' —
+  /** What they ARE at THIS site: 'resident' | 'staff' | 'season' | 'visitor' —
    *  the role of the pass they hold here. NULL on a box that has not synced
-   *  since the cloud started sending it. */
+   *  since the cloud started sending it. The cloud renamed 'guest' to 'visitor'
+   *  (migration 2026_08_16_090000); a box that has not pulled since still holds
+   *  the old word, which is why roleOf() compares and never rewrites it. */
   siteRole: string | null;
+  /** Status and last day of the pass that `siteRole` came from — the SAME pass,
+   *  picked by the cloud with one ordering (live beats finished, then newest).
+   *  `passEndsAt` is a bare 'YYYY-MM-DD', and is NULL for a pass with no term:
+   *  a resident (never expires) or one still pending payment (the clock starts
+   *  when it is paid). Both NULL on a box that has not synced since the cloud
+   *  started sending them. */
+  passStatus: string | null;
+  passEndsAt: string | null;
   isEnabled: boolean;
   vehiclesCount: number;
   /** Active passes AT THIS SITE only. */

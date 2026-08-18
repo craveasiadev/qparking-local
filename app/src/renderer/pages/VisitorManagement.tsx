@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Users, RefreshCw, CloudDownload, Clock, Car, Ticket, UserX,
+  UserPlus, RefreshCw, CloudDownload, Clock, Car, Ticket, UserX, CheckCircle2, CircleSlash,
 } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip';
-import { ContactCell, CountChip, PassTermBadge, RoleBadge, isVisitor, roleOf } from '../components/customer-directory';
+import { ContactCell, CountChip, PassTermBadge, hasLivePass, isVisitor } from '../components/customer-directory';
 import type { CloudCustomer } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
@@ -15,41 +15,40 @@ import { fmtDateTime } from '../lib/datetime';
 const PAGE_SIZE = 20;
 
 /**
- * Customer directory — read-only mirror of the cloud's customers, so site staff
- * can look up a contact number or check someone's pass count without logging
- * into the qparking cloud portal in a browser.
+ * Visitors — the other half of the customer directory.
  *
- * Scope comes from the cloud endpoint: anyone holding a pass at this site. The
- * pass is the ONLY thing that links a person to a site, so "customer here" and
- * "holds a pass here" are the same statement.
+ * A visitor is someone whose pass at THIS site carries the `visitor` role: a
+ * dated pass, one car, no bay. They are ordinary customer rows in the mirror —
+ * this page and Customers read the same `cloud_customers` cache and partition it
+ * on role, so a person is on exactly one of the two. Split onto its own page
+ * (2026-08-18) because the two populations answer different questions at a
+ * barrier: Customers is "who is this resident and how do I reach them", this is
+ * "is this guest expected, and is their pass still live".
  *
- * VISITORS ARE NOT LISTED HERE — they have their own page, the same way the
- * cloud operator portal splits Customers from Visitors. Someone at a barrier is
- * asking one of two different questions ("who is this resident?" vs "is this
- * guest expected?"), and mixing both populations into one list made the answer
- * slower to find. The two pages read the SAME mirror and partition it on role,
- * so nobody can be on both and nobody falls between them.
+ * WHAT THIS PAGE CANNOT SHOW, and why. The cloud's own Visitors page reads
+ * PASSES, so it also lists walk-ins registered at the counter — those carry the
+ * name on the pass (`visitor_full_name`) and have no customer row at all. The
+ * box's /customers feed requires a customer id, so a counter-registered walk-in
+ * never reaches this cache and cannot appear here. Sponsored visitors do: the
+ * resident portal creates a real customer for them first. Listing walk-ins too
+ * would take a new site-scoped passes endpoint and a mirror of its own — worth
+ * doing if the counter flow becomes the common one, but it is not a filter away.
+ *
+ * Read-only, like Customers: visitors are registered in the cloud portal or by a
+ * resident from their own portal, never here.
  */
-type Filter = 'all' | 'resident' | 'staff' | 'season' | 'disabled';
+type Filter = 'all' | 'valid' | 'lapsed' | 'disabled';
 
-export function CustomerManagement() {
-  const [customers, setCustomers] = useState<CloudCustomer[]>([]);
-  // Only to tell the operator where the rest went — this page never shows them.
-  const [visitorCount, setVisitorCount] = useState(0);
+export function VisitorManagement() {
+  const [visitors, setVisitors] = useState<CloudCustomer[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
 
-  // The mirror carries every role; this page owns the non-visitor half of it.
-  // Partitioned at load rather than in each filter/count so `customers` means
-  // one thing throughout the page — including the "nothing cached yet" test,
-  // which must not report an empty page when the cache holds visitors only.
   const [load, loading] = useAsyncAction(async () => {
-    const all = await window.bridge.listCloudCustomers();
-    const mine = all.filter((c) => !isVisitor(c));
-    setCustomers(mine);
-    setVisitorCount(all.length - mine.length);
+    setVisitors((await window.bridge.listCloudCustomers()).filter(isVisitor));
   });
 
+  // Same mirror as Customers, so the one pull refreshes both pages.
   const [syncFromCloud, syncing] = useAsyncAction(async () => {
     const result = await window.bridge.syncCloudCustomersNow();
     if (result.ok) toast({ tone: 'success', title: `Fetched ${result.fetched} customer(s) from cloud` });
@@ -58,24 +57,24 @@ export function CustomerManagement() {
   });
 
   useEffect(() => { void load(); }, []);
-  // A header "Sync now" (or the recurring tick) refreshes this mirror behind
-  // the page's back — re-read it so the list on screen is the one just pulled.
+  // A header "Sync now" (or the recurring tick) refreshes this mirror behind the
+  // page's back — re-read it so the list on screen is the one just pulled.
   useReloadOnCloudSync(['customers'], load);
 
   const counts = useMemo(() => ({
-    all: customers.length,
-    resident: customers.filter((c) => roleOf(c) === 'resident').length,
-    staff: customers.filter((c) => roleOf(c) === 'staff').length,
-    season: customers.filter((c) => roleOf(c) === 'season').length,
-    disabled: customers.filter((c) => !c.isEnabled).length,
-  }), [customers]);
+    all: visitors.length,
+    valid: visitors.filter(hasLivePass).length,
+    lapsed: visitors.filter((v) => !hasLivePass(v)).length,
+    disabled: visitors.filter((v) => !v.isEnabled).length,
+  }), [visitors]);
 
-  const filtered = customers.filter((c) => {
-    if (filter !== 'all' && filter !== 'disabled' && roleOf(c) !== filter) return false;
-    if (filter === 'disabled' && c.isEnabled) return false;
+  const filtered = visitors.filter((v) => {
+    if (filter === 'valid' && !hasLivePass(v)) return false;
+    if (filter === 'lapsed' && hasLivePass(v)) return false;
+    if (filter === 'disabled' && v.isEnabled) return false;
     if (search) {
       const q = search.toLowerCase();
-      const haystack = [c.fullName, c.email, c.phone].filter(Boolean).join(' ').toLowerCase();
+      const haystack = [v.fullName, v.email, v.phone].filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     return true;
@@ -83,28 +82,29 @@ export function CustomerManagement() {
   const { pager, pageItems } = usePagedList(filtered, PAGE_SIZE);
   useEffect(() => { pager.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter, search]);
 
-  const lastSynced = customers.reduce((m, c) => (c.fetchedAt && c.fetchedAt > m ? c.fetchedAt : m), '');
+  const lastSynced = visitors.reduce((m, v) => (v.fetchedAt && v.fetchedAt > m ? v.fetchedAt : m), '');
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Users size={22} /> Customers
+            <UserPlus size={22} /> Visitors
             <InfoTip>
-              Customers are added and edited in the qparking cloud portal
-              (Parking Management → Customers). This page is a copy kept on this
-              server so you can look up a name or phone number quickly, without
-              logging into the cloud. Role, vehicle and pass counts all cover THIS
-              site only — someone is only listed here because they hold a pass
-              here. "Valid until" is the last day of that pass; a resident's
-              pass carries no end date. Visitors are on their own page. Press
-              "Sync from cloud" to get the latest list.
+              Guests holding a dated visitor pass at this site — one car, no
+              reserved bay. They are registered in the qparking cloud portal, or
+              by a resident from their own portal; this page is a read-only copy
+              kept on this server so you can check a name at the barrier without
+              logging into the cloud. "Valid now" is the cloud's own verdict on
+              the pass, and "Valid until" is its last day — a pass stays good
+              through the end of that day. The cloud expires a lapsed pass on an
+              hourly job and this box pulls on its own schedule, so a pass that
+              just ran out can read as live for a short while; press "Sync from
+              cloud" to settle it now.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Residents, staff and season holders — how to reach them, when their pass runs out, and how many vehicles they hold.
-            {visitorCount > 0 && ` ${visitorCount} visitor${visitorCount === 1 ? '' : 's'} are on the Visitors page.`}
+            Who is expected as a guest, how to reach them, and whether their pass is still live.
           </p>
           {lastSynced && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
@@ -126,10 +126,9 @@ export function CustomerManagement() {
 
       <div className="mb-4 flex flex-wrap gap-2">
         {([
-          { key: 'all', label: 'All', icon: Users },
-          { key: 'resident', label: 'Residents', icon: Users },
-          { key: 'staff', label: 'Staff', icon: Users },
-          { key: 'season', label: 'Season', icon: Users },
+          { key: 'all', label: 'All', icon: UserPlus },
+          { key: 'valid', label: 'Valid now', icon: CheckCircle2 },
+          { key: 'lapsed', label: 'No live pass', icon: CircleSlash },
           { key: 'disabled', label: 'Disabled', icon: UserX },
         ] as const).map((f) => {
           const active = filter === f.key;
@@ -156,9 +155,9 @@ export function CustomerManagement() {
 
       {filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
-          {customers.length === 0
-            ? 'No customers cached yet. Press "Sync from cloud" (these directories aren\'t auto-synced).'
-            : 'No customers match the current filter.'}
+          {visitors.length === 0
+            ? 'No visitors cached for this site. Press "Sync from cloud" (these directories aren\'t auto-synced).'
+            : 'No visitors match the current filter.'}
         </div>
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
@@ -169,32 +168,30 @@ export function CustomerManagement() {
                 <tr>
                   <th className="text-left px-3 py-2 font-bold">Name</th>
                   <th className="text-left px-3 py-2 font-bold">Contact</th>
-                  <th className="text-left px-3 py-2 font-bold">Role</th>
+                  <th className="text-left px-3 py-2 font-bold">Pass</th>
                   <th className="text-left px-3 py-2 font-bold">Valid until</th>
                   <th className="text-right px-3 py-2 font-bold">Vehicles</th>
                   <th className="text-right px-3 py-2 font-bold">Passes here</th>
-                  {/* The ACCOUNT, not the pass — those are different facts and
-                      one header called "Status" was read as the other. */}
                   <th className="text-right px-3 py-2 font-bold">Account</th>
                 </tr>
               </thead>
               <tbody>
-                {pageItems.map((c) => (
-                  <tr key={c.id} className={`border-t border-gray-100 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
-                    <td className="px-3 py-2 font-semibold">{c.fullName || '—'}</td>
+                {pageItems.map((v) => (
+                  <tr key={v.id} className={`border-t border-gray-100 ${!v.isEnabled ? 'bg-gray-50' : ''}`}>
+                    <td className="px-3 py-2 font-semibold">{v.fullName || '—'}</td>
                     <td className="px-3 py-2 text-[12px] text-gray-600">
-                      <ContactCell email={c.email} phone={c.phone} />
+                      <ContactCell email={v.email} phone={v.phone} />
                     </td>
-                    <td className="px-3 py-2"><RoleBadge role={roleOf(c)} /></td>
-                    <td className="px-3 py-2"><PassTermBadge customer={c} /></td>
+                    <td className="px-3 py-2"><ValidityBadge valid={hasLivePass(v)} /></td>
+                    <td className="px-3 py-2"><PassTermBadge customer={v} /></td>
                     <td className="px-3 py-2 text-right font-mono text-[12px]">
-                      <CountChip icon={Car} n={c.vehiclesCount} />
+                      <CountChip icon={Car} n={v.vehiclesCount} />
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-[12px]">
-                      <CountChip icon={Ticket} n={c.activePassesCount} />
+                      <CountChip icon={Ticket} n={v.activePassesCount} />
                     </td>
                     <td className="px-3 py-2 text-right">
-                      {c.isEnabled
+                      {v.isEnabled
                         ? <span className="text-[10px] uppercase font-bold text-emerald-700">Active</span>
                         : <span className="text-[10px] uppercase font-bold text-gray-500">Disabled</span>}
                     </td>
@@ -206,20 +203,20 @@ export function CustomerManagement() {
 
           {/* MOBILE CARDS */}
           <ul className="md:hidden divide-y divide-gray-100">
-            {pageItems.map((c) => (
-              <li key={c.id} className={`p-3 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
+            {pageItems.map((v) => (
+              <li key={v.id} className={`p-3 ${!v.isEnabled ? 'bg-gray-50' : ''}`}>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold">{c.fullName || '—'}</span>
-                  <RoleBadge role={roleOf(c)} />
+                  <span className="font-semibold">{v.fullName || '—'}</span>
+                  <ValidityBadge valid={hasLivePass(v)} />
                 </div>
                 <div className="mt-1.5 text-[11px] text-gray-600">
-                  <ContactCell email={c.email} phone={c.phone} />
+                  <ContactCell email={v.email} phone={v.phone} />
                 </div>
-                <div className="mt-1.5"><PassTermBadge customer={c} /></div>
+                <div className="mt-1.5"><PassTermBadge customer={v} /></div>
                 <div className="mt-1.5 flex items-center gap-3 text-[11px] text-gray-600">
-                  <CountChip icon={Car} n={c.vehiclesCount} label="vehicles" />
-                  <CountChip icon={Ticket} n={c.activePassesCount} label="passes here" />
-                  {!c.isEnabled && <span className="uppercase font-bold text-gray-500">Disabled</span>}
+                  <CountChip icon={Car} n={v.vehiclesCount} label="vehicles" />
+                  <CountChip icon={Ticket} n={v.activePassesCount} label="passes here" />
+                  {!v.isEnabled && <span className="uppercase font-bold text-gray-500">Disabled</span>}
                 </div>
               </li>
             ))}
@@ -230,4 +227,14 @@ export function CustomerManagement() {
       <PaginationBar pager={pager} rowsOnPage={pageItems.length} />
     </div>
   );
+}
+
+/** Replaces the role chip Customers carries: on this page every row is a
+ *  visitor, so the useful fact in that column is whether the pass is still live
+ *  rather than a word repeated down the whole table. Amber matches the visitor
+ *  role colour used on the Customers and Vehicles pages. */
+function ValidityBadge({ valid }: { valid: boolean }) {
+  return valid
+    ? <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase bg-amber-100 text-amber-800">Valid now</span>
+    : <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase bg-gray-100 text-gray-600">No live pass</span>;
 }
