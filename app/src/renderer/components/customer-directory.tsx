@@ -1,6 +1,5 @@
 import { Mail, Phone } from 'lucide-react';
 import type { CloudCustomer } from '@shared/types';
-import { fmtDate } from '../lib/datetime';
 
 /**
  * The pieces the two halves of the customer directory share.
@@ -69,61 +68,22 @@ export function RoleBadge({ role }: { role: string | null }) {
 /**
  * Is this person's pass live right now?
  *
- * Reads the cloud's own `pass_status`, NOT the end date. The cloud flips a pass
- * to `expired` on an hourly job (passes:expire), and a pass is valid through the
- * END of its last day — so a box comparing `end_date` to today would call a pass
- * dead some hours before the cloud does, and disagree with the barrier. One
- * authority for the verdict; the date is only ever displayed.
+ * Reads the cloud's own `pass_status`, NOT a date compared here. The cloud flips
+ * a pass to `expired` on an hourly job (passes:expire), and a pass is valid
+ * through the END of its last day — so a box doing its own date maths would call
+ * a pass dead some hours before the cloud does. One authority for the verdict.
+ *
+ * The DATE this depends on is deliberately not shown on the directory pages: the
+ * Vehicles page already carries the full term (start → end, with lapsed / not
+ * yet started), keyed on the plate a barrier actually reads. A second copy here
+ * would be a second answer to the same question, derived a different way.
  *
  * Falls back to activePassesCount for a box that has not synced since the cloud
- * started sending pass_status, which is the signal that page used before.
+ * started sending pass_status, which is the signal these pages used before.
  */
 export function hasLivePass(customer: CloudCustomer): boolean {
   if (customer.passStatus) return customer.passStatus === 'active';
   return customer.activePassesCount > 0;
-}
-
-/**
- * "Until when" for one person's pass, as a phrase rather than a bare date —
- * a date alone cannot say whether it is a deadline or an epitaph.
- *
- * The three NULL-date cases are genuinely different and must not collapse into
- * one dash: a resident's pass never expires, a pending one has not started its
- * clock (payment does that), and a box that has not synced simply does not know.
- */
-export function passTerm(customer: CloudCustomer): { label: string; tone: 'live' | 'dead' | 'muted' } {
-  const status = customer.passStatus;
-  const ends = customer.passEndsAt;
-
-  if (status === 'expired') {
-    return { label: ends ? `Expired ${fmtDate(ends)}` : 'Expired', tone: 'dead' };
-  }
-  if (status === 'pending') return { label: 'Awaiting payment', tone: 'muted' };
-  if (status === 'suspended') return { label: 'Suspended', tone: 'dead' };
-  if (status === 'rejected') return { label: 'Rejected', tone: 'dead' };
-
-  if (status === 'active') {
-    // A resident's pass carries no end date by design (Role::neverExpires).
-    return ends
-      ? { label: `Until ${fmtDate(ends)}`, tone: 'live' }
-      : { label: 'No end date', tone: 'live' };
-  }
-
-  // No status at all: pre-sync box. Say so rather than guess.
-  return { label: '—', tone: 'muted' };
-}
-
-/** The pass term as a chip. Same wording and colours on both directory pages. */
-export function PassTermBadge({ customer }: { customer: CloudCustomer }) {
-  const { label, tone } = passTerm(customer);
-  const cls = tone === 'live'
-    ? 'bg-emerald-100 text-emerald-800'
-    : tone === 'dead'
-      ? 'bg-red-100 text-red-800'
-      : 'bg-gray-100 text-gray-600';
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase whitespace-nowrap ${cls}`}>{label}</span>
-  );
 }
 
 export function CountChip({ icon: Icon, n, label }: { icon: any; n: number; label?: string }) {

@@ -448,14 +448,13 @@ export interface CloudCustomer {
    *  (migration 2026_08_16_090000); a box that has not pulled since still holds
    *  the old word, which is why roleOf() compares and never rewrites it. */
   siteRole: string | null;
-  /** Status and last day of the pass that `siteRole` came from — the SAME pass,
-   *  picked by the cloud with one ordering (live beats finished, then newest).
-   *  `passEndsAt` is a bare 'YYYY-MM-DD', and is NULL for a pass with no term:
-   *  a resident (never expires) or one still pending payment (the clock starts
-   *  when it is paid). Both NULL on a box that has not synced since the cloud
-   *  started sending them. */
+  /** Status of the pass that `siteRole` came from — the SAME pass, picked by the
+   *  cloud with one ordering (live beats finished, then newest). Drives the
+   *  live/lapsed verdict on the directory pages; the pass's DATES are shown only
+   *  on the Vehicles page, keyed on the plate, so there is one place they can be
+   *  read and one way they are derived. NULL on a box that has not synced since
+   *  the cloud started sending it. */
   passStatus: string | null;
-  passEndsAt: string | null;
   isEnabled: boolean;
   vehiclesCount: number;
   /** Active passes AT THIS SITE only. */

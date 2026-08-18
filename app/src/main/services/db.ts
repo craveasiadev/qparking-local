@@ -453,9 +453,10 @@ function applySchema(db: Database.Database) {
       email TEXT,
       phone TEXT,
       site_role TEXT,
-      -- The term behind site_role: same pass, its status and its last day.
+      -- Status of the same pass site_role came from, for the live/lapsed chip.
+      -- Its DATES are deliberately not mirrored here: the Vehicles page already
+      -- carries the term against the plate, and one fact in two places drifts.
       pass_status TEXT,
-      pass_ends_at TEXT,
       is_enabled INTEGER NOT NULL DEFAULT 1,
       vehicles_count INTEGER NOT NULL DEFAULT 0,
       active_passes_count INTEGER NOT NULL DEFAULT 0,
@@ -951,11 +952,10 @@ function applySchema(db: Database.Database) {
 		// falls back to the legacy pass_type, so an un-synced box is unchanged.
 		["parking_spaces", "bay_type TEXT"],
 		["cloud_customers", "site_role TEXT"],
-		// Pass term on the directory rows (2026-08-18). NULL until the next pull,
-		// and the pages render that as "—", so an un-synced box shows no date
-		// rather than a wrong one.
+		// Pass status on the directory rows (2026-08-18). NULL until the next pull,
+		// and hasLivePass() then falls back to the active-pass count, which is the
+		// signal those pages used before this column existed.
 		["cloud_customers", "pass_status TEXT"],
-		["cloud_customers", "pass_ends_at TEXT"],
 		// Per-camera webhook port (2026-08-11). The default matches the box-wide
 		// setting it replaced, so a standard install keeps the port its cameras
 		// are already pushing to; anything else is backfilled below.
@@ -3163,7 +3163,6 @@ function rowToCloudCustomer(row: any): CloudCustomer {
 		phone: row.phone ?? null,
 		siteRole: row.site_role ?? null,
 		passStatus: row.pass_status ?? null,
-		passEndsAt: row.pass_ends_at ?? null,
 		isEnabled: !!row.is_enabled,
 		vehiclesCount: row.vehicles_count ?? 0,
 		activePassesCount: row.active_passes_count ?? 0,
@@ -3182,11 +3181,11 @@ export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM cloud_customers").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
-        id, full_name, email, phone, site_role, pass_status, pass_ends_at, is_enabled,
+        id, full_name, email, phone, site_role, pass_status, is_enabled,
         vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const c of customers) {
-			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.passStatus, c.passEndsAt, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
+			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.passStatus, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
 		}
 	});
 	tx();

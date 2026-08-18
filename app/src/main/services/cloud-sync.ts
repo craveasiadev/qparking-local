@@ -483,11 +483,9 @@ export async function syncCloudCustomers(): Promise<SyncResult> {
 				// Absent from a SaaS that predates the reconstruct — the UI then
 				// falls back to the legacy type, i.e. exactly the old behaviour.
 				siteRole: row.site_role ?? null,
-				// Absent from a SaaS that predates the pass-term fields — reads as
-				// "no date known", which the pages render as "—" rather than
-				// inventing a term the cloud never sent.
+				// Absent from a SaaS that predates it — hasLivePass() then falls back
+				// to the active-pass count rather than reading "no status" as lapsed.
 				passStatus: row.pass_status ?? null,
-				passEndsAt: row.pass_ends_at ?? null,
 				isEnabled: row.is_enabled == null ? true : !!row.is_enabled,
 				vehiclesCount: Number(row.vehicles_count ?? 0),
 				activePassesCount: Number(row.active_passes_count ?? 0),

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  UserPlus, RefreshCw, CloudDownload, Clock, Car, Ticket, UserX, CheckCircle2, CircleSlash,
+  UserPlus, RefreshCw, CloudDownload, Clock, Car, UserX, CheckCircle2, CircleSlash,
 } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip';
-import { ContactCell, CountChip, PassTermBadge, hasLivePass, isVisitor } from '../components/customer-directory';
+import { ContactCell, CountChip, hasLivePass, isVisitor } from '../components/customer-directory';
 import type { CloudCustomer } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
@@ -96,11 +96,10 @@ export function VisitorManagement() {
               by a resident from their own portal; this page is a read-only copy
               kept on this server so you can check a name at the barrier without
               logging into the cloud. "Valid now" is the cloud's own verdict on
-              the pass, and "Valid until" is its last day — a pass stays good
-              through the end of that day. The cloud expires a lapsed pass on an
-              hourly job and this box pulls on its own schedule, so a pass that
-              just ran out can read as live for a short while; press "Sync from
-              cloud" to settle it now.
+              the pass; for its dates, look the car up on the Vehicles page. The
+              cloud expires a lapsed pass on an hourly job and this box pulls on
+              its own schedule, so a pass that just ran out can read as live for
+              a short while; press "Sync from cloud" to settle it now.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
@@ -156,7 +155,7 @@ export function VisitorManagement() {
       {filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">
           {visitors.length === 0
-            ? 'No visitors cached for this site. Press "Sync from cloud" (these directories aren\'t auto-synced).'
+            ? 'No visitors cached for this site. Press "Sync from cloud" to pull them now.'
             : 'No visitors match the current filter.'}
         </div>
       ) : (
@@ -169,9 +168,7 @@ export function VisitorManagement() {
                   <th className="text-left px-3 py-2 font-bold">Name</th>
                   <th className="text-left px-3 py-2 font-bold">Contact</th>
                   <th className="text-left px-3 py-2 font-bold">Pass</th>
-                  <th className="text-left px-3 py-2 font-bold">Valid until</th>
                   <th className="text-right px-3 py-2 font-bold">Vehicles</th>
-                  <th className="text-right px-3 py-2 font-bold">Passes here</th>
                   <th className="text-right px-3 py-2 font-bold">Account</th>
                 </tr>
               </thead>
@@ -183,12 +180,8 @@ export function VisitorManagement() {
                       <ContactCell email={v.email} phone={v.phone} />
                     </td>
                     <td className="px-3 py-2"><ValidityBadge valid={hasLivePass(v)} /></td>
-                    <td className="px-3 py-2"><PassTermBadge customer={v} /></td>
                     <td className="px-3 py-2 text-right font-mono text-[12px]">
                       <CountChip icon={Car} n={v.vehiclesCount} />
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-[12px]">
-                      <CountChip icon={Ticket} n={v.activePassesCount} />
                     </td>
                     <td className="px-3 py-2 text-right">
                       {v.isEnabled
@@ -212,10 +205,8 @@ export function VisitorManagement() {
                 <div className="mt-1.5 text-[11px] text-gray-600">
                   <ContactCell email={v.email} phone={v.phone} />
                 </div>
-                <div className="mt-1.5"><PassTermBadge customer={v} /></div>
                 <div className="mt-1.5 flex items-center gap-3 text-[11px] text-gray-600">
                   <CountChip icon={Car} n={v.vehiclesCount} label="vehicles" />
-                  <CountChip icon={Ticket} n={v.activePassesCount} label="passes here" />
                   {!v.isEnabled && <span className="uppercase font-bold text-gray-500">Disabled</span>}
                 </div>
               </li>

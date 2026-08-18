@@ -3,7 +3,7 @@ import {
   Users, RefreshCw, CloudDownload, Clock, Car, Ticket, UserX,
 } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip';
-import { ContactCell, CountChip, PassTermBadge, RoleBadge, isVisitor, roleOf } from '../components/customer-directory';
+import { ContactCell, CountChip, RoleBadge, isVisitor, roleOf } from '../components/customer-directory';
 import type { CloudCustomer } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
@@ -97,13 +97,13 @@ export function CustomerManagement() {
               server so you can look up a name or phone number quickly, without
               logging into the cloud. Role, vehicle and pass counts all cover THIS
               site only — someone is only listed here because they hold a pass
-              here. "Valid until" is the last day of that pass; a resident's
-              pass carries no end date. Visitors are on their own page. Press
-              "Sync from cloud" to get the latest list.
+              here. For a pass's dates, look the car up on the Vehicles page —
+              that is where the term lives. Visitors are on their own page.
+              Press "Sync from cloud" to get the latest list.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Residents, staff and season holders — how to reach them, when their pass runs out, and how many vehicles they hold.
+            Residents, staff and season holders — how to reach them, and how many vehicles and passes they hold.
             {visitorCount > 0 && ` ${visitorCount} visitor${visitorCount === 1 ? '' : 's'} are on the Visitors page.`}
           </p>
           {lastSynced && (
@@ -170,7 +170,6 @@ export function CustomerManagement() {
                   <th className="text-left px-3 py-2 font-bold">Name</th>
                   <th className="text-left px-3 py-2 font-bold">Contact</th>
                   <th className="text-left px-3 py-2 font-bold">Role</th>
-                  <th className="text-left px-3 py-2 font-bold">Valid until</th>
                   <th className="text-right px-3 py-2 font-bold">Vehicles</th>
                   <th className="text-right px-3 py-2 font-bold">Passes here</th>
                   {/* The ACCOUNT, not the pass — those are different facts and
@@ -186,7 +185,6 @@ export function CustomerManagement() {
                       <ContactCell email={c.email} phone={c.phone} />
                     </td>
                     <td className="px-3 py-2"><RoleBadge role={roleOf(c)} /></td>
-                    <td className="px-3 py-2"><PassTermBadge customer={c} /></td>
                     <td className="px-3 py-2 text-right font-mono text-[12px]">
                       <CountChip icon={Car} n={c.vehiclesCount} />
                     </td>
@@ -215,7 +213,6 @@ export function CustomerManagement() {
                 <div className="mt-1.5 text-[11px] text-gray-600">
                   <ContactCell email={c.email} phone={c.phone} />
                 </div>
-                <div className="mt-1.5"><PassTermBadge customer={c} /></div>
                 <div className="mt-1.5 flex items-center gap-3 text-[11px] text-gray-600">
                   <CountChip icon={Car} n={c.vehiclesCount} label="vehicles" />
                   <CountChip icon={Ticket} n={c.activePassesCount} label="passes here" />
