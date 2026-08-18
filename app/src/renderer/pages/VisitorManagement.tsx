@@ -17,13 +17,14 @@ const PAGE_SIZE = 20;
 /**
  * Visitors — the other half of the customer directory.
  *
- * A visitor is someone whose pass at THIS site carries the `visitor` role: a
- * dated pass, one car, no bay. They are ordinary customer rows in the mirror —
- * this page and Customers read the same `cloud_customers` cache and partition it
- * on role, so a person is on exactly one of the two. Split onto its own page
+ * A visitor is someone whose pass at THIS site carries the `visitor` holder
+ * type: a dated pass, one car, no bay. They are ordinary customer rows in the
+ * mirror — this page and Customers read the same `cloud_customers` cache and
+ * partition it on holder type, so a person is on exactly one of the two. Split
+ * onto its own page
  * (2026-08-18) because the two populations answer different questions at a
  * barrier: Customers is "who is this resident and how do I reach them", this is
- * "is this guest expected, and is their pass still live".
+ * "is this visitor expected, and is their pass still live".
  *
  * WHAT THIS PAGE CANNOT SHOW, and why. The cloud's own Visitors page reads
  * PASSES, so it also lists walk-ins registered at the counter — those carry the
@@ -91,7 +92,7 @@ export function VisitorManagement() {
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
             <UserPlus size={22} /> Visitors
             <InfoTip>
-              Guests holding a dated visitor pass at this site — one car, no
+              Visitors holding a dated pass at this site — one car, no
               reserved bay. They are registered in the qparking cloud portal, or
               by a resident from their own portal; this page is a read-only copy
               kept on this server so you can check a name at the barrier without
@@ -103,7 +104,7 @@ export function VisitorManagement() {
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Who is expected as a guest, how to reach them, and whether their pass is still live.
+            Who is expected as a visitor, how to reach them, and whether their pass is still live.
           </p>
           {lastSynced && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-gray-400">
@@ -220,10 +221,10 @@ export function VisitorManagement() {
   );
 }
 
-/** Replaces the role chip Customers carries: on this page every row is a
- *  visitor, so the useful fact in that column is whether the pass is still live
- *  rather than a word repeated down the whole table. Amber matches the visitor
- *  role colour used on the Customers and Vehicles pages. */
+/** Replaces the holder-type chip Customers carries: on this page every row is
+ *  a visitor, so the useful fact in that column is whether the pass is still
+ *  live rather than a word repeated down the whole table. Amber matches the
+ *  visitor colour used on the Customers and Vehicles pages. */
 function ValidityBadge({ valid }: { valid: boolean }) {
   return valid
     ? <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase bg-amber-100 text-amber-800">Valid now</span>

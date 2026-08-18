@@ -444,16 +444,17 @@ function applySchema(db: Database.Database) {
     -- staff can look an owner up at the gate without a browser. The cloud_
     -- prefix marks them as mirrors this app never writes back (unlike
     -- sessions/lanes/cameras, which are locally owned).
-    -- site_role is what they ARE at this site (the role of the pass they hold
-    -- here). It replaced the old global resident/visitor flag column "type",
-    -- which is dropped below on installs that still carry it.
+    -- holder_type is what they ARE at this site (the holder type of the pass
+    -- they hold here). Named site_role until the cloud's 2026-08-18 rename
+    -- (renamed below on installs that still carry it); before that it was the
+    -- old global resident/visitor flag column "type", dropped below too.
     CREATE TABLE IF NOT EXISTS cloud_customers (
       id TEXT PRIMARY KEY,
       full_name TEXT,
       email TEXT,
       phone TEXT,
-      site_role TEXT,
-      -- Status of the same pass site_role came from, for the live/lapsed chip.
+      holder_type TEXT,
+      -- Status of the same pass holder_type came from, for the live/lapsed chip.
       -- Its DATES are deliberately not mirrored here: the Vehicles page already
       -- carries the term against the plate, and one fact in two places drifts.
       pass_status TEXT,
@@ -737,12 +738,22 @@ function applySchema(db: Database.Database) {
 	}
 
 	// 2026-08-12: cloud_customers.type — the old GLOBAL resident/visitor flag,
-	// superseded by site_role (what they are at THIS site). Nothing has written
-	// or read it since site_role landed, so every row's value was already stale.
+	// superseded by the per-site column below. Nothing has written or read it
+	// since that landed, so every row's value was already stale.
 	try {
 		db.exec("ALTER TABLE cloud_customers DROP COLUMN type");
 	} catch {
 		/* column absent or old SQLite */
+	}
+
+	// 2026-08-18: the cloud renamed the column (season_passes.role became
+	// holder_type), and the mirror follows its wire. Runs BEFORE the add-column
+	// list so an old install renames in place and the holder_type add below
+	// no-ops; on a fresh install site_role never existed and this no-ops instead.
+	try {
+		db.exec("ALTER TABLE cloud_customers RENAME COLUMN site_role TO holder_type");
+	} catch {
+		/* column absent, already renamed, or old SQLite */
 	}
 
 	// Idempotent column adds for installs whose `cameras` table was created
@@ -951,7 +962,9 @@ function applySchema(db: Database.Database) {
 		// Bay designation (2026-08-11). NULL until the next sync, and the UI
 		// falls back to the legacy pass_type, so an un-synced box is unchanged.
 		["parking_spaces", "bay_type TEXT"],
-		["cloud_customers", "site_role TEXT"],
+		// Renamed from site_role (2026-08-18) by the migration above; this add
+		// only fires on installs that predate the column under either name.
+		["cloud_customers", "holder_type TEXT"],
 		// Pass status on the directory rows (2026-08-18). NULL until the next pull,
 		// and hasLivePass() then falls back to the active-pass count, which is the
 		// signal those pages used before this column existed.
@@ -3161,7 +3174,7 @@ function rowToCloudCustomer(row: any): CloudCustomer {
 		fullName: row.full_name ?? null,
 		email: row.email ?? null,
 		phone: row.phone ?? null,
-		siteRole: row.site_role ?? null,
+		holderType: row.holder_type ?? null,
 		passStatus: row.pass_status ?? null,
 		isEnabled: !!row.is_enabled,
 		vehiclesCount: row.vehicles_count ?? 0,
@@ -3181,11 +3194,11 @@ export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM cloud_customers").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
-        id, full_name, email, phone, site_role, pass_status, is_enabled,
+        id, full_name, email, phone, holder_type, pass_status, is_enabled,
         vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const c of customers) {
-			insert.run(c.id, c.fullName, c.email, c.phone, c.siteRole, c.passStatus, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
+			insert.run(c.id, c.fullName, c.email, c.phone, c.holderType, c.passStatus, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
 		}
 	});
 	tx();

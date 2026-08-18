@@ -4,39 +4,35 @@ import type { CloudCustomer } from '@shared/types';
 /**
  * The pieces the two halves of the customer directory share.
  *
- * Customers and Visitors are one mirror (`cloud_customers`) split by role onto
- * two pages, so the row rendering has to stay identical between them — a
+ * Customers and Visitors are one mirror (`cloud_customers`) split by holder
+ * type onto two pages, so the row rendering has to stay identical between them — a
  * visitor who turns into a resident should not change how their contact details
  * or counts are drawn. Extracted here rather than duplicated so there is one
  * place to change when the shape of a row moves.
  */
 
-/** `season_passes.role` for someone with a dated pass, one car and no bay.
- *  Was 'guest' until the cloud renamed it (migration 2026_08_16_090000); the
- *  box speaks the cloud's word so a filter compares equal to what it receives. */
-export const VISITOR_ROLE = 'visitor';
+/** The `visitor` holder type — a dated pass, one car and no bay. One of the
+ *  cloud's four canonical values (resident | staff | season | visitor); it was
+ *  'guest' before the cloud's 2026-08-16 rename, a word nothing sends anymore. */
+export const VISITOR_HOLDER_TYPE = 'visitor';
 
-/** What they ARE at this site — the role of the pass they hold here.
+/** What they ARE at this site — the holder type of the pass they hold here.
  *
  * Falls back to visitor, the least-privileged standing, when the cloud has not
- * told us yet: an unknown role must never read as a resident and inherit the
- * standing that goes with it. The old global resident/visitor customer flag it
- * used to fall back on no longer exists.
+ * told us yet: an unknown holder type must never read as a resident and inherit
+ * the standing that goes with it. The old global resident/visitor customer flag
+ * it used to fall back on no longer exists.
  */
-export function roleOf(customer: CloudCustomer): string {
-  return customer.siteRole ?? VISITOR_ROLE;
+export function holderTypeOf(customer: CloudCustomer): string {
+  return customer.holderType ?? VISITOR_HOLDER_TYPE;
 }
 
 /** Which half of the directory someone belongs to.
  *
- * Accepts the pre-rename 'guest' too. The mirror is replace-all on every pull,
- * so the old word only survives on a box that has not synced since 2026-08-16 —
- * but such a box would otherwise put its visitors on the Customers page under no
- * role tab at all, which is precisely the confusion the split exists to end.
- * Read tolerantly, compare against the canonical word everywhere else. */
+ * No 'guest' tolerance anymore: the mirror is replace-all on every pull and the
+ * cloud has sent 'visitor' since 2026-08-16, so the old word cannot reappear. */
 export function isVisitor(customer: CloudCustomer): boolean {
-  const role = roleOf(customer);
-  return role === VISITOR_ROLE || role === 'guest';
+  return holderTypeOf(customer) === VISITOR_HOLDER_TYPE;
 }
 
 export function ContactCell({ email, phone }: { email: string | null; phone: string | null }) {
@@ -49,19 +45,18 @@ export function ContactCell({ email, phone }: { email: string | null; phone: str
   );
 }
 
-/** Same four roles and the same colours as the Vehicles page and the bay
- *  badges, so a resident, their pass and their bay all read as one thing. */
-export function RoleBadge({ role }: { role: string | null }) {
-  if (!role) return <span className="text-[11px] text-gray-400">—</span>;
+/** Same four holder types and the same colours as the Vehicles page and the
+ *  bay badges, so a resident, their pass and their bay all read as one thing. */
+export function HolderTypeBadge({ holderType }: { holderType: string | null }) {
+  if (!holderType) return <span className="text-[11px] text-gray-400">—</span>;
   const tone: Record<string, string> = {
     resident: 'bg-sky-100 text-sky-800',
     staff: 'bg-violet-100 text-violet-800',
     season: 'bg-teal-100 text-teal-800',
     visitor: 'bg-amber-100 text-amber-800',
-    guest: 'bg-amber-100 text-amber-800', // pre-rename rows on an unsynced box
   };
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${tone[role] ?? 'bg-gray-100 text-gray-700'}`}>{role}</span>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${tone[holderType] ?? 'bg-gray-100 text-gray-700'}`}>{holderType}</span>
   );
 }
 

@@ -3,7 +3,7 @@ import {
   Users, RefreshCw, CloudDownload, Clock, Car, Ticket, UserX,
 } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip';
-import { ContactCell, CountChip, RoleBadge, isVisitor, roleOf } from '../components/customer-directory';
+import { ContactCell, CountChip, HolderTypeBadge, isVisitor, holderTypeOf } from '../components/customer-directory';
 import type { CloudCustomer } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
@@ -26,9 +26,9 @@ const PAGE_SIZE = 20;
  * VISITORS ARE NOT LISTED HERE — they have their own page, the same way the
  * cloud operator portal splits Customers from Visitors. Someone at a barrier is
  * asking one of two different questions ("who is this resident?" vs "is this
- * guest expected?"), and mixing both populations into one list made the answer
- * slower to find. The two pages read the SAME mirror and partition it on role,
- * so nobody can be on both and nobody falls between them.
+ * visitor expected?"), and mixing both populations into one list made the answer
+ * slower to find. The two pages read the SAME mirror and partition it on
+ * holder type, so nobody can be on both and nobody falls between them.
  */
 type Filter = 'all' | 'resident' | 'staff' | 'season' | 'disabled';
 
@@ -39,7 +39,7 @@ export function CustomerManagement() {
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
 
-  // The mirror carries every role; this page owns the non-visitor half of it.
+  // The mirror carries every holder type; this page owns the non-visitor half of it.
   // Partitioned at load rather than in each filter/count so `customers` means
   // one thing throughout the page — including the "nothing cached yet" test,
   // which must not report an empty page when the cache holds visitors only.
@@ -64,14 +64,14 @@ export function CustomerManagement() {
 
   const counts = useMemo(() => ({
     all: customers.length,
-    resident: customers.filter((c) => roleOf(c) === 'resident').length,
-    staff: customers.filter((c) => roleOf(c) === 'staff').length,
-    season: customers.filter((c) => roleOf(c) === 'season').length,
+    resident: customers.filter((c) => holderTypeOf(c) === 'resident').length,
+    staff: customers.filter((c) => holderTypeOf(c) === 'staff').length,
+    season: customers.filter((c) => holderTypeOf(c) === 'season').length,
     disabled: customers.filter((c) => !c.isEnabled).length,
   }), [customers]);
 
   const filtered = customers.filter((c) => {
-    if (filter !== 'all' && filter !== 'disabled' && roleOf(c) !== filter) return false;
+    if (filter !== 'all' && filter !== 'disabled' && holderTypeOf(c) !== filter) return false;
     if (filter === 'disabled' && c.isEnabled) return false;
     if (search) {
       const q = search.toLowerCase();
@@ -95,7 +95,7 @@ export function CustomerManagement() {
               Customers are added and edited in the qparking cloud portal
               (Parking Management → Customers). This page is a copy kept on this
               server so you can look up a name or phone number quickly, without
-              logging into the cloud. Role, vehicle and pass counts all cover THIS
+              logging into the cloud. Holder type, vehicle and pass counts all cover THIS
               site only — someone is only listed here because they hold a pass
               here. For a pass's dates, look the car up on the Vehicles page —
               that is where the term lives. Visitors are on their own page.
@@ -169,7 +169,7 @@ export function CustomerManagement() {
                 <tr>
                   <th className="text-left px-3 py-2 font-bold">Name</th>
                   <th className="text-left px-3 py-2 font-bold">Contact</th>
-                  <th className="text-left px-3 py-2 font-bold">Role</th>
+                  <th className="text-left px-3 py-2 font-bold">Holder type</th>
                   <th className="text-right px-3 py-2 font-bold">Vehicles</th>
                   <th className="text-right px-3 py-2 font-bold">Passes here</th>
                   {/* The ACCOUNT, not the pass — those are different facts and
@@ -184,7 +184,7 @@ export function CustomerManagement() {
                     <td className="px-3 py-2 text-[12px] text-gray-600">
                       <ContactCell email={c.email} phone={c.phone} />
                     </td>
-                    <td className="px-3 py-2"><RoleBadge role={roleOf(c)} /></td>
+                    <td className="px-3 py-2"><HolderTypeBadge holderType={holderTypeOf(c)} /></td>
                     <td className="px-3 py-2 text-right font-mono text-[12px]">
                       <CountChip icon={Car} n={c.vehiclesCount} />
                     </td>
@@ -208,7 +208,7 @@ export function CustomerManagement() {
               <li key={c.id} className={`p-3 ${!c.isEnabled ? 'bg-gray-50' : ''}`}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold">{c.fullName || '—'}</span>
-                  <RoleBadge role={roleOf(c)} />
+                  <HolderTypeBadge holderType={holderTypeOf(c)} />
                 </div>
                 <div className="mt-1.5 text-[11px] text-gray-600">
                   <ContactCell email={c.email} phone={c.phone} />

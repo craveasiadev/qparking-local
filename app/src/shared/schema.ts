@@ -443,12 +443,13 @@ export interface CloudCustomer {
   email: string | null;
   phone: string | null;
   /** What they ARE at THIS site: 'resident' | 'staff' | 'season' | 'visitor' —
-   *  the role of the pass they hold here. NULL on a box that has not synced
-   *  since the cloud started sending it. The cloud renamed 'guest' to 'visitor'
-   *  (migration 2026_08_16_090000); a box that has not pulled since still holds
-   *  the old word, which is why roleOf() compares and never rewrites it. */
-  siteRole: string | null;
-  /** Status of the pass that `siteRole` came from — the SAME pass, picked by the
+   *  the holder type of the pass they hold here (wire: `holder_type`, named
+   *  `site_role` before the cloud's 2026-08-18 rename — the sync reads both).
+   *  NULL on a box that has not synced since the cloud started sending it.
+   *  Always one of the four canonical words: the mirror is replace-all on every
+   *  pull and the cloud stopped sending the pre-rename 'guest' on 2026-08-16. */
+  holderType: string | null;
+  /** Status of the pass that `holderType` came from — the SAME pass, picked by the
    *  cloud with one ordering (live beats finished, then newest). Drives the
    *  live/lapsed verdict on the directory pages; the pass's DATES are shown only
    *  on the Vehicles page, keyed on the plate, so there is one place they can be
