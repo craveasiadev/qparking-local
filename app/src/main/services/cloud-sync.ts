@@ -244,7 +244,8 @@ function mapV2RowToSeasonPasses(row: any, fetchedAt: string): SeasonPass[] {
 
 /**
  * Pull the active season-pass roster. The gate uses this to skip charging
- * plates that have a paid / VIP / corporate / staff pass. Passes are
+ * plates that hold a valid pass — season, resident, visitor or complimentary
+ * plans, whoever they're sold to (staff included). Passes are
  * site-scoped (one site per install), so they're cached as a single flat set
  * keyed by plate — replace-all, so a pass revoked on the cloud disappears
  * locally on the next sync. An empty roster is legitimate, not a failure.

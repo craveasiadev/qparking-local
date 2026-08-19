@@ -3105,8 +3105,8 @@ function siteDayKey(at?: string | null): string {
 /**
  * Find a valid pass for the given plate. Season passes are site-scoped (one site
  * per install), so the lookup is purely by plate. Returns the longest-coverage
- * pass first so a plate with a free_access + corporate match prefers the broader
- * entitlement.
+ * pass first so a plate riding on two passes (a personal one and a sponsored
+ * one, say) prefers the broader entitlement.
  *
  * Validity is decided ENTIRELY from the dates cached on the row — the gate never
  * calls the cloud to ask. The SaaS already filters its roster to today's valid
