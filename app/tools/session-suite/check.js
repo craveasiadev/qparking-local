@@ -3,10 +3,12 @@
  *
  * Drives the REAL code paths — lprEvents → handlePlateEvent → handleEntry /
  * handleExit → recordExit / startTngExitCharge — for every state a parking
- * session can reach, and for every pass type qparking SaaS can issue
- * (App\Enum\SeasonPass\PassType: monthly, quarterly, yearly, staff, corporate,
- * free_access, vip, temporary, resident) plus every pass validity edge the
- * cached roster can present.
+ * session can reach, and for every pass_type value the cached roster can hold.
+ * The cloud's v1 payload now derives pass_type as monthly / quarterly / yearly /
+ * staff / free_access / temporary / resident (corporate and vip stopped being
+ * issued when the SaaS collapsed its plan categories, 2026-08-19), but the gate
+ * treats the value as opaque, so the retired words stay in the suite to prove
+ * an un-synced cache still exits cleanly. Plus every pass validity edge.
  *
  * The only stubs are the three payment-device seams — payResultListenerReady,
  * payRequest, payCancel — so a paid exit can be approved / declined / timed out
@@ -577,6 +579,9 @@ async function main() {
     { type: 'quarterly', plate: 'PQU0002', isFree: false },
     { type: 'yearly', plate: 'PYE0003', isFree: false },
     { type: 'staff', plate: 'PST0004', isFree: false },
+    // corporate + vip: the cloud stopped emitting these 2026-08-19 (plan
+    // categories collapsed), but a box that hasn't synced since may still hold
+    // them — the gate is value-agnostic, and these rows prove it stays so.
     { type: 'corporate', plate: 'PCO0005', isFree: false },
     { type: 'free_access', plate: 'PFA0006', isFree: true },
     { type: 'vip', plate: 'PVI0007', isFree: false },
