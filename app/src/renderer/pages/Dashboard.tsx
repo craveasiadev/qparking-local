@@ -271,11 +271,12 @@ function HealthSection({ icon: Icon, title, rows, emptyText }: {
               <div className="min-w-0">
                 <div className="font-semibold truncate">{r.name}</div>
                 <div className="text-xs text-gray-500 truncate font-mono">{r.address}</div>
-                {/* The reason, when there is one — "credentials refused" and
-                    "nothing listening" send the operator to different places. */}
-                {r.status === 'offline' && r.detail && (
-                  <div className="text-xs text-red-600 truncate" title={r.detail}>{r.detail}</div>
-                )}
+                {/* No failure-reason line here. These reasons are full sentences
+                    ("timed out — no response (wrong IP, or device unreachable /
+                    firewalled)"), so in a narrow dashboard column every one of them
+                    truncated mid-clause into something unreadable. The Dashboard's
+                    job is WHICH device is down; the reason lives on the pill's
+                    tooltip, and in full on the device's own page. */}
               </div>
               <HealthPill row={r} />
             </li>
