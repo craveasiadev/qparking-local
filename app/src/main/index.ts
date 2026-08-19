@@ -121,6 +121,10 @@ import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
 import { startLcdDisplays, stopLcdDisplays, reloadLcdLinks, getLcdStatuses, testLcd } from './services/lcd-display';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier, isSdkLoaded } from './services/camera-relay';
+import {
+  startDeviceHealth, stopDeviceHealth, sweepDeviceHealth, snapshotDeviceHealth, deviceHealthEvents,
+} from './services/device-health';
+import { startHealthHeartbeat, stopHealthHeartbeat, postHeartbeat, getHeartbeatState } from './services/health-heartbeat';
 import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers, restartFeeds as restartRtspFeeds } from './services/camera-rtsp';
 import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
 import {
@@ -201,6 +205,13 @@ app.whenReady().then(async () => {
   // onboard relay instantly.
   startRtspGrabbers();
   startCameraRelay();
+  // Reachability monitoring. LAST of the device services on purpose: its first
+  // sweep reads the LCD links and the camera relay's warm handles, so starting it
+  // before them would report a site full of offline equipment for one tick.
+  startDeviceHealth();
+  // Report that health up to the cloud. Started after the monitor so its first
+  // post carries a real snapshot rather than an empty one.
+  startHealthHeartbeat();
 
   createWindow();
   createTray();
@@ -217,6 +228,8 @@ function stopBackgroundServices() {
   try { stopCameraRelay(); } catch { /* ignore */ }
   try { stopLprServers(); } catch { /* ignore */ }
   try { stopLcdDisplays(); } catch { /* ignore */ }
+  try { stopDeviceHealth(); } catch { /* ignore */ }
+  try { stopHealthHeartbeat(); } catch { /* ignore */ }
 }
 
 /** Any quit route that isn't the tray's — Windows shutdown, a task-manager close,
@@ -727,6 +740,9 @@ function wireRendererEvents() {
 
   // Sync status → renderer for the Dashboard panel.
   syncEvents.on('status', (status) => sendToRenderer('sync-status', status));
+  // Reachability is pushed, not polled: every page that shows a status chip gets
+  // the same rows at the same moment, and none of them needs a ping loop.
+  deviceHealthEvents.on('health', (rows) => sendToRenderer('device-health', rows));
 
   // Cloud PULL outcome → renderer. Drives the header's "last synced" stamp.
   // Event-driven rather than polled: with the 60s tick gone this only changes
@@ -906,9 +922,14 @@ ipcMain.handle('terminals:list', () => listTerminals());
 ipcMain.handle('terminals:save', (_e, input) => {
   // Local-only save. Cloud sync is manual now — the operator pushes from the
   // Terminals page's "Push to cloud" button.
-  return upsertTerminal(input);
+  const saved = upsertTerminal(input);
+  void sweepDeviceHealth().catch(() => null);
+  return saved;
 });
-ipcMain.handle('terminals:delete', (_e, id: number) => { deleteTerminal(id); });
+ipcMain.handle('terminals:delete', (_e, id: number) => {
+  deleteTerminal(id);
+  void sweepDeviceHealth().catch(() => null);
+});
 // TCP reachability probe by host:port — backs the per-device "Test connection".
 ipcMain.handle('terminals:ping-host', (_e, input: { host: string; port: number }) => pingTerminalHost(input.host, input.port));
 
@@ -921,10 +942,21 @@ ipcMain.handle('lcds:save', (_e, input) => {
   // Reconcile immediately: an operator who just fixed a typo'd IP expects the
   // panel to come alive now, not after the next app restart.
   reloadLcdLinks();
+  void sweepDeviceHealth().catch(() => null);
   return saved;
 });
-ipcMain.handle('lcds:delete', (_e, id: number) => { deleteLcd(id); reloadLcdLinks(); });
+ipcMain.handle('lcds:delete', (_e, id: number) => {
+  deleteLcd(id);
+  reloadLcdLinks();
+  void sweepDeviceHealth().catch(() => null);
+});
 ipcMain.handle('lcds:statuses', () => getLcdStatuses());
+ipcMain.handle('device-health:get', () => snapshotDeviceHealth());
+ipcMain.handle('device-health:refresh', () => sweepDeviceHealth());
+// Report state + a manual "report now", so an installer can prove the cloud link
+// from this box instead of asking someone to go and look at the SaaS.
+ipcMain.handle('device-health:heartbeat-state', () => getHeartbeatState());
+ipcMain.handle('device-health:report-now', () => postHeartbeat());
 // Fires a real fare → thank-you → idle sequence at the address in the form,
 // before it has been saved. Takes ~6s, which is the point — the installer walks
 // to the panel and watches it.
@@ -943,6 +975,10 @@ ipcMain.handle('cameras:save', async (_e, input) => {
   // deceptive failure, since every screen looks healthy. Ports still in use by
   // another camera are left bound untouched (see startLprServers).
   startLprServers();
+  // Re-probe: the address IS the health verdict's only input, so a saved edit
+  // leaves every chip describing the OLD address until this runs. Fire-and-forget
+  // — the operator's save must not wait on a socket timeout.
+  void sweepDeviceHealth().catch(() => null);
   return saved;
 });
 ipcMain.handle('cameras:delete', (_e, id: number) => {
@@ -951,6 +987,7 @@ ipcMain.handle('cameras:delete', (_e, id: number) => {
   resyncCameraRelay();
   // Frees the port if no other camera pushes to it.
   startLprServers();
+  void sweepDeviceHealth().catch(() => null);
 });
 // Latest frame the camera pushed with a plate event — Live display fallback
 // for WebSocket/RTSP-only cameras with no pullable HTTP snapshot URL.
@@ -1649,7 +1686,12 @@ ipcMain.handle('devices:pull-cloud', async (_e, type: DeviceType) => {
   // The panel links are rebuilt too: a pull can add, move, disable or delete a
   // display, and a link left pointing at the old address would keep pushing
   // frames into the dark until the app restarted.
-  if (result.ok) { resyncRtspGrabbers(); resyncCameraRelay(); startLprServers(); reloadLcdLinks(); }
+  if (result.ok) {
+    resyncRtspGrabbers(); resyncCameraRelay(); startLprServers(); reloadLcdLinks();
+    // A pull REPLACES the equipment set, so stale health rows would otherwise
+    // describe devices that no longer exist. The sweep also prunes them.
+    void sweepDeviceHealth().catch(() => null);
+  }
   // A pull REPLACES this box's equipment config. Without a row, "who changed the
   // camera wiring?" had no answer — the per-device save rows only cover edits
   // made on the device pages themselves.

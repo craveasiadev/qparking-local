@@ -48,6 +48,64 @@ export interface SyncIssue {
 	nextAttemptAt: string | null;
 }
 
+/** The three kinds of LAN equipment whose reachability we monitor. */
+export type DeviceHealthKind = "camera" | "terminal" | "lcd";
+
+/**
+ * Reported reachability of one device.
+ *
+ * `disabled` is a first-class status, not a flavour of offline: an operator who
+ * switched a panel off for maintenance must not see an alarm, and the cloud must
+ * not count it against the site's "x/y online" roll-up.
+ */
+export type DeviceHealthStatus = "online" | "offline" | "disabled";
+
+/**
+ * How the verdict was reached — and therefore how much it is worth.
+ *
+ * This is not diagnostics trivia; it is the honesty marker on the status. A
+ * camera reporting `online` via `http` means only "something answered on that
+ * port", NOT "the camera is working" — only `sdk` proves that. The UI must not
+ * present the two as the same claim.
+ *
+ *   sdk    — vendor SDK handle reports connected (authoritative, cameras)
+ *   link   — our own persistent socket is up (authoritative, LCD panels)
+ *   tcp    — a socket opened and closed; port is listening
+ *   http   — an HTTP request came back
+ *   config — no probe ran (device is disabled)
+ */
+export type DeviceHealthVia = "sdk" | "link" | "tcp" | "http" | "config";
+
+/** Live reachability of one device, as owned by the main process. */
+export interface DeviceHealth {
+	kind: DeviceHealthKind;
+	deviceId: number;
+	/** Stable id shared with the cloud; null on a device never pushed up. */
+	externalId: string | null;
+	name: string;
+	/** `host:port`, for display. */
+	address: string;
+	status: DeviceHealthStatus;
+	/**
+	 * ISO. When the CURRENT status began — the moment of the first failed probe,
+	 * not the moment we last checked.
+	 *
+	 * This is the field the UI actually shows ("offline since 10:23:45"), and the
+	 * local box owns it on purpose: the cloud only learns of an outage on the next
+	 * successful heartbeat, so a cloud-side stamp would date every failure that
+	 * happened during a WAN outage to whenever the WAN came back.
+	 */
+	changedAt: string;
+	/** ISO. The most recent probe, whatever it found. */
+	checkedAt: string;
+	/** ISO. Last probe that found the device up; null if it never has been. */
+	lastOnlineAt: string | null;
+	latencyMs: number | null;
+	/** Operator-readable reason, when there is one to give. */
+	detail: string | null;
+	via: DeviceHealthVia;
+}
+
 /** Status snapshot for the outbound sync queue (Dashboard panel). */
 export interface SyncStatus {
 	pending: number;
@@ -177,6 +235,24 @@ export interface BridgeApi {
 	/** TCP reachability probe by host:port — backs the per-device "Test
 	 *  connection" button (works against the form values before saving). */
 	pingTerminalHost(input: { host: string; port: number }): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+
+	// ─── device health ───────────────────────────────────────────────────────
+	// Reachability is owned by the MAIN process (services/device-health.ts) and
+	// PUSHED here on the 'device-health' event. Pages must not run their own ping
+	// loops: they used to, which is why health froze whenever the operator left
+	// the Dashboard — and why the cloud had nothing to be told.
+	/** Last known reachability of every device. Returns immediately, no probing. */
+	getDeviceHealth(): Promise<DeviceHealth[]>;
+	/** Force a sweep now and return its result — backs a manual "refresh" and is
+	 *  worth calling straight after saving a device, so the operator sees the
+	 *  consequence of an address change without waiting out the 60s tick. */
+	refreshDeviceHealth(): Promise<DeviceHealth[]>;
+	/** Last heartbeat attempt to the cloud — proves the reporting link, which is
+	 *  a different question from whether the devices themselves are up. */
+	getHeartbeatState(): Promise<{ lastPostAt: string | null; lastOkAt: string | null; lastError: string | null }>;
+	/** Post the current snapshot to the cloud now. Lets an installer prove the
+	 *  link from this box rather than going to look at the SaaS. */
+	reportHealthNow(): Promise<{ ok: boolean; sent: number; skipped: number; error?: string }>;
 
 	// Driver-facing LCD panels (the qparking-lcd Android app) — CRUD + link health
 	listLcds(): Promise<LcdDisplay[]>;
@@ -513,7 +589,7 @@ export interface BridgeApi {
 
 	// Stream events to renderer (returns an unsubscribe fn)
 	onEvent(
-		channel: "session" | "log" | "plate-detected" | "sync-status" | "cloud-pull" | "cloud-mirrors" | "parking-flow-log" | "app-update-progress",
+		channel: "session" | "log" | "plate-detected" | "sync-status" | "cloud-pull" | "cloud-mirrors" | "parking-flow-log" | "app-update-progress" | "device-health",
 		cb: (payload: unknown) => void,
 	): () => void;
 }

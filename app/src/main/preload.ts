@@ -18,6 +18,12 @@ const api: BridgeApi = {
   pingTerminalHost: (input: { host: string; port: number }) => ipcRenderer.invoke('terminals:ping-host', input),
 
   // LCD displays — driver-facing panels running the qparking-lcd Android app
+  // Device health — main process owns the probing; see BridgeApi.getDeviceHealth.
+  getDeviceHealth: () => ipcRenderer.invoke('device-health:get'),
+  refreshDeviceHealth: () => ipcRenderer.invoke('device-health:refresh'),
+  getHeartbeatState: () => ipcRenderer.invoke('device-health:heartbeat-state'),
+  reportHealthNow: () => ipcRenderer.invoke('device-health:report-now'),
+
   listLcds: () => ipcRenderer.invoke('lcds:list'),
   saveLcd: (input: unknown) => ipcRenderer.invoke('lcds:save', input),
   deleteLcd: (id: number) => ipcRenderer.invoke('lcds:delete', id),
@@ -146,7 +152,7 @@ const api: BridgeApi = {
   tngTestPayCancel: (orderId: string, target?: { host?: string; port?: number }) => ipcRenderer.invoke('tng:test-pay-cancel', orderId, target),
 
   // pubsub — return an unsubscribe fn so React effects can clean up.
-  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'sync-status' | 'cloud-pull' | 'cloud-mirrors' | 'parking-flow-log' | 'app-update-progress', cb: (payload: unknown) => void) => {
+  onEvent: (channel: 'session' | 'log' | 'plate-detected' | 'sync-status' | 'cloud-pull' | 'cloud-mirrors' | 'parking-flow-log' | 'app-update-progress' | 'device-health', cb: (payload: unknown) => void) => {
     const handler = (_: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on(channel, handler);
     return () => { ipcRenderer.off(channel, handler); };

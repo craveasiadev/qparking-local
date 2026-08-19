@@ -3,12 +3,14 @@ import {
   Plus, Trash2, CreditCard, X, Activity, Loader2, Search, Radio, Copy, Check, MapPin,
   Wifi, XCircle, FlaskConical, ChevronDown,
 } from 'lucide-react';
-import type { PaymentTerminal, ParkingLane } from '@shared/types';
+import type { DeviceHealth, PaymentTerminal, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
+import { DeviceHealthBadge } from '../components/DeviceHealthBadge';
+import { useDeviceHealth } from '../hooks/useDeviceHealth';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 import { fmtTimeSeconds } from '../lib/datetime';
 import { useCurrentSite } from '../context/SiteContext';
@@ -36,6 +38,8 @@ interface TngStatus {
 export function Terminals({ devMode = false }: { devMode?: boolean }) {
   const [list, setList] = useState<PaymentTerminal[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
+  // Reachability is owned and pushed by the main process; this page only reads it.
+  const { healthOf } = useDeviceHealth();
   const [status, setStatus] = useState<TngStatus | null>(null);
   const [callbackPorts, setCallbackPorts] = useState<string>('');
   const [enabled, setEnabled] = useState<boolean>(false);
@@ -228,6 +232,7 @@ export function Terminals({ devMode = false }: { devMode?: boolean }) {
           <DeviceCard
             key={t.id}
             device={t}
+            health={healthOf('terminal', t.id)}
             lanes={lanes.filter((l) => l.terminalId === t.id)}
             deleting={deletingId === t.id}
             onEdit={() => { setFormError(null); setEditing(t); }}
@@ -378,8 +383,11 @@ function ListenerPanel({ status, enabled, onToggleEnabled, autoRetrigger, onTogg
 }
 
 /** One W4G device — config chips + an on-demand reachability test. */
-function DeviceCard({ device, lanes, deleting, onEdit, onDelete }:
-  { device: PaymentTerminal; lanes: ParkingLane[]; deleting: boolean; onEdit: () => void; onDelete: () => void }) {
+function DeviceCard({ device, health, lanes, deleting, onEdit, onDelete }:
+  { device: PaymentTerminal;
+    /** Live reachability from the main process. Undefined until first swept. */
+    health?: DeviceHealth;
+    lanes: ParkingLane[]; deleting: boolean; onEdit: () => void; onDelete: () => void }) {
   const [test, setTest] = useState<{ state: 'idle' | 'pinging' | 'ok' | 'err'; text: string | null }>({ state: 'idle', text: null });
 
   async function runTest() {
@@ -401,6 +409,9 @@ function DeviceCard({ device, lanes, deleting, onEdit, onDelete }:
           <div className="flex items-center gap-2 flex-wrap">
             <CreditCard size={16} strokeWidth={2.25} className="text-gray-400 flex-shrink-0" />
             <h3 className="font-semibold truncate">{device.name}</h3>
+            {/* Live status, pushed from the main process — previously this was only
+                discoverable by clicking "Test connection". */}
+            <DeviceHealthBadge health={health} />
             {!device.enabled && (
               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-gray-100 text-gray-500 border-gray-200">disabled</span>
             )}

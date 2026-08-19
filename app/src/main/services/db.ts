@@ -27,6 +27,8 @@ import type {
 	SyncQueueRow,
 	SyncIssue,
 	ActivityLog,
+	DeviceHealth,
+	DeviceHealthKind,
 	Transaction,
 	TransactionStatus,
 	ActivityLogPayload,
@@ -614,6 +616,30 @@ function applySchema(db: Database.Database) {
 	season_pass_grace_days INTEGER NOT NULL DEFAULT 30,
 	sync_capture_images BOOLEAN DEFAULT 1,
 	sync_interval_minutes INTEGER NOT NULL DEFAULT 60
+	);
+
+	-- 2026-08-19: live reachability of each piece of LAN equipment, written by
+	-- device-health.ts once a minute.
+	--
+	-- Persisted rather than kept purely in memory for one reason: changed_at.
+	-- The operator (and the cloud) are shown the ABSOLUTE time a device went
+	-- down, so that instant has to survive an app restart — an in-memory-only
+	-- monitor would reset every outage's start time to "whenever the app last
+	-- booted", which is precisely the number nobody wants.
+	--
+	-- Keyed (kind, device_id): device ids are per-table AUTOINCREMENT, so a
+	-- camera and a terminal can both be id 1.
+	CREATE TABLE IF NOT EXISTS device_health (
+	kind TEXT NOT NULL,
+	device_id INTEGER NOT NULL,
+	status TEXT NOT NULL,
+	changed_at TEXT NOT NULL,
+	checked_at TEXT NOT NULL,
+	last_online_at TEXT,
+	latency_ms INTEGER,
+	detail TEXT,
+	via TEXT,
+	PRIMARY KEY (kind, device_id)
 	);
   `);
 
@@ -3625,4 +3651,71 @@ export function insertActivityLog(payload: ActivityLogPayload): void {
 		new Date().toISOString(),
 		new Date().toISOString(),
 	);
+}
+
+// ─── device health ───────────────────────────────────────────────────────────
+// Last-known reachability per device, written by device-health.ts. See the
+// device_health CREATE TABLE for why this is persisted rather than in-memory.
+
+function rowToDeviceHealth(row: any): Omit<DeviceHealth, "externalId" | "name" | "address"> {
+	return {
+		kind: row.kind as DeviceHealthKind,
+		deviceId: Number(row.device_id),
+		status: row.status,
+		changedAt: String(row.changed_at),
+		checkedAt: String(row.checked_at),
+		lastOnlineAt: row.last_online_at ?? null,
+		latencyMs: row.latency_ms == null ? null : Number(row.latency_ms),
+		detail: row.detail ?? null,
+		via: row.via ?? "config",
+	};
+}
+
+/** Every stored health row. The device's name/address/external id are NOT here —
+ *  they live on the device tables and are joined in by device-health.ts, so a
+ *  renamed device never leaves a stale copy behind. */
+export function listDeviceHealth(): Omit<DeviceHealth, "externalId" | "name" | "address">[] {
+	return (getDb().prepare("SELECT * FROM device_health").all() as any[]).map(rowToDeviceHealth);
+}
+
+export function saveDeviceHealth(row: Omit<DeviceHealth, "externalId" | "name" | "address">): void {
+	getDb()
+		.prepare(
+			`INSERT INTO device_health (kind, device_id, status, changed_at, checked_at, last_online_at, latency_ms, detail, via)
+			 VALUES (?,?,?,?,?,?,?,?,?)
+			 ON CONFLICT(kind, device_id) DO UPDATE SET
+			   status = excluded.status,
+			   changed_at = excluded.changed_at,
+			   checked_at = excluded.checked_at,
+			   last_online_at = excluded.last_online_at,
+			   latency_ms = excluded.latency_ms,
+			   detail = excluded.detail,
+			   via = excluded.via`,
+		)
+		.run(
+			row.kind,
+			row.deviceId,
+			row.status,
+			row.changedAt,
+			row.checkedAt,
+			row.lastOnlineAt,
+			row.latencyMs,
+			row.detail,
+			row.via,
+		);
+}
+
+/**
+ * Drop health rows for devices that no longer exist, so the table cannot grow
+ * forever as equipment is added and removed. `keep` is the full set of live
+ * (kind, deviceId) pairs — anything else is a tombstone.
+ */
+export function pruneDeviceHealth(keep: { kind: DeviceHealthKind; deviceId: number }[]): void {
+	const live = new Set(keep.map((k) => `${k.kind}:${k.deviceId}`));
+	const db = getDb();
+	const rows = db.prepare("SELECT kind, device_id FROM device_health").all() as any[];
+	const doomed = rows.filter((r) => !live.has(`${r.kind}:${Number(r.device_id)}`));
+	if (!doomed.length) return;
+	const stmt = db.prepare("DELETE FROM device_health WHERE kind = ? AND device_id = ?");
+	for (const row of doomed) stmt.run(row.kind, row.device_id);
 }

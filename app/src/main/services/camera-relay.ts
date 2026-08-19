@@ -24,6 +24,7 @@
  */
 import path from 'node:path';
 import fs from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { app } from 'electron';
 import { listCameras } from './db';
 import { tcpProbe } from './tcp-probe';
@@ -94,6 +95,24 @@ function ensureLib(): boolean {
   }
 }
 
+/**
+ * Emits 'relay' whenever a camera's warm-handle state changes — connected,
+ * dropped, or a fresh Open failure.
+ *
+ * For the health monitor, so it never has to poll for a verdict this module
+ * reaches on its own 1s tick. No payload: the subscriber calls
+ * cameraRelayHealth(), which reads memory.
+ */
+export const cameraRelayEvents = new EventEmitter();
+
+function announceRelayChange(): void {
+  // The callers are a native-SDK poll tick and the connect path; a subscriber
+  // throwing here must not be able to disturb either.
+  try {
+    cameraRelayEvents.emit('relay');
+  } catch { /* ignore */ }
+}
+
 interface Conn {
   handle: number;
   timer: NodeJS.Timeout | null;
@@ -133,7 +152,7 @@ const RECONNECT_TICK_MS = 60_000;
 /** cameraId → the config that failed and when, so a dead camera is not re-probed
  *  on every resync. Cleared as soon as its config changes: an edited host is a
  *  new thing to try, not the same failure. */
-const lastFailure = new Map<number, { key: string; at: number }>();
+const lastFailure = new Map<number, { key: string; at: number; why: string }>();
 
 /** Cameras with a probe/Open in flight — overlapping resyncs must not stack. */
 const connecting = new Set<number>();
@@ -141,8 +160,13 @@ const connecting = new Set<number>();
 let reconnectTimer: NodeJS.Timeout | null = null;
 
 function noteFailure(c: LprCamera, why: string) {
-  lastFailure.set(c.id, { key: camKey(c), at: Date.now() });
+  // `why` is kept, not just logged: it is the only place that knows the
+  // DIFFERENCE between "nothing answered" and "the port answered but the
+  // credentials were refused", and the health monitor reports it to the
+  // operator (and up to the cloud) as the offline reason.
+  lastFailure.set(c.id, { key: camKey(c), at: Date.now(), why });
   log(`cam ${c.id} relay unavailable — ${why} (not retried for ${CONNECT_RETRY_AFTER_MS / 1000}s)`);
+  announceRelayChange();
 }
 
 /** True while a recent failure for this EXACT config should be left alone. */
@@ -233,8 +257,19 @@ function openConnection(c: LprCamera) {
       statusBuf[0] = 0;
       try { fns.IsConnected(handle, statusBuf); } catch { /* ignore */ }
       const up = statusBuf[0] === 1;
-      if (up && !conn.connected) { conn.connected = true; conn.everConnected = true; log(`cam ${cid} connected — barrier relay ready`); }
-      else if (!up && conn.connected) { conn.connected = false; log(`cam ${cid} connection dropped — relay will use a fresh handle until it recovers`); }
+      // Both branches announce: this 1s poll is the earliest anything in the app
+      // knows a camera's relay came up or died, and the health monitor's own timer
+      // is 60s. Leaving it to discover this on its next sweep is what made the
+      // cloud lag a minute behind reality.
+      if (up && !conn.connected) {
+        conn.connected = true; conn.everConnected = true;
+        log(`cam ${cid} connected — barrier relay ready`);
+        announceRelayChange();
+      } else if (!up && conn.connected) {
+        conn.connected = false;
+        log(`cam ${cid} connection dropped — relay will use a fresh handle until it recovers`);
+        announceRelayChange();
+      }
     }, 1000);
   } catch (e: any) {
     log(`cam ${cid} open failed: ${e?.message ?? e}`);
@@ -287,6 +322,47 @@ function isDead(conn: Conn): boolean {
  */
 export function isSdkLoaded(): boolean {
   return setupOk;
+}
+
+/**
+ * What the warm-handle layer knows about ONE camera, for the health monitor.
+ *
+ * `known: false` is the important case — it means the SDK cannot answer for this
+ * camera (DLL never loaded, no credentials configured, or the handle is still
+ * coming up) and the caller MUST fall back to a network probe rather than
+ * report a camera as offline on the strength of silence.
+ *
+ * When `known` is true this is the authoritative answer and beats any probe: a
+ * camera whose port answers but whose credentials are refused is NOT a working
+ * camera, and only this layer can tell the two apart.
+ */
+export interface CameraRelayHealth {
+  known: boolean;
+  up: boolean;
+  detail: string | null;
+}
+
+export function cameraRelayHealth(c: LprCamera): CameraRelayHealth {
+  const unknown: CameraRelayHealth = { known: false, up: false, detail: null };
+  // No DLL (non-Windows dev box, missing SDK) or no credentials — there is no
+  // SDK path for this camera at all, so it has no opinion to give.
+  if (!setupOk || !usesRelay(c)) return unknown;
+
+  const conn = connections.get(c.id);
+  if (conn) {
+    if (conn.connected) return { known: true, up: true, detail: null };
+    // Was up, then dropped: a real, reportable outage.
+    if (conn.everConnected) return { known: true, up: false, detail: 'SDK connection dropped' };
+    // Opened but never yet reported connected — still warming up (normal for the
+    // first second after Open). Not evidence of anything.
+    return unknown;
+  }
+
+  // No handle. A recorded failure for this EXACT config is a genuine verdict —
+  // and carries the only useful reason (bad credentials vs nothing listening).
+  const failure = lastFailure.get(c.id);
+  if (failure && failure.key === camKey(c)) return { known: true, up: false, detail: failure.why };
+  return unknown;
 }
 
 /** How many warm SDK handles are held. Exposed for the relay-latency harness,

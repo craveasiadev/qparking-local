@@ -21,9 +21,31 @@
  * never be able to strand a car at one.
  */
 import net from 'node:net';
+import { EventEmitter } from 'node:events';
 import type { LcdDisplay, LcdDisplayStatus, ParkingSession } from '../../shared/types';
 import { getLaneLcd, getSessionById, listLcds } from './db';
 import { parkingEvents } from './parking-flow';
+
+/**
+ * Emits 'link' the moment a panel's connection state (or its failure reason)
+ * changes.
+ *
+ * Exists so the health monitor does not have to POLL for something this module
+ * already knows exactly. device-health.ts subscribes; nothing else should need to.
+ * Deliberately carries no payload — the subscriber re-reads getLcdStatuses(),
+ * which is an in-memory read, so there is nothing to be gained by shipping state
+ * through the event and going stale.
+ */
+export const lcdEvents = new EventEmitter();
+
+function announceLinkChange(): void {
+  // Never let a subscriber's failure reach the socket callbacks that call this:
+  // a display is the least important device at a barrier (see the header) and
+  // must not be able to break anything by reporting its own state.
+  try {
+    lcdEvents.emit('link');
+  } catch { /* ignore */ }
+}
 
 // ─── tuning ─────────────────────────────────────────────────────────────────
 
@@ -158,6 +180,11 @@ class LcdLink {
       socket.setNoDelay(true);
       socket.setKeepAlive(true, PING_INTERVAL_MS);
       llog(`connected to "${this.lcd.name}" (${this.lcd.host}:${this.lcd.port})`);
+      // Tell the health monitor NOW. It sweeps on a 60s timer, and this socket
+      // already knows the exact instant the link came up — leaving the monitor to
+      // discover it a minute later was why the cloud lagged so far behind this
+      // app's own Displays page.
+      announceLinkChange();
 
       this.startPinging();
       this.flushPending();
@@ -177,8 +204,10 @@ class LcdLink {
     socket.once('close', () => {
       if (this.closed) return;
       if (this.connected) llog(`lost connection to "${this.lcd.name}"`);
+      const wasConnected = this.connected;
       this.connected = false;
       this.connecting = false;
+      if (wasConnected) announceLinkChange();
       this.scheduleReconnect();
     });
 
@@ -195,10 +224,14 @@ class LcdLink {
     // Log once per state change, not once per retry: a panel that is switched off
     // for the weekend would otherwise write a line every 30 seconds and bury
     // every real event in the operator's log.
+    const changed = this.lastError !== reason || this.connected;
     if (this.lastError !== reason) {
       llog(`"${this.lcd.name}" unreachable — ${reason}`);
     }
     this.lastError = reason;
+    // Report a NEW failure reason as well as a lost connection: "wrong IP" and
+    // "panel switched off" are different things for the operator to be told.
+    if (changed) announceLinkChange();
     this.connected = false;
     this.connecting = false;
     this.clearTimers();

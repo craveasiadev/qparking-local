@@ -67,6 +67,25 @@ export function fmtTimeSeconds(ts?: string | null): string {
 }
 
 /**
+ * The ABSOLUTE instant something started, for status lines like
+ * "offline since 10:23:45".
+ *
+ * Deliberately not a relative "3 minutes ago": an operator diagnosing a dead
+ * barrier is correlating the failure against CCTV, a shift log, or the car that
+ * is still sitting at the boom — and a relative label forces mental arithmetic
+ * and silently goes stale while the page sits open.
+ *
+ * Same-day outages show the time WITH seconds (the useful precision when a gate
+ * just dropped); older ones lead with the date, since by then the day is the
+ * thing you have lost track of.
+ */
+export function fmtSince(ts?: string | null): string {
+  const d = toDate(ts);
+  if (!d) return '—';
+  return dateInAppTz(d) === todayInAppTz() ? fmtTimeSeconds(ts) : fmtDateTime(ts);
+}
+
+/**
  * Minutes a still-open session has been parked, TRUNCATED. Mirrors the main
  * process's `stayDurationMinutes` (and the cloud's `(int) diffInMinutes`), so the
  * elapsed time on screen can never read a minute higher than the duration the exit

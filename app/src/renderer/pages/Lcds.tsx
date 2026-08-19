@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Monitor, X, Loader2, Search, Wifi, WifiOff, Activity, MapPin } from 'lucide-react';
-import type { LcdDisplay, LcdDisplayStatus, ParkingLane } from '@shared/types';
+import { Plus, Trash2, Monitor, X, Loader2, Search, Activity, MapPin } from 'lucide-react';
+import type { DeviceHealth, LcdDisplay, LcdDisplayStatus, ParkingLane } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useConfirm } from '../hooks/useConfirm';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
+import { DeviceHealthBadge } from '../components/DeviceHealthBadge';
+import { useDeviceHealth } from '../hooks/useDeviceHealth';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
 import { fmtTimeSeconds } from '../lib/datetime';
 import { useCurrentSite } from '../context/SiteContext';
@@ -44,6 +46,8 @@ export function Lcds() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'connected' | 'offline'>('all');
 
   const site = useCurrentSite();
+  // Reachability is owned and pushed by the main process; this page only reads it.
+  const { healthOf } = useDeviceHealth();
 
   async function refresh() {
     setList(await window.bridge.listLcds());
@@ -222,6 +226,7 @@ export function Lcds() {
           <LcdCard
             key={d.id}
             lcd={d}
+            health={healthOf('lcd', d.id)}
             status={statusFor(d.id)}
             lanes={lanes.filter((l) => l.lcdId === d.id)}
             deleting={deletingId === d.id}
@@ -274,8 +279,14 @@ export function Lcds() {
  * like CameraCard. Test state is per card, so testing one panel doesn't put every
  * other card's button into a spinner.
  */
+/** How long a status strip stays on screen before folding away. Long enough to
+ *  read a sentence and glance at the address in it; short enough that a page of
+ *  switched-off panels does not stay a wall of red. */
+const STRIP_AUTO_HIDE_MS = 6_000;
+
 function LcdCard({
   lcd,
+  health,
   status,
   lanes,
   deleting,
@@ -283,6 +294,9 @@ function LcdCard({
   onDelete,
 }: {
   lcd: LcdDisplay;
+  /** Live reachability from the main process — the same source the Cameras and
+   *  Terminals pages read, so the three pages cannot disagree. */
+  health?: DeviceHealth;
   status: LcdDisplayStatus | null;
   lanes: ParkingLane[];
   deleting: boolean;
@@ -316,31 +330,55 @@ function LcdCard({
       ? { state: 'err' as const, text: status.lastError }
       : null;
 
+  // ── the strip auto-hides ──────────────────────────────────────────────────
+  // A panel switched off for the weekend used to sit here with a permanent red
+  // band, which turns the whole page into a wall of alarm and trains the operator
+  // to stop reading it. So: show a message when it is NEW, then fold it away.
+  //
+  // Keyed on the TEXT, not a timestamp — the live link error is recomputed every
+  // 3s by the parent's poll, and re-arming on each poll would make it immortal.
+  // A genuinely different reason (a typo'd IP becoming "host unreachable") counts
+  // as new and shows again. Nothing is lost: the OFFLINE badge keeps the reason
+  // in its tooltip, permanently.
+  const [stripHidden, setStripHidden] = useState(false);
+  const stripText = strip?.text ?? null;
+  const testing = test.state === 'pinging';
+
+  useEffect(() => {
+    if (!stripText) return;
+    setStripHidden(false);
+    // Never time out the "watch the panel now" line mid-test: the test itself
+    // runs ~6s and the operator is walking to the panel to watch it.
+    if (testing) return;
+    const timer = setTimeout(() => setStripHidden(true), STRIP_AUTO_HIDE_MS);
+    return () => clearTimeout(timer);
+  }, [stripText, testing]);
+
   return (
     <div className={`rounded-xl border bg-white overflow-hidden ${lcd.enabled ? 'border-gray-200' : 'border-gray-200 opacity-70'}`}>
-      {/* A panel no lane points at shows nothing but its idle screen, forever —
-          and looks identical to a working one. Say so at the top of the card,
-          the same place a camera's "will not open" warning goes. */}
-      {lanes.length === 0 && lcd.enabled && (
-        <div className="px-4 pt-3 -mb-1">
-          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-            Nothing will appear on this panel until a lane points at it — set that on the <strong>Lanes</strong> page.
-          </p>
-        </div>
-      )}
+      {/* No amber "point a lane at this" banner here any more: it only ever fired
+          when the card was ALREADY showing a muted "no lane" chip two lines down,
+          so it restated the same fact at four times the size. The chip keeps the
+          fact; its tooltip keeps the instruction. */}
       <div className="flex flex-wrap items-start justify-between gap-3 p-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <Monitor size={16} className="text-gray-400 flex-shrink-0" />
             <h3 className="font-semibold truncate">{lcd.name}</h3>
-            <LinkBadge status={status} enabled={lcd.enabled} />
+            <DeviceHealthBadge health={health} />
             {!lcd.enabled && (
               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-gray-100 text-gray-500 border-gray-200">disabled</span>
             )}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <Chip mono muted={!hasHost}>{hasHost ? `${lcd.host}:${lcd.port}` : 'no IP set'}</Chip>
-            <Chip icon={MapPin} muted={lanes.length === 0}>
+            <Chip
+              icon={MapPin}
+              muted={lanes.length === 0}
+              title={lanes.length === 0
+                ? 'Nothing will appear on this panel until a lane points at it — set that on the Lanes page.'
+                : undefined}
+            >
               {lanes.length === 0 ? 'no lane' : lanes.map((l) => l.name).join(', ')}
             </Chip>
             {status?.lastAckAt && <Chip>last frame {fmtTimeSeconds(status.lastAckAt)}{status.lastScreen ? ` · ${status.lastScreen}` : ''}</Chip>}
@@ -365,7 +403,7 @@ function LcdCard({
           </button>
         </div>
       </div>
-      {strip && (
+      {strip && !stripHidden && (
         <div
           className={`px-4 py-2 text-[11px] font-mono border-t ${
             strip.state === 'ok'
@@ -509,22 +547,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-/** Live TCP link state for one panel. */
-function LinkBadge({ status, enabled }: { status: LcdDisplayStatus | null; enabled: boolean }) {
-  if (!enabled) return null;
-  const connected = !!status?.connected;
-  const cls = connected ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200';
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${cls}`}>
-      {connected ? <Wifi size={10} /> : <WifiOff size={10} />}
-      {connected ? 'connected' : 'offline'}
-    </span>
-  );
-}
+// A page-local LinkBadge lived here, reading LcdDisplayStatus directly. Replaced
+// by the shared components/DeviceHealthBadge so this page, Cameras and Terminals
+// render one badge from one source — two near-identical pills is exactly how they
+// drift apart. The failure reason still has a permanent home: it is in that
+// badge's tooltip, which matters because the red strip below auto-hides.
 
-function Chip({ children, icon: Icon, mono, muted }: { children: React.ReactNode; icon?: any; mono?: boolean; muted?: boolean }) {
+function Chip({ children, icon: Icon, mono, muted, title }: { children: React.ReactNode; icon?: any; mono?: boolean; muted?: boolean; title?: string }) {
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-200 bg-gray-50 text-[11px] ${muted ? 'text-gray-400' : 'text-gray-600'} ${mono ? 'font-mono' : ''}`}>
+    <span title={title} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-200 bg-gray-50 text-[11px] ${muted ? 'text-gray-400' : 'text-gray-600'} ${mono ? 'font-mono' : ''}`}>
       {Icon && <Icon size={11} className="text-gray-400 flex-shrink-0" />}
       {children}
     </span>

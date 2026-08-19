@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2, Camera as CamIcon, X, Copy, Check, Activity, Loader2, Webhook, MapPin, KeyRound, ChevronDown, Search } from "lucide-react";
-import type { LprCamera, ParkingLane } from "@shared/types";
+import type { DeviceHealth, LprCamera, ParkingLane } from "@shared/types";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useConfirm } from "../hooks/useConfirm";
 import { usePagedList } from "../hooks/usePagination";
 import { PaginationBar } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
+import { DeviceHealthBadge } from "../components/DeviceHealthBadge";
+import { useDeviceHealth } from "../hooks/useDeviceHealth";
 import { DeviceSyncButtons } from "../components/DeviceSyncButtons";
 import { useCurrentSite } from "../context/SiteContext";
 
@@ -55,6 +57,8 @@ export function Cameras() {
 	const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
 
 	const site = useCurrentSite();
+	// Reachability is owned and pushed by the main process; this page only reads it.
+	const { healthOf } = useDeviceHealth();
 	const q = search.trim().toLowerCase();
 	const filterActive = q !== "" || dirFilter !== "all" || statusFilter !== "all";
 	const filtered = cameras.filter((c) => {
@@ -325,6 +329,7 @@ export function Cameras() {
 					<CameraCard
 						key={c.id}
 						cam={c}
+						health={healthOf("camera", c.id)}
 						lane={lanes.find((l) => l.id === c.laneId) ?? null}
 						deleting={deletingId === c.id}
 						onEdit={() => {
@@ -398,12 +403,15 @@ export function Cameras() {
  *  without leaving the page. */
 function CameraCard({
 	cam,
+	health,
 	lane,
 	deleting,
 	onEdit,
 	onDelete,
 }: {
 	cam: LprCamera;
+	/** Live reachability from the main process. Undefined until first swept. */
+	health?: DeviceHealth;
 	lane: ParkingLane | null;
 	deleting: boolean;
 	onEdit: () => void;
@@ -460,6 +468,9 @@ function CameraCard({
 					<div className="flex items-center gap-2 flex-wrap">
 						<CamIcon size={16} className="text-gray-400 flex-shrink-0" />
 						<h3 className="font-semibold truncate">{cam.name}</h3>
+						{/* Live status, pushed from the main process — no longer only
+						    discoverable by clicking Test. */}
+						<DeviceHealthBadge health={health} />
 						<DirectionBadge direction={cam.direction} />
 						{cam.accessMode === "pass_only" && (
 							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200">
