@@ -480,14 +480,14 @@ export async function syncCloudCustomers(): Promise<SyncResult> {
 				fullName: row.full_name ?? null,
 				email: row.email ?? null,
 				phone: row.phone ?? null,
-				// `site_role` is the pre-rename wire name (cloud 2026-08-18) — read
+ 				// `site_role` is the pre-rename wire name (cloud 2026-08-18) — read
 				// so a box updated ahead of its cloud keeps its badges. Absent from
 				// a SaaS that predates the reconstruct entirely — the UI then falls
 				// back to the legacy type, i.e. exactly the old behaviour.
 				holderType: row.holder_type ?? null,
 				// Absent from a SaaS that predates it — hasLivePass() then falls back
 				// to the active-pass count rather than reading "no status" as lapsed.
-				passStatus: row.pass_status ?? null,
+				seasonPassStatus: row.season_pass_status ?? null,
 				isEnabled: row.is_enabled == null ? true : !!row.is_enabled,
 				vehiclesCount: Number(row.vehicles_count ?? 0),
 				activePassesCount: Number(row.active_passes_count ?? 0),

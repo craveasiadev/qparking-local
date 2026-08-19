@@ -455,7 +455,7 @@ export interface CloudCustomer {
    *  on the Vehicles page, keyed on the plate, so there is one place they can be
    *  read and one way they are derived. NULL on a box that has not synced since
    *  the cloud started sending it. */
-  passStatus: string | null;
+  seasonPassStatus: string | null;
   isEnabled: boolean;
   vehiclesCount: number;
   /** Active passes AT THIS SITE only. */

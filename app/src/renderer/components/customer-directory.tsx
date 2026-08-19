@@ -63,8 +63,8 @@ export function HolderTypeBadge({ holderType }: { holderType: string | null }) {
 /**
  * Is this person's pass live right now?
  *
- * Reads the cloud's own `pass_status`, NOT a date compared here. The cloud flips
- * a pass to `expired` on an hourly job (passes:expire), and a pass is valid
+ * Reads the cloud's own `season_pass_status`, NOT a date compared here. The cloud
+ * flips a pass to `expired` on an hourly job (passes:expire), and a pass is valid
  * through the END of its last day — so a box doing its own date maths would call
  * a pass dead some hours before the cloud does. One authority for the verdict.
  *
@@ -74,10 +74,10 @@ export function HolderTypeBadge({ holderType }: { holderType: string | null }) {
  * would be a second answer to the same question, derived a different way.
  *
  * Falls back to activePassesCount for a box that has not synced since the cloud
- * started sending pass_status, which is the signal these pages used before.
+ * started sending season_pass_status, which is the signal these pages used before.
  */
 export function hasLivePass(customer: CloudCustomer): boolean {
-  if (customer.passStatus) return customer.passStatus === 'active';
+  if (customer.seasonPassStatus) return customer.seasonPassStatus === 'active';
   return customer.activePassesCount > 0;
 }
 

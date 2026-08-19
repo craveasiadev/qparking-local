@@ -756,6 +756,12 @@ function applySchema(db: Database.Database) {
 		/* column absent, already renamed, or old SQLite */
 	}
 
+	try {
+		db.exec("ALTER TABLE cloud_customers RENAME COLUMN pass_status TO season_pass_status");
+	} catch {
+		/* column absent, already renamed, or old SQLite */
+	}
+
 	// Idempotent column adds for installs whose `cameras` table was created
 	// before host/snapshot_url existed. SQLite's ALTER ADD COLUMN throws if
 	// the column already exists, so wrap each in its own try/catch.
@@ -968,7 +974,7 @@ function applySchema(db: Database.Database) {
 		// Pass status on the directory rows (2026-08-18). NULL until the next pull,
 		// and hasLivePass() then falls back to the active-pass count, which is the
 		// signal those pages used before this column existed.
-		["cloud_customers", "pass_status TEXT"],
+		["cloud_customers", "season_pass_status TEXT"],
 		// Per-camera webhook port (2026-08-11). The default matches the box-wide
 		// setting it replaced, so a standard install keeps the port its cameras
 		// are already pushing to; anything else is backfilled below.
@@ -3175,7 +3181,7 @@ function rowToCloudCustomer(row: any): CloudCustomer {
 		email: row.email ?? null,
 		phone: row.phone ?? null,
 		holderType: row.holder_type ?? null,
-		passStatus: row.pass_status ?? null,
+		seasonPassStatus: row.season_pass_status ?? null,
 		isEnabled: !!row.is_enabled,
 		vehiclesCount: row.vehicles_count ?? 0,
 		activePassesCount: row.active_passes_count ?? 0,
@@ -3194,11 +3200,11 @@ export function replaceAllCloudCustomers(customers: CloudCustomer[]): void {
 	const tx = db.transaction(() => {
 		db.prepare("DELETE FROM cloud_customers").run();
 		const insert = db.prepare(`INSERT OR REPLACE INTO cloud_customers (
-        id, full_name, email, phone, holder_type, pass_status, is_enabled,
+        id, full_name, email, phone, holder_type, season_pass_status, is_enabled,
         vehicles_count, active_passes_count, last_sign_in, created_at, fetched_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
 		for (const c of customers) {
-			insert.run(c.id, c.fullName, c.email, c.phone, c.holderType, c.passStatus, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
+			insert.run(c.id, c.fullName, c.email, c.phone, c.holderType, c.seasonPassStatus, c.isEnabled ? 1 : 0, c.vehiclesCount, c.activePassesCount, c.lastSignIn, c.createdAt);
 		}
 	});
 	tx();
