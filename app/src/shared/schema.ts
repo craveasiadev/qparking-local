@@ -227,6 +227,19 @@ export interface ParkingLane {
  *  event is null the car is still inside the lot. */
 export interface ParkingSession {
   id: number;
+  /**
+   * Durable cloud identity for this stay — a UUID minted at entry that NEVER
+   * changes, whatever the operator later edits.
+   *
+   * The cloud used to identify a stay by plate + entry_time, so correcting a
+   * misread plate created a SECOND cloud record and left the original open
+   * forever (the car exits as the corrected plate). This is the key that makes a
+   * correction an update instead of a fork.
+   *
+   * Null only on a row written before this column existed and somehow not
+   * backfilled; the cloud falls back to its old matching in that case.
+   */
+  externalId: string | null;
   plate: string;
   entryAt: string;
   entryLaneId: number | null;

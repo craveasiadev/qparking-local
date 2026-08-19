@@ -297,6 +297,18 @@ function applySchema(db: Database.Database) {
 
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- Durable cloud identity for this STAY, generated once at entry and never
+      -- touched again — not by a plate correction, not by an entry-time edit.
+      --
+      -- It exists because the cloud used to identify a stay by plate + entry_time,
+      -- so correcting a misread plate (A1 → A11) matched nothing and INSERTED a
+      -- second record. The original was left open forever, since the car would
+      -- exit as the corrected plate: cloud occupancy drifted up by one for every
+      -- correction an operator made.
+      --
+      -- A UUID rather than the autoincrement id: ids restart at 1 after a
+      -- reinstall, which would let a brand-new stay claim an old cloud record.
+      external_id TEXT,
       plate TEXT NOT NULL,
       entry_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       entry_lane_id INTEGER,
@@ -698,6 +710,29 @@ function applySchema(db: Database.Database) {
 		db.exec("ALTER TABLE lanes DROP COLUMN direction");
 	} catch {
 		/* column absent or old SQLite */
+	}
+
+	// 2026-08-19: durable cloud identity per stay (see sessions.external_id above).
+	// Two steps, both idempotent: add the column on boxes that predate it, then
+	// backfill every existing row. The backfill matters more than it looks — a stay
+	// already open at upgrade time still has to survive a plate correction, and
+	// without an id it would fork on the cloud exactly as before.
+	try {
+		db.exec("ALTER TABLE sessions ADD COLUMN external_id TEXT");
+	} catch {
+		/* already applied */
+	}
+	try {
+		const needIds = db.prepare("SELECT id FROM sessions WHERE external_id IS NULL OR external_id = ''").all() as { id: number }[];
+		if (needIds.length) {
+			const stamp = db.prepare("UPDATE sessions SET external_id = ? WHERE id = ?");
+			const fill = db.transaction((rows: { id: number }[]) => {
+				for (const row of rows) stamp.run(randomUUID(), row.id);
+			});
+			fill(needIds);
+		}
+	} catch {
+		/* column missing on an ancient SQLite — nothing to backfill */
 	}
 
 	// 2026-08-12: driver-facing LCD panels (qparking-lcd). The CREATE TABLE above
@@ -1108,6 +1143,10 @@ function applySchema(db: Database.Database) {
 			db.exec("BEGIN");
 			db.exec(`CREATE TABLE sessions_rebuild (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- Must be declared here as well as in the canonical CREATE TABLE: the
+        -- copy below names external_id, and the ALTER that adds it has already
+        -- run by this point, so omitting it would fail the whole rebuild.
+        external_id TEXT,
         plate TEXT NOT NULL,
         entry_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         entry_lane_id INTEGER,
@@ -1141,12 +1180,12 @@ function applySchema(db: Database.Database) {
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`);
 			db.exec(`INSERT INTO sessions_rebuild
-        (id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
+        (id, external_id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
          exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
          status, payment_status, pass_id, free_reason, terminal_txn_id, card_scheme, payment_timestamp, notes,
          rev, cloud_synced_rev, cloud_synced_at, cloud_sync_error, created_at, updated_at)
         SELECT
-         id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
+         id, external_id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path,
          exit_at, exit_lane_id, exit_camera_id, exit_image_path, duration_minutes, fee_cents,
          status,
          -- Sanitise any legacy payment_status value so it passes the new CHECK
@@ -1926,6 +1965,7 @@ const NOW_MS_SQL = "strftime('%Y-%m-%d %H:%M:%f','now')";
 function rowToSession(row: any): ParkingSession {
 	return {
 		id: row.id,
+		externalId: row.external_id ?? null,
 		plate: row.plate,
 		entryAt: row.entry_at,
 		entryLaneId: row.entry_lane_id,
@@ -2012,8 +2052,8 @@ export function createEntrySession(plate: string, laneId: number | null, cameraI
 	// toISOString). Keeping both ends in the same UTC-with-Z format is what
 	// makes the duration + fee math correct.
 	const info = db
-		.prepare(`INSERT INTO sessions (plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?,?)`)
-		.run(plate, new Date().toISOString(), laneId, cameraId, imagePath);
+		.prepare(`INSERT INTO sessions (external_id, plate, entry_at, entry_lane_id, entry_camera_id, entry_image_path) VALUES (?,?,?,?,?,?)`)
+		.run(randomUUID(), plate, new Date().toISOString(), laneId, cameraId, imagePath);
 	return getSessionById(Number(info.lastInsertRowid))!;
 }
 

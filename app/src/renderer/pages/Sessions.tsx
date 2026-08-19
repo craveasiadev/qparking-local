@@ -12,6 +12,7 @@ import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { PaginationBar, PageLoadingOverlay } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
 import { fmtDateTime, fmtTimeSeconds, elapsedMinutesSince } from '../lib/datetime';
+import { bridgeErrorMessage } from '../lib/errors';
 import { toast } from '../toast';
 import { useCurrentSite } from '../context/SiteContext';
 
@@ -1258,7 +1259,10 @@ function EditSessionModal({
       description: `Session edited · ${plate.trim().toUpperCase()} · ${paymentStatus}`
     });
     onSaved();
-  }, { onError: (e: any) => setError(e?.message ?? String(e)) });
+    // bridgeErrorMessage, not e.message: main-process rejections arrive wrapped in
+    // Electron's "Error invoking remote method …" prefix, which makes a deliberate
+    // validation message (e.g. the plate is already inside) read like a crash.
+  }, { onError: (e: unknown) => setError(bridgeErrorMessage(e)) });
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>

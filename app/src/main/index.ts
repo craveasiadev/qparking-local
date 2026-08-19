@@ -87,7 +87,7 @@ import {
   listLcds, upsertLcd, deleteLcd,
   listCameras, upsertCamera, deleteCamera,
   listLanes, upsertLane, deleteLane, getLane, setLaneCameras,
-  listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById,
+  listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById, findOpenSessionByPlate,
   countSessions, listSessionsPage, deleteSession,
   listSessionsNeedingCloudPush, countSessionsNeedingCloudPush,
   updateSessionFields,
@@ -1218,6 +1218,39 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
     if (!plate) throw new Error('plate_required — a plate must contain at least one letter or digit');
   }
 
+  // ─── one open stay per plate ─────────────────────────────────────────────
+  // Editing a plate onto a car that is ALREADY inside would leave two open
+  // sessions for one plate, and every plate-keyed lookup after that picks by
+  // "most recent open" — so the next exit would close the wrong stay, bill the
+  // wrong entry time, and strand the other session open forever.
+  //
+  // Checked against the state the edit WOULD produce, not the current one, so it
+  // also catches re-opening a closed stay (clearing the exit time) onto a plate
+  // that has since come back in.
+  //
+  // Only ever a conflict when both stays would be OPEN: a closed stay for ABC123
+  // and a car of the same plate inside right now is perfectly normal — it left
+  // and returned.
+  const willBeOpen = patch.exitAt !== undefined ? !patch.exitAt : !session.exitAt;
+  if (willBeOpen) {
+    const plateAfterEdit = plate ?? session.plate;
+    const clash = findOpenSessionByPlate(plateAfterEdit);
+    if (clash && clash.id !== id) {
+      // GMT+8, spelled out. Sessions store UTC ISO, and pasting that raw into a
+      // message an operator reads is how "entered 06:49" gets mistaken for the
+      // small hours when the car actually arrived at 14:49.
+      const enteredAt = new Date(clash.entryAt).toLocaleString('en-MY', {
+        timeZone: 'Asia/Kuala_Lumpur',
+        day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+      throw new Error(
+        `plate_in_use — ${plateAfterEdit} is already inside: session #${clash.id}, entered ${enteredAt}. `
+        + 'Close that stay first, or correct this one to a different plate.',
+      );
+    }
+  }
+
   // Apply the easy text/state fields first.
   let working = updateSessionFields(id, {
     plate,
@@ -1261,8 +1294,12 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
     working = updateSessionFields(id, { durationMinutes, feeCents });
   }
 
-  // Push the edit to qparking SaaS via the retry queue.
-  if (working) enqueueUpdate(working);
+  // Push the edit to qparking SaaS via the retry queue. The PRE-EDIT plate goes
+  // with it: for a stay that was already open before this box gained
+  // sessions.external_id, the old plate is the only handle the cloud still has on
+  // the record it created — without it a correction forks a second record there
+  // and the original never closes.
+  if (working) enqueueUpdate(working, session.plate);
   return working;
 });
 

@@ -110,6 +110,22 @@ function scopeField(session: ParkingSession): { site_id?: string } {
 }
 
 /**
+ * The stay's durable identity, which is what lets the cloud UPDATE a record
+ * instead of inserting a second one.
+ *
+ * Without it the cloud matched on plate + entry_time, so correcting a misread
+ * plate (A1 → A11) found nothing and created a new record — leaving the original
+ * open forever, because the car exits under the corrected plate. Sent on every
+ * op, not just updates: the cloud can only match on an id it was given at insert.
+ *
+ * Omitted when null (a pre-migration row) so the cloud falls back to its old
+ * matching rather than keying on the string "null".
+ */
+function identityField(session: ParkingSession): { external_id?: string } {
+	return session.externalId ? { external_id: session.externalId } : {};
+}
+
+/**
  * Public enqueue helpers. parking-flow / IPC handlers call these instead of
  * fetching directly so retries are guaranteed.
  */
@@ -119,6 +135,7 @@ export function enqueueEntry(session: ParkingSession): void {
 		"session.entry",
 		{
 			...scopeField(session),
+			...identityField(session),
 			plate_number: session.plate,
 			entry_time: session.entryAt,
 			...(entryImage ? { entry_image_base64: entryImage } : {}),
@@ -138,6 +155,7 @@ export function enqueueExit(session: ParkingSession): void {
 		"session.exit",
 		{
 			...scopeField(session),
+			...identityField(session),
 			plate_number: session.plate,
 			entry_time: session.entryAt,
 			exit_time: session.exitAt,
@@ -158,7 +176,21 @@ export function enqueueExit(session: ParkingSession): void {
 	scheduleDrain();
 }
 
-export function enqueueUpdate(session: ParkingSession): void {
+/**
+ * The plate this stay carried BEFORE the edit, sent only when it actually changed.
+ *
+ * Covers the one case `external_id` cannot: a stay that was already open when the
+ * box upgraded has a cloud record created without an id, so an id lookup misses
+ * and a lookup by the NEW plate misses too. The old plate is the only handle left
+ * on that row, and the cloud uses it to adopt the record rather than fork it.
+ * Unnecessary for stays that began after the upgrade, and harmless there.
+ */
+function previousPlateField(session: ParkingSession, previousPlate?: string | null): { previous_plate_number?: string } {
+	if (!previousPlate || previousPlate === session.plate) return {};
+	return { previous_plate_number: previousPlate };
+}
+
+export function enqueueUpdate(session: ParkingSession, previousPlate?: string | null): void {
 	// Re-posting an open entry refreshes it; posting with exit_time closes it —
 	// same upsert endpoint as enqueueEntry/enqueueExit, images included (safe to
 	// resend: persistPlateImage overwrites the same object key).
@@ -169,6 +201,8 @@ export function enqueueUpdate(session: ParkingSession): void {
 			"session.update",
 			{
 				...scopeField(session),
+				...identityField(session),
+				...previousPlateField(session, previousPlate),
 				plate_number: session.plate,
 				entry_time: session.entryAt,
 				exit_time: session.exitAt,
@@ -187,6 +221,8 @@ export function enqueueUpdate(session: ParkingSession): void {
 			"session.update",
 			{
 				...scopeField(session),
+				...identityField(session),
+				...previousPlateField(session, previousPlate),
 				plate_number: session.plate,
 				entry_time: session.entryAt,
 				...(entryImage ? { entry_image_base64: entryImage } : {}),
