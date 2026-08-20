@@ -69,6 +69,29 @@ interface ActiveExit {
 }
 const exitsInFlight = new Map<number, ActiveExit>(); // keyed by laneId — one exit txn per lane
 
+/**
+ * The live charge for this stay, on whichever lane is running it.
+ *
+ * `exitsInFlight` is keyed by LANE, which stops the same gate charging twice but
+ * says nothing about the same CAR being charged at two gates. On a site with more
+ * than one exit lane that gap was reachable from the UI: a retrigger aimed at a
+ * different lane found that lane idle, so a second PayRequest went out while the
+ * first was still live. Both readers would then take a tap, and each PayResult
+ * settled the same session — two real deductions, two 'paid' ledger rows, one
+ * stay. The default in the Sessions gate picker made it a single click, because a
+ * mid-charge session has no exit_lane_id yet and the picker falls back to the
+ * lowest-id lane with a terminal.
+ *
+ * A linear scan is right here: the map holds one entry per exit lane, so it is a
+ * handful of rows at the largest site.
+ */
+function findExitInFlightBySession(sessionId: number): ActiveExit | null {
+  for (const exit of exitsInFlight.values()) {
+    if (exit.sessionId === sessionId) return exit;
+  }
+  return null;
+}
+
 // ─── auto-retrigger ─────────────────────────────────────────────────────────
 // When a paid exit charge fails / times out / is declined, optionally re-fire
 // the PayRequest at the same terminal after a short delay so the driver can tap
@@ -683,8 +706,25 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     return;
   }
 
-  // Paid exit — charge the Alarmtech W4G device wired to this lane. The
-  // busy-guard prevents a double-charge if a second scan lands mid-transaction.
+  // Paid exit — charge the Alarmtech W4G device wired to this lane. Two guards,
+  // and they answer different questions: this one asks whether THIS CAR is
+  // already being charged anywhere, the lane one below asks whether THIS GATE is
+  // busy with somebody else.
+  //
+  // The per-car guard is the authoritative one and it lives here, not only in
+  // retriggerSessionExit, so every route into the charge is covered by
+  // construction — the operator retrigger, the by-plate retrigger off the Live
+  // wall, an auto-retrigger, and a second exit camera on another lane reading the
+  // same departing plate. See findExitInFlightBySession.
+  const chargingElsewhere = findExitInFlightBySession(session.id);
+  if (chargingElsewhere) {
+    flog(`EXIT BUSY: plate=${event.plate} ignored — session ${session.id} is ALREADY being charged on lane ${chargingElsewhere.laneId} (RM ${(chargingElsewhere.feeCents / 100).toFixed(2)}, started ${Math.round((Date.now() - chargingElsewhere.startedAt) / 1000)}s ago). One live charge per car: a second PayRequest would let two readers each take a tap for this one stay. Wait for it to settle, or release the car by hand.`);
+    // Deliberately the same 'exit-busy' kind the lane guard uses: the LCD treats
+    // it as "leave the fare on the glass", which is exactly right here — the fare
+    // showing belongs to this very session.
+    parkingEvents.emit('warning', { kind: 'exit-busy', laneId: lane.id, sessionId: session.id, chargingLaneId: chargingElsewhere.laneId });
+    return;
+  }
   if (exitsInFlight.has(lane.id)) {
     const busy = exitsInFlight.get(lane.id)!;
     flog(`EXIT BUSY: plate=${event.plate} ignored — lane ${lane.id} is already charging ${busy.plate} (session=${busy.sessionId}, RM ${(busy.feeCents / 100).toFixed(2)}). This read is a duplicate or the next car; nothing charged twice.`);
@@ -949,6 +989,15 @@ function maybeAutoRetrigger(
     if (!isStillChargeable(s)) {
       w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — session no longer chargeable (${describeChargeability(s)}).`, { sessionId: prev.sessionId });
       autoRetriggerCounts.delete(prev.sessionId);
+      return;
+    }
+    // Is this CAR already being charged, on any gate? The 2s delay window is long
+    // enough for an operator to retrigger the same stay at a different lane, and
+    // that lane's own guard would not see this one. Checked before the lane test
+    // because it is the more specific answer.
+    const elsewhere = findExitInFlightBySession(prev.sessionId);
+    if (elsewhere) {
+      w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — this car is already being charged on lane ${elsewhere.laneId}.`, { sessionId: prev.sessionId, chargingLaneId: elsewhere.laneId });
       return;
     }
     if (exitsInFlight.has(lane.id)) {
@@ -1445,6 +1494,22 @@ export function retriggerSessionExit(sessionId: number, laneOverride?: number | 
   const session = getSessionById(sessionId);
   if (!session) return { ok: false, error: 'session_not_found' };
   if (session.exitAt) return { ok: false, error: 'session_already_closed — nothing to retrigger' };
+
+  // Already being charged? handleExit refuses this too, but it would do so by
+  // dropping the synthesized event — the operator would press the button, see
+  // "terminal re-armed for another tap" in the audit row, and nothing would
+  // happen. Answer it here so the refusal reaches the screen with its reason.
+  const live = findExitInFlightBySession(sessionId);
+  if (live) {
+    const secondsAgo = Math.round((Date.now() - live.startedAt) / 1000);
+    const liveLane = getLane(live.laneId);
+    return {
+      ok: false,
+      error: `${session.plate} is already being charged at "${liveLane?.name ?? `lane ${live.laneId}`}"`
+        + ` (RM ${(live.feeCents / 100).toFixed(2)}, ${secondsAgo}s ago). Wait for that tap to settle,`
+        + ` or release the car by hand — charging it on a second gate would let both readers take a payment.`,
+    };
+  }
 
   // laneOverride is the exit lane the operator is standing at (Live-display
   // tile). Prefer it so the exit runs on the RIGHT gate, not the car's entry

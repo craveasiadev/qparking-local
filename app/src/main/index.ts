@@ -130,6 +130,7 @@ import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type Devic
 import {
   startW4gServer, stopW4gServer, payRequest as tngPayRequest, payCancel as tngPayCancel,
   loopbackPayResult as tngLoopback,
+  payResultListenerReady,
   w4gStatus, w4gEvents,
 } from './services/payment-tng';
 import { checkForUpdate, downloadUpdate, applyUpdate } from './app-update';
@@ -1587,11 +1588,47 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
   payAmount?: number; discountAmount?: number; enterTime?: number; payTime?: number; orderId?: string;
   host?: string; port?: number;
 }) => {
-  // Make sure the listener is up — without it, no PayResult callback can
-  // ever land and the request will time out at the device side.
   const setting = getSettings();
   if (!setting.tngEnabled) return { ok: false, orderId: '', error: 'tng_disabled — flip the master switch on first' };
-  startW4gServer();
+
+  // A real charge in flight means a driver is standing at a barrier with their
+  // card out. Firing a test PayRequest competes for that same reader, and once
+  // both are live nobody can tell afterwards which tap paid for the car. Refuse.
+  const inFlight = w4gStatus().pending;
+  if (inFlight.length > 0) {
+    const first = inFlight[0];
+    return {
+      ok: false,
+      orderId: '',
+      error: `a real charge is in flight (order ${first.orderId.slice(0, 8)}…, ${rm(first.payAmount)}) — wait for it to settle before firing a test charge`,
+    };
+  }
+
+  // This used to call startW4gServer() unconditionally "to make sure the
+  // listener is up". That was the opposite of safe: startW4gServer() BEGINS with
+  // stopW4gServer(), so on a healthy box the button closed every bound callback
+  // port. Two ways that hurt. A charge already awaiting its PayResult lost the
+  // only path home — the device posts Connection: close, so its retry needs a
+  // fresh socket on a port that is no longer bound. And the immediate rebind
+  // races its own closing listener (libuv sets SO_EXCLUSIVEADDRUSE on Windows,
+  // which makes that conflict MORE likely, not less); a rebind that loses leaves
+  // activePorts EMPTY, and since only a listen callback ever refills it, every
+  // paid exit then refuses at the boom until someone restarts the app or saves a
+  // TNG setting.
+  //
+  // Lifecycle is not this handler's job. Boot and settings:save own it. So do
+  // what tng:loopback already does — check, don't restart — and refuse with the
+  // reason, which is exactly the contract the test panel already advertises
+  // ("Requires the listener enabled above").
+  const listener = payResultListenerReady();
+  if (!listener.ok) {
+    return {
+      ok: false,
+      orderId: '',
+      error: `${listener.reason} — no test charge sent, because a tap would deduct money this app could never record`,
+    };
+  }
+
   // For the dev test panel, use a TEST<epoch> orderId. Matches the merchant's
   // reference tester's format and is easy to grep in the W4G device's own
   // debug log — production exits use the random hex orderId from

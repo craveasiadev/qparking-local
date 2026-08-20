@@ -113,12 +113,18 @@ async function main() {
 
   const terminal = db.upsertTerminal({ name: 'W4G-1', host: '10.0.0.50', port: 80, timeoutSeconds: 30, enabled: true });
   const terminalOff = db.upsertTerminal({ name: 'W4G-off', host: '10.0.0.51', port: 80, timeoutSeconds: 30, enabled: false });
+  // A SECOND paid exit gate with its own device. Every earlier test could live on
+  // one exit lane, which is exactly why the cross-gate double-charge (C11) went
+  // unnoticed: the busy guard is keyed by lane, so a single-exit fixture can
+  // never reach it.
+  const terminal2 = db.upsertTerminal({ name: 'W4G-2', host: '10.0.0.52', port: 80, timeoutSeconds: 30, enabled: true });
 
   const lane = (name, policyId, terminalId) => db.upsertLane({
     name, policyId, terminalId, enabled: true,
   });
   const L = {
     paid: lane('L-PAID', 'charge', terminal.id),          // charges, device wired
+    paid2: lane('L-PAID-2', 'charge', terminal2.id),      // a SECOND paid exit gate
     noTerm: lane('L-NOTERM', 'charge', null),             // charges, no device
     devOff: lane('L-DEVOFF', 'charge', terminalOff.id),   // charges, device disabled
     grace: lane('L-GRACE', 'grace', terminal.id),         // 24h free
@@ -135,6 +141,7 @@ async function main() {
   const C = {
     paidIn: cam('C-PAID-IN', L.paid.id, 'entry', '10.1.0.1'),
     paidOut: cam('C-PAID-OUT', L.paid.id, 'exit', '10.1.0.2'),
+    paid2Out: cam('C-PAID2-OUT', L.paid2.id, 'exit', '10.1.0.15'),
     noTermIn: cam('C-NT-IN', L.noTerm.id, 'entry', '10.1.0.3'),
     noTermOut: cam('C-NT-OUT', L.noTerm.id, 'exit', '10.1.0.4'),
     devOffOut: cam('C-DO-OUT', L.devOff.id, 'exit', '10.1.0.5'),
@@ -463,6 +470,42 @@ async function main() {
   check('C10d …and freeing the lane so the next car can pay',
     db.getSessionById(afterCancel.id).paymentStatus === 'paid',
     db.getSessionById(afterCancel.id).paymentStatus);
+
+  // ─── one live charge per CAR, whatever gate it is asked for ──────────────
+  // The busy guard is keyed by LANE, so on a site with two exit gates the same
+  // STAY was chargeable twice at once: a retrigger aimed at the other gate found
+  // it idle and fired a second PayRequest, and both readers would then take a tap
+  // for one car. Two real deductions, two 'paid' ledger rows, one session.
+  payScript = HANG();
+  const twoGate = await drive('CCC0009', ENTRY, EXIT, L.paid.id, C.paidIn.id, C.paidOut.id);
+  await tick(12);
+  const oneCharge = payCalls.length;
+  const crossGate = flow.retriggerSessionExit(twoGate.id, L.paid2.id);
+  await tick(12);
+  check('C11 a retrigger at a DIFFERENT gate is refused while the car is mid-charge',
+    crossGate.ok === false, JSON.stringify(crossGate));
+  check('C11b …and no second PayRequest reached a device',
+    payCalls.length === oneCharge, `calls ${oneCharge}→${payCalls.length}`);
+  check('C11c …naming the gate that is already charging it, so staff know where to look',
+    /L-PAID\b/.test(crossGate.error ?? ''), crossGate.error);
+  // Same car, read by the OTHER gate's exit camera. The guard has to live in the
+  // flow itself, not only in the retrigger helper — two exit cameras can both see
+  // one departing plate, and an auto-retrigger takes the same path.
+  read(C.paid2Out.id, 'CCC0009', 'exit', EXIT);
+  await tick(12);
+  check('C11d …and a read on the other gate\'s exit camera is refused the same way',
+    payCalls.length === oneCharge
+    && ev.warning.some((w) => w.kind === 'exit-busy' && w.sessionId === twoGate.id && w.chargingLaneId === L.paid.id),
+    `calls ${oneCharge}→${payCalls.length}`);
+  // The ledger is where a double charge actually shows up, so assert on it
+  // directly: one stay, one payment attempt. Pre-fix this was 2.
+  const attempts = db.listTransactionsPage({ limit: 100, offset: 0, search: 'CCC0009' })
+    .filter((t) => t.sessionId === twoGate.id);
+  check('C11e …and the ledger holds exactly ONE payment attempt for the stay',
+    attempts.length === 1 && attempts[0].status === 'pending',
+    `${attempts.length} attempt(s): ${attempts.map((t) => t.status).join(', ')}`);
+  flow.cancelExitInFlight(twoGate.id);
+  await tick(12);
 
   // Auto-retrigger OFF (current default in these settings).
   payScript = DECLINE();
