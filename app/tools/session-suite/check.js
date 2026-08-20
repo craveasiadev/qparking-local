@@ -866,7 +866,100 @@ async function main() {
   await flow.simulateEntryAt(simPassLane.id, 'SIMPASS01', ENTRY);
   await tick(12);
   check('I4d …but admits a plate that does hold a valid pass', inside('SIMPASS01'));
+
+  // ── I4e-I4k · near-miss rescue on a pass-only lane ────────────────────
+  // A camera one character out used to strand a paid-up holder at the boom: the
+  // pass lookup is exact, so A11 read as A1 matched nothing. These pin the rescue
+  // AND its limits — the limits matter more, because every one of them is a car
+  // being let in on a guess.
+  db.replaceAllSeasonPasses([{
+    passId: 'p-near', plateNumber: 'NEAR1234', passType: 'resident', status: 'active',
+    startDate: null, endDate: null, isFree: false, spaceNumber: null, fetchedAt: nowIso,
+  }]);
+
+  // Dropped trailing character — the commonest real misread.
+  await flow.simulateEntryAt(simPassLane.id, 'NEAR123', ENTRY);
+  await tick(12);
+  check('I4e a read one character SHORT of a pass plate is admitted',
+    inside('NEAR123'), 'near-miss rescue did not fire');
+  const nearSession = db.listOpenSessions().find((session) => session.plate === 'NEAR123');
+  check('I4f …the stay is stored under the READ plate, so the exit camera can match it',
+    !!nearSession && nearSession.plate === 'NEAR123', `plate=${nearSession?.plate}`);
+  check('I4g …and it records the pass that admitted it, so the exit need not re-guess',
+    nearSession?.passId === 'p-near', `passId=${nearSession?.passId}`);
+
+  // The exit honours the recorded entitlement even though the plate still matches
+  // no pass — and must NOT charge the holder we already let in.
+  //
+  // An EXIT-facing camera is required on the lane: camera resolution is
+  // direction-specific by design (there is deliberately no fallback to a camera
+  // facing the other way), so without this the exit simply refuses and the stay
+  // sits untouched in its as-created state. Added only now, after I4b-I4d have
+  // exercised the entry camera.
+  const simPassExitCam = db.upsertCamera({
+    name: 'SIM-PASSONLY-OUT', laneId: simPassLane.id, direction: 'exit',
+    accessMode: 'open',
+    host: '10.9.9.10', deviceUser: 'admin', devicePassword: 'admin', devicePort: 80,
+    webhookSecret: null, enabled: true,
+  });
+  await flow.simulateExitAt(simPassLane.id, 'NEAR123', EXIT);
+  await tick(12);
+  const nearClosed = nearSession ? db.getSessionById(nearSession.id) : null;
+  check('I4h …and exits FREE on that recorded pass, without re-guessing the plate',
+    nearClosed?.status === 'exited' && nearClosed?.paymentStatus === 'free' && nearClosed?.passId === 'p-near',
+    `${nearClosed?.status}/${nearClosed?.paymentStatus}/${nearClosed?.passId}`);
+
+  // A confusable character (1 vs I) is a misread; a genuinely different digit is not.
+  await flow.simulateEntryAt(simPassLane.id, 'NEARI234', ENTRY);
+  await tick(12);
+  check('I4i a confusable-character read (1 vs I) is admitted', inside('NEARI234'));
+
+  await flow.simulateEntryAt(simPassLane.id, 'NEAR9999', ENTRY);
+  await tick(12);
+  check('I4j a plate that merely LOOKS similar is still refused',
+    !inside('NEAR9999') && warnedFor('entry-not-authorised', 'NEAR9999'));
+
+  // AMBIGUITY MUST REFUSE. One character from two different holders means we
+  // cannot tell which car is here, and admitting either credits the wrong quota.
+  db.replaceAllSeasonPasses([
+    { passId: 'p-amb-a', plateNumber: 'AMB1234', passType: 'resident', status: 'active',
+      startDate: null, endDate: null, isFree: false, spaceNumber: null, fetchedAt: nowIso },
+    { passId: 'p-amb-b', plateNumber: 'AMB1235', passType: 'resident', status: 'active',
+      startDate: null, endDate: null, isFree: false, spaceNumber: null, fetchedAt: nowIso },
+  ]);
+  await flow.simulateEntryAt(simPassLane.id, 'AMB123', ENTRY);
+  await tick(12);
+  check('I4k a read one character from TWO different passes is refused, not guessed',
+    !inside('AMB123') && warnedFor('entry-not-authorised', 'AMB123'));
+
+  // ── I4l-I4o · staff admitting by hand ─────────────────────────────────
+  // The answer when the camera cannot read the plate AT ALL, so near-miss has
+  // nothing to work with. Waives Only Pass Allow and NOTHING else.
   db.replaceAllSeasonPasses([]);
+  const admitted = await flow.admitVehicleByOperator(simPassLane.id, 'STAFF001');
+  await tick(12);
+  check('I4l staff can admit a plate with no pass on an Only Pass Allow lane',
+    admitted.ok && inside('STAFF001'), `ok=${admitted.ok} refused=${admitted.refused}`);
+  check('I4m …and it is recorded as an operator override, not a silent entry',
+    warnedFor('entry-operator-override', 'STAFF001'));
+
+  // Still refused: a ban is a deliberate decision a shift worker must not be able
+  // to wave through, and a second open stay for one plate breaks plate lookups.
+  db.replaceAllBlockedPlates([{ plateNumber: 'STAFFBAN', vehicleId: 'v-sb', reason: 'banned', fetchedAt: nowIso }]);
+  const admitBanned = await flow.admitVehicleByOperator(simPassLane.id, 'STAFFBAN');
+  await tick(12);
+  check('I4n a staff admit still refuses a BANNED plate',
+    !inside('STAFFBAN') && warnedFor('entry-blacklisted', 'STAFFBAN'),
+    `ok=${admitBanned.ok} refused=${admitBanned.refused}`);
+  db.replaceAllBlockedPlates([]);
+
+  const admitDup = await flow.admitVehicleByOperator(simPassLane.id, 'STAFF001');
+  check('I4o …and refuses a plate that is already inside, naming the stay',
+    admitDup.ok === false && /already inside/.test(admitDup.error ?? ''),
+    `ok=${admitDup.ok} error=${admitDup.error}`);
+
+  db.replaceAllSeasonPasses([]);
+  db.deleteCamera(simPassExitCam.id);
   db.deleteCamera(simPassCam.id);
   db.deleteLane(simPassLane.id);
 

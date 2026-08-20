@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search,
+  Car, RefreshCw, ShieldAlert, Pencil, X, Save, Calculator, Search, UserCheck,
   Trash2, Loader2,
   Image as ImageIcon, Zap, ArrowDown, ArrowUp,
   LogIn, LogOut, Clock, Banknote, CloudUpload, CloudOff,
 } from 'lucide-react';
 import type { ParkingLane, ParkingSession, RatePolicy, LprCamera } from '@shared/types';
+import { canonicalPlate } from '@shared/plate';
+import { comparePlates } from '@shared/plate-match';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { usePagination } from '../hooks/usePagination';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -72,6 +74,307 @@ function useEscapeToClose(onClose: () => void) {
       if (escapeStack.length === 0) window.removeEventListener('keydown', handleGlobalEsc);
     };
   }, []);
+}
+
+/**
+ * Staff admitting a car by hand.
+ *
+ * The legitimate answer to a plate the camera cannot read, or an entry camera that
+ * is down. NOT dev-gated: before this, the only ways to open a stay were a real
+ * plate event and the dev simulator, and the other escape hatch — pulsing the
+ * barrier by hand — records no session, so the driver is stopped again at exit.
+ *
+ * The plate is what staff read off the CAR, not what the camera thought. It goes
+ * through the real entry flow, so a banned plate and a car already inside are still
+ * refused and the reason is shown here.
+ */
+function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
+  lanes: ParkingLane[];
+  cameras: LprCamera[];
+  onClose: () => void;
+  onAdmitted: () => void;
+}) {
+  const [plate, setPlate] = useState('');
+  const [laneId, setLaneId] = useState<number | ''>('');
+  const [error, setError] = useState<string | null>(null);
+  // Explicit consent for waiving Only Pass Allow. Deliberately NOT remembered
+  // between opens: each override is its own decision by a person.
+  const [acknowledged, setAcknowledged] = useState(false);
+  // Roster + who is inside, for the live read-back under the plate field. Advisory
+  // only — the gate remains the decider. The one exception is "already inside",
+  // which is a certainty rather than a guess, so it does disable the button.
+  const [passPlates, setPassPlates] = useState<string[]>([]);
+  const [insidePlates, setInsidePlates] = useState<{ plate: string; id: number }[]>([]);
+
+  useEffect(() => {
+    Promise.all([window.bridge.listSeasonPasses(), window.bridge.listOpenSessions()])
+      .then(([passes, open]) => {
+        setPassPlates(passes.filter((pass) => pass.status === 'active').map((pass) => canonicalPlate(pass.plateNumber)));
+        setInsidePlates(open.map((session) => ({ plate: canonicalPlate(session.plate), id: session.id })));
+      })
+      .catch(() => { /* the hints are a bonus; the form works without them */ });
+  }, []);
+
+  /** The ENTRY-facing camera on a lane — the one an arriving car would trigger.
+   *  A lane without one cannot admit anything, which is the flow's own rule. */
+  const entryCamOf = (id: number) =>
+    cameras.find((cam) => cam.laneId === id && cam.enabled && cam.direction === 'entry') ?? null;
+
+  /** Every camera wired to a lane, whatever its direction or enabled state. */
+  const camsOf = (id: number) => cameras.filter((cam) => cam.laneId === id);
+
+  const usableLanes = lanes.filter((lane) => lane.enabled && entryCamOf(lane.id));
+
+  /**
+   * Lanes that LOOK like they should take an entry but currently cannot.
+   *
+   * An exit-only lane is deliberately NOT in here. It has no entry camera because
+   * it is an exit — that is correct wiring, not a fault, and listing it as
+   * "cannot take an entry" made a working lane read as broken. It is simply not a
+   * choice when admitting a car, so it is left out.
+   *
+   * What DOES belong here is a lane an operator would expect to work: one with no
+   * camera wired at all, or one whose entry camera is switched off. Those are
+   * real problems, and hiding them would make a misconfigured lane look like a
+   * missing one.
+   */
+  const blockedLanes = lanes.filter((lane) => {
+    if (!lane.enabled || entryCamOf(lane.id)) return false;
+    const cams = camsOf(lane.id);
+    const hasDisabledEntryCam = cams.some((cam) => cam.direction === 'entry' && !cam.enabled);
+    return cams.length === 0 || hasDisabledEntryCam;
+  });
+
+  /** Why a blocked lane cannot serve an entry, in the operator's terms. */
+  const blockedReason = (id: number) =>
+    camsOf(id).some((cam) => cam.direction === 'entry' && !cam.enabled)
+      ? 'entry camera is switched off'
+      : 'no camera wired';
+
+  // Default to the first lane that can actually serve an entry, once lanes arrive.
+  useEffect(() => {
+    if (laneId === '' && usableLanes.length) setLaneId(usableLanes[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lanes, cameras]);
+
+  const selectedCam = laneId === '' ? null : entryCamOf(Number(laneId));
+  const typed = canonicalPlate(plate);
+  const clash = typed ? insidePlates.find((row) => row.plate === typed) : undefined;
+  const onRoster = !!typed && passPlates.includes(typed);
+  // One character out from a pass plate — the likeliest reason staff are on this
+  // screen at all. Offered as a correction they accept with one click, never
+  // applied silently. Suppressed once the typed plate is itself on the roster.
+  const suggestion = !typed || onRoster
+    ? null
+    : passPlates.find((known) => {
+      const kind = comparePlates(typed, known);
+      return kind !== null && kind !== 'exact';
+    }) ?? null;
+
+  // WAIVING ONLY PASS ALLOW IS THE ONE THING HERE THAT WEAKENS THE GATE, so it is
+  // never silent. Not needed when the plate is on the roster, nor when it is one
+  // character from a roster plate — the flow's near-miss match covers that and
+  // records the pass, so no override is involved.
+  const needsOverride = !!selectedCam && selectedCam.accessMode === 'pass_only' && !!typed && !onRoster && !suggestion;
+
+  const [admit, busy] = useAsyncAction(async () => {
+    setError(null);
+    if (!typed) { setError('Enter the plate as it reads on the car.'); return; }
+    if (laneId === '') { setError('Choose the lane the car is waiting at.'); return; }
+    const result = await window.bridge.admitVehicle({ laneId: Number(laneId), plate: plate.trim() });
+    // ok:false is a REFUSAL with a reason (banned, already inside, no entry camera
+    // on that lane) — show it here rather than closing as though it worked.
+    if (!result.ok) { setError(result.error ?? 'Could not admit this vehicle.'); return; }
+    // ok:true but refused: the flow ran and a guard inside it declined. Same
+    // treatment — the operator needs to know the barrier did not open.
+    if (result.refused) { setError('Refused by the gate: ' + result.refused); return; }
+    toast({
+      tone: 'success',
+      title: typed + ' admitted',
+      detail: result.sessionId
+        ? 'Session #' + result.sessionId + ' is open and the barrier was pulsed.'
+        : 'The stay is open and the barrier was pulsed.',
+    });
+    onAdmitted();
+  }, { onError: (e: unknown) => setError(bridgeErrorMessage(e)) });
+
+  const blocked = !typed || !!clash || laneId === '' || !selectedCam || (needsOverride && !acknowledged);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
+        <header className="px-5 py-4 flex items-start justify-between gap-3 border-b border-gray-100">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gray-900 text-white">
+              <UserCheck size={16} />
+            </span>
+            <div className="min-w-0">
+              <h2 className="text-base font-bold leading-tight">Admit vehicle</h2>
+              <p className="text-xs text-gray-500 mt-0.5">A plate the camera could not read, or an entry camera that is down.</p>
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Close"
+            className="w-8 h-8 shrink-0 rounded-lg hover:bg-gray-100 inline-flex items-center justify-center text-gray-400 hover:text-gray-700">
+            <X size={17} />
+          </button>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {error && (
+            <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+              <p className="flex-1">{error}</p>
+            </div>
+          )}
+
+          {/* The plate is the one thing being typed, so it gets the weight: big,
+              monospaced and letter-spaced like a plate, and uppercased as you go so
+              what is on screen matches what is on the car. */}
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1.5">
+              Plate — as it reads on the car
+            </label>
+            <input
+              value={plate}
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setPlate(e.target.value.toUpperCase())}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !blocked) void admit(); }}
+              placeholder="ABC 1234"
+              className="w-full h-12 px-3 rounded-lg border border-gray-300 bg-white font-mono text-lg tracking-[0.15em] uppercase outline-none focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10 placeholder:tracking-normal placeholder:text-gray-300"
+            />
+
+            {/* Live read-back, ordered by how much it matters: a car already inside
+                is a hard stop, a near-miss is an offer, and roster / no-roster is a
+                heads-up about whether the driver is about to be charged. */}
+            <div className="mt-2 min-h-[20px] text-[11px]">
+              {clash ? (
+                <p className="flex items-center gap-1.5 font-semibold text-red-600">
+                  <ShieldAlert size={12} className="shrink-0" />
+                  {typed} is already inside (session #{clash.id}) — nothing to admit.
+                </p>
+              ) : suggestion ? (
+                <p className="flex flex-wrap items-center gap-1.5 text-amber-700">
+                  <Zap size={12} className="shrink-0" />
+                  One character from <span className="font-mono font-bold">{suggestion}</span>, which is on the pass roster.
+                  <button type="button" onClick={() => setPlate(suggestion)}
+                    className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-bold uppercase tracking-wide hover:bg-amber-100">
+                    Use it
+                  </button>
+                </p>
+              ) : onRoster ? (
+                <p className="flex items-center gap-1.5 text-emerald-700">
+                  <Car size={12} className="shrink-0" />
+                  On the pass roster — the exit is free if that pass covers today.
+                </p>
+              ) : typed ? (
+                <p className="flex items-center gap-1.5 text-gray-500">
+                  <Banknote size={12} className="shrink-0" />
+                  Not on the pass roster — this stay will be charged at exit.
+                </p>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Grouped dropdown, same shape as the camera picker on the Lanes page,
+              so it scales to a site with many lanes. Only lanes that can actually
+              take an entry are selectable; see blockedLanes for why an exit-only
+              lane is omitted rather than listed as a fault. */}
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1.5">
+              Lane the car is waiting at
+            </label>
+            <select
+              value={laneId}
+              onChange={(e) => { setLaneId(e.target.value === '' ? '' : Number(e.target.value)); setAcknowledged(false); }}
+              className="w-full h-10 px-3 rounded-lg border border-gray-300 bg-white text-sm outline-none focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10"
+            >
+              <option value="">— none —</option>
+              {usableLanes.length > 0 && (
+                <optgroup label="ENTRY">
+                  {usableLanes.map((lane) => {
+                    const cam = entryCamOf(lane.id);
+                    return (
+                      <option key={lane.id} value={lane.id}>
+                        {lane.name} · {cam?.name}{cam?.accessMode === 'pass_only' ? ' (only pass allow)' : ''}
+                      </option>
+                    );
+                  })}
+                </optgroup>
+              )}
+              {blockedLanes.length > 0 && (
+                <optgroup label="NEEDS ATTENTION">
+                  {blockedLanes.map((lane) => (
+                    <option key={lane.id} value={lane.id} disabled>
+                      {lane.name} ({blockedReason(lane.id)})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {usableLanes.length === 0 && (
+              <p className="mt-1.5 text-[11px] text-amber-700">
+                No lane at this site can take an entry — every enabled lane is exit-only or has no
+                entry camera. Assign an entry-facing camera to a lane on the Cameras page.
+              </p>
+            )}
+            {laneId !== '' && !selectedCam && (
+              <p className="mt-1.5 text-[11px] text-red-600">
+                {blockedReason(Number(laneId)) === 'entry camera is switched off'
+                  ? 'This lane’s entry camera is switched off, so there is no barrier to pulse. Enable it on the Cameras page.'
+                  : 'This lane has no entry-facing camera, so there is no barrier to pulse. Wire one on the Cameras page.'}
+              </p>
+            )}
+          </div>
+
+          {/* The override, made deliberate. This is the only action here that
+              weakens the gate, and the button stays disabled until someone says
+              they have looked at the car. */}
+          {needsOverride && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+              <p className="flex items-start gap-2 text-[11px] leading-relaxed text-amber-900">
+                <ShieldAlert size={13} className="mt-0.5 shrink-0" />
+                <span>
+                  <strong>{selectedCam?.name}</strong> is set to <strong>Only Pass Allow</strong>, and
+                  <span className="font-mono"> {typed}</span> holds no pass. A camera read of this plate
+                  would be <strong>refused</strong> — admitting it here overrides that.
+                </span>
+              </p>
+              <label className="mt-2 flex items-start gap-2 text-[11px] font-semibold text-amber-900 cursor-pointer">
+                <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)}
+                  className="mt-0.5 accent-amber-600" />
+                I have checked this vehicle and authorise it to enter.
+              </label>
+            </div>
+          )}
+
+          <p className="flex items-start gap-2 rounded-lg bg-gray-50 px-3 py-2.5 text-[11px] leading-relaxed text-gray-600">
+            <Clock size={13} className="mt-0.5 shrink-0 text-gray-400" />
+            <span>
+              Opens the stay from <strong>now</strong> and pulses that lane&apos;s barrier.
+              A banned plate, or one already inside, is still refused. Logged as a staff override.
+            </span>
+          </p>
+        </div>
+
+        <footer className="px-5 py-4 bg-gray-50 border-t border-gray-100 flex items-center justify-end gap-2">
+          <button onClick={onClose}
+            className="h-10 px-4 rounded-lg border border-gray-200 bg-white hover:border-gray-900 text-xs font-bold uppercase tracking-wide">
+            Cancel
+          </button>
+          <button
+            onClick={() => void admit()}
+            disabled={busy || blocked}
+            className="h-10 px-4 rounded-lg bg-gray-900 text-white text-xs font-bold uppercase tracking-wide inline-flex items-center gap-2 hover:bg-black disabled:opacity-40 disabled:hover:bg-gray-900"
+          >
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <UserCheck size={14} />}
+            Admit &amp; open barrier
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -304,6 +607,10 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [policies, setPolicies] = useState<RatePolicy[]>([]);
   const [lanes, setLanes] = useState<ParkingLane[]>([]);
+  // Staff admitting a car by hand — NOT gated on devMode: this is the legitimate
+  // answer to a plate the camera cannot read, and the alternative was handing a
+  // shift worker the dev simulator.
+  const [admitting, setAdmitting] = useState(false);
   const [cameras, setCameras] = useState<LprCamera[]>([]);
   const [pageLoading, setPageLoading] = useState(false);
   // Sessions qparking cloud is missing or holding an out-of-date copy of.
@@ -469,6 +776,13 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
             {pushing ? 'Pushing…' : `Push to cloud${unsyncedCount ? ` (${unsyncedCount})` : ''}`}
           </button>
           <button
+            onClick={() => setAdmitting(true)}
+            title="Open a stay for a car the camera could not read"
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide"
+          >
+            <UserCheck size={13} /> Admit vehicle
+          </button>
+          <button
             onClick={() => runRefresh()}
             disabled={refreshing}
             className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide disabled:opacity-50"
@@ -554,6 +868,15 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           {statusFilter !== 'all' && <ActiveChip label={statusLabel} onClear={() => setStatusFilter('all')} />}
         </div>
       </div>
+
+      {admitting && (
+        <AdmitVehicleModal
+          lanes={lanes}
+          cameras={cameras}
+          onClose={() => setAdmitting(false)}
+          onAdmitted={() => { setAdmitting(false); void runRefresh(); }}
+        />
+      )}
 
       {devMode && <DevSimulator lanes={lanes} cameras={cameras} onSessionCreated={() => runRefresh()} />}
 

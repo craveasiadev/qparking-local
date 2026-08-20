@@ -53,6 +53,20 @@ export interface PlateEvent {
    *  — the simulator otherwise goes through the very same handlePlateEvent path,
    *  so every guard, session write, barrier pulse and audit row is identical. */
   entryAtOverride?: string;
+  /**
+   * A member of staff is admitting this car BY HAND, having looked at it.
+   *
+   * Skips the Only Pass Allow refusal and nothing else — the blacklist, the
+   * already-inside guard, the pass quota, the session write, the barrier pulse and
+   * the audit row all behave exactly as they do for a camera read, because this
+   * goes through the same handlePlateEvent path.
+   *
+   * Exists because a plate the camera cannot read at all (not merely one character
+   * out — see plate-match.ts for that) left staff with no way to admit a resident
+   * except the DEV simulator, and the alternative escape hatch, a manual barrier
+   * pulse, records no session: the driver is then stopped again on the way out.
+   */
+  operatorAdmit?: boolean;
 }
 
 /**

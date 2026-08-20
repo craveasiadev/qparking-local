@@ -99,7 +99,7 @@ import {
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind, closeDb,
   listActivityLogs, insertActivityLog,
 } from './services/db';
-import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
+import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
 import { startLprServers, stopLprServers, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
@@ -516,6 +516,55 @@ function wireRendererEvents() {
         resourceType: 'vehicle',
         resourceId: p?.plate ?? null,
         description: `${p?.plate ?? '?'} tried to ${isEntry ? 'enter' : 'exit'} a pass-only lane without a valid pass — refused, barrier not opened`,
+      });
+    } else if (kind === 'entry-near-miss-pass') {
+      // Admitted on a GUESS. Louder than a normal entry on purpose: the operator
+      // should be able to see that the gate resolved an ambiguous read, and which
+      // holder it credited, without going digging. Severity high for the same
+      // reason a manual barrier open is high — a human may need to check it.
+      sendToRenderer('log', {
+        terminalId: 0,
+        direction: 'info',
+        message: `NEAR-MISS ADMITTED · read "${p?.plate}" is one character (${p?.matchKind}) from "${p?.matchedPlate}", which holds a valid pass — admitted at "${p?.cameraName ?? `camera ${p?.cameraId}`}". The stay is recorded under the READ plate so the exit camera can match it; correct it on the Sessions page if this was the wrong car.`,
+        payload: p,
+      });
+      audit({
+        eventKey: 'gate.entry.near_miss_pass',
+        action: 'entry',
+        category: 'gate',
+        severity: 'high',
+        outcome: 'ok',
+        resourceType: 'vehicle',
+        resourceId: p?.plate ?? null,
+        description: `${p?.plate ?? '?'} admitted on a pass-only lane by NEAR-MISS match to ${p?.matchedPlate ?? '?'} (${p?.matchKind ?? '?'}) — pass ${p?.passId ?? '?'}`,
+        changes: {
+          readPlate: p?.plate ?? null,
+          matchedPlate: p?.matchedPlate ?? null,
+          matchKind: p?.matchKind ?? null,
+          passId: p?.passId ?? null,
+          cameraId: p?.cameraId ?? null,
+        },
+      });
+    } else if (kind === 'entry-operator-override') {
+      // A human waived Only Pass Allow. High severity like a manual barrier open:
+      // it is a deliberate access decision by a person, and the site owner is
+      // entitled to see every one of them.
+      sendToRenderer('log', {
+        terminalId: 0,
+        direction: 'info',
+        message: `ADMITTED BY STAFF · "${p?.plate}" holds no pass and "${p?.cameraName ?? `camera ${p?.cameraId}`}" is Only Pass Allow, but staff admitted it by hand. The stay is now open and will be charged normally at exit unless a pass covers it.`,
+        payload: p,
+      });
+      audit({
+        eventKey: 'gate.entry.operator_override',
+        action: 'entry',
+        category: 'gate',
+        severity: 'high',
+        outcome: 'ok',
+        resourceType: 'vehicle',
+        resourceId: p?.plate ?? null,
+        description: `${p?.plate ?? '?'} admitted BY HAND on a pass-only lane — no valid pass; staff override`,
+        changes: { plate: p?.plate ?? null, cameraId: p?.cameraId ?? null, cameraName: p?.cameraName ?? null },
       });
     } else if (kind === 'entry-quota-full') {
       // The pass is valid; it just has no free slot. Distinct from
@@ -1671,6 +1720,10 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
 
 // Manual operator "open barrier" from the Live display.
 ipcMain.handle('gate:manual-open', (_e, opts: { cameraId?: number | null; laneId?: number | null } = {}) => openBarrier(opts));
+// Staff admitting a car by hand: the plate the camera could not read, or an entry
+// camera that is down. Goes through the real flow — see admitVehicleByOperator.
+ipcMain.handle('gate:admit-vehicle', (_e, input: { laneId: number; plate: string }) =>
+  admitVehicleByOperator(input.laneId, input.plate));
 
 
 ipcMain.handle('sync:all-tables', async () => {

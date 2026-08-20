@@ -472,7 +472,10 @@ function CameraCard({
 						    discoverable by clicking Test. */}
 						<DeviceHealthBadge health={health} />
 						<DirectionBadge direction={cam.direction} />
-						{cam.accessMode === "pass_only" && (
+						{/* Entry only, for the same reason the switch is: on an exit camera
+						    the stored value is inert, and a badge saying "only pass allow"
+						    would claim a restriction this camera does not enforce. */}
+						{cam.accessMode === "pass_only" && cam.direction !== "exit" && (
 							<span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200">
 								only pass allow
 							</span>
@@ -658,7 +661,16 @@ function CameraForm({
 					</Field>
 					{/* The whole feature, as one switch. Checking it means: every plate
 					    this camera reads is looked up against the local pass roster, and
-					    the barrier only rises for a plate that holds a valid pass. */}
+					    the barrier only rises for a plate that holds a valid pass.
+					    ENTRY CAMERAS ONLY. The exit flow never reads accessMode — it asks
+					    "does this vehicle hold a pass?" regardless, then prices the stay —
+					    so on an exit camera this switch decides nothing. It used to be
+					    shown with a note explaining that it was inert, which is worse than
+					    not showing it: a control that does nothing still invites someone to
+					    reason about it. The stored value is left ALONE rather than cleared,
+					    so a camera flipped to exit and back keeps the setting it had; it
+					    becomes visible again the moment the direction is entry. */}
+					{value.direction !== "exit" && (
 					<div className="sm:col-span-2">
 						<label className="flex items-start gap-2.5 rounded-lg border border-gray-200 px-3 py-2.5 cursor-pointer hover:border-gray-400">
 							<input
@@ -690,17 +702,6 @@ function CameraForm({
 							</span>
 						</label>
 					</div>
-					{/* This setting governs ENTRY only — the exit flow never reads it (it
-					    asks "does this vehicle hold a pass?" regardless, then prices the
-					    stay). Say so on an exit camera rather than hiding the control,
-					    which would leave a ticked box invisible after a direction change. */}
-					{value.accessMode === "pass_only" && value.direction === "exit" && (
-						<div className="sm:col-span-2 -mt-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
-							<strong>Has no effect on an exit camera.</strong> This setting only decides who is let
-							<em> in</em>. On the way out every vehicle is checked for a pass anyway — pass holders
-							exit free, everyone else is priced and charged — so leaving it ticked here changes
-							nothing. Set it on the <strong>entry</strong> camera instead.
-						</div>
 					)}
 					{/* Camera LAN IP — all that live video needs. The main process pulls
               rtsp://<host>:8557/h264 and transcodes it for the Live display. */}

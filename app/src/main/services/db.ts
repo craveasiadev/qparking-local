@@ -35,6 +35,7 @@ import type {
 	CompanySetting,
 } from "../../shared/types";
 import { canonicalPlate } from "../../shared/plate";
+import { findSingleNearMatch, type PlateMatchKind } from "../../shared/plate-match";
 import { randomUUID } from "node:crypto";
 
 let db: Database.Database | null = null;
@@ -2218,6 +2219,9 @@ export function updateSessionFields(
 		status?: ParkingSession["status"];
 		paymentStatus?: ParkingSession["paymentStatus"];
 		notes?: string;
+		/** The entitlement this stay was admitted on, recorded AT ENTRY so the exit
+		 *  does not have to re-guess a misread plate. See findSeasonPassById. */
+		passId?: string | null;
 	},
 ): ParkingSession | null {
 	const sets: string[] = [];
@@ -2225,6 +2229,10 @@ export function updateSessionFields(
 	if (patch.plate !== undefined) {
 		sets.push("plate = ?");
 		vals.push(patch.plate);
+	}
+	if (patch.passId !== undefined) {
+		sets.push("pass_id = ?");
+		vals.push(patch.passId);
 	}
 	if (patch.entryAt !== undefined) {
 		sets.push("entry_at = ?");
@@ -3224,6 +3232,111 @@ export function findSeasonPassByPlate(plate: string, window?: { entryAt?: string
   `,
 		)
 		.get({ plate: normalisedPlate, entryDay, exitDay }) as any;
+	return row ? rowToSeasonPass(row) : null;
+}
+
+/**
+ * The one pass a camera reading plausibly refers to, when no pass matches it
+ * EXACTLY — or null when nothing does, or when more than one plate is in
+ * contention.
+ *
+ * WHY: every pass lookup is exact, so a camera that reads A11 as A1 leaves a
+ * paid-up holder at a boom that will not lift. This asks the same validity
+ * question as findSeasonPassByPlate — same dates, same status, deliberately the
+ * same SQL predicate so the two can never disagree about what "valid" means — but
+ * lets the plate be one OCR character out.
+ *
+ * The candidate set is the site's own currently-valid passes: a small closed set,
+ * which is what makes guessing acceptable here. See shared/plate-match.ts.
+ *
+ * Ambiguity returns null, so the gate falls back to its normal refusal rather
+ * than crediting a coin flip to one of two holders.
+ */
+export function findSeasonPassByNearPlate(
+	plate: string,
+	window?: { entryAt?: string | null; exitAt?: string | null },
+): { pass: SeasonPass; matchedPlate: string; kind: PlateMatchKind } | null {
+	const read = canonicalPlate(plate);
+	if (!read) return null;
+
+	const entryDay = siteDayKey(window?.entryAt ?? null);
+	const exitDay = siteDayKey(window?.exitAt ?? null);
+
+	// Same WHERE as findSeasonPassByPlate with the plate predicate removed. A site
+	// roster is tens to low hundreds of rows, so scanning it beats maintaining a
+	// second notion of validity that could drift from the exact-match path.
+	const rows = getDb()
+		.prepare(
+			`
+    SELECT * FROM season_passes
+    WHERE status = 'active'
+      AND (
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
+        )
+        OR
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
+        )
+      )
+    ORDER BY is_free DESC, (NULLIF(end_date, '') IS NULL) DESC, end_date DESC
+  `,
+		)
+		.all({ entryDay, exitDay }) as any[];
+
+	const candidates = rows.map(rowToSeasonPass);
+	const match = findSingleNearMatch(read, candidates, (candidate) => candidate.plateNumber);
+	if (!match || match.kind === 'exact') {
+		// 'exact' cannot happen in practice (the caller only reaches here after the
+		// exact lookup missed) but returning it would let a caller log a real match
+		// as a guess, so it is filtered rather than trusted.
+		return null;
+	}
+
+	return { pass: match.candidate, matchedPlate: match.plate, kind: match.kind };
+}
+
+/**
+ * Re-read a pass BY ID and confirm it is still valid over a window.
+ *
+ * Backs the exit side of near-miss admission. When a stay was admitted on a pass
+ * despite a misread plate, the exit must honour that entitlement without guessing
+ * again from the plate — the plate is exactly what we already know to be wrong.
+ *
+ * Deliberately re-checks validity rather than trusting the recorded id: a pass
+ * revoked or expired mid-stay must stop waiving the fare (see the suite's
+ * "revoked in the cloud" case). Same predicate as the plate lookups, so all three
+ * agree on what "valid" means.
+ */
+export function findSeasonPassById(
+	passId: string,
+	window?: { entryAt?: string | null; exitAt?: string | null },
+): SeasonPass | null {
+	if (!passId) return null;
+	const entryDay = siteDayKey(window?.entryAt ?? null);
+	const exitDay = siteDayKey(window?.exitAt ?? null);
+	const row = getDb()
+		.prepare(
+			`
+    SELECT * FROM season_passes
+    WHERE pass_id = @passId AND status = 'active'
+      AND (
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
+        )
+        OR
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
+        )
+      )
+    LIMIT 1
+  `,
+		)
+		.get({ passId, entryDay, exitDay }) as any;
 	return row ? rowToSeasonPass(row) : null;
 }
 

@@ -500,6 +500,14 @@ export interface BridgeApi {
 	/** Operator "open barrier" for a lane/camera — pulses that camera's onboard
 	 *  IO relay unconditionally. `ok` reflects whether the relay actually fired. */
 	manualOpenGate(opts: { cameraId?: number | null; laneId?: number | null }): Promise<{ ok: boolean; note?: string }>;
+	/**
+	 * Open a stay for a car BY HAND, for a plate the camera cannot read or an entry
+	 * camera that is down. Runs the real entry flow (blacklist, quota, barrier pulse,
+	 * cloud push, audit) and waives only Only Pass Allow.
+	 *
+	 * Still refuses a banned plate and a car already inside; entry time is always now.
+	 */
+	admitVehicle(input: { laneId: number; plate: string }): Promise<{ ok: boolean; error?: string; cameraId?: number; sessionId?: number; refused?: string }>;
 
 	listActivityLogs(): Promise<ActivityLog[]>;
 	insertActivityLog(payload: ActivityLogPayload): Promise<void>;

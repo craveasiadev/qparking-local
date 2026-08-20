@@ -25,7 +25,7 @@ import { app } from 'electron';
 import type { ParkingLane, ParkingSession, PaymentTerminal, RatePolicy, TariffRule } from '../../shared/types';
 import {
   createEntrySession, findOpenSessionByPlate, getCamera, getLane, getRatePolicy, getSiteDefaultRatePolicy, getSettings, getTerminal,
-  listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, countPassPlatesInside, getSessionById,
+  listCameras, recordExit, updateSessionFields, findSeasonPassByPlate, findSeasonPassByNearPlate, findSeasonPassById, countPassPlatesInside, getSessionById,
   createTransaction, updateTransaction, findBlockedPlate, findLastClosedSessionByPlate,
   attachSessionCapture,
 } from './db';
@@ -318,7 +318,54 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
     entryInstant ? { entryAt: entryInstant, exitAt: entryInstant } : undefined,
   );
 
+  // ─── near-miss rescue on a pass-only lane ─────────────────────────────
+  // The exact lookup above is unforgiving, and on a deny-by-default lane that is
+  // the difference between a resident driving in and a resident sitting at a boom:
+  // one OCR character (A11 read as A1) makes a valid entitlement invisible.
+  //
+  // So before refusing, ask whether this reading is one character off ONE of the
+  // site's currently-valid passes. Only ever consulted when the exact lookup
+  // already failed, so a real match is never overridden by a guess, and ambiguity
+  // (two candidate plates) falls through to the refusal below rather than
+  // crediting a coin flip. See shared/plate-match.ts for what "one character" means
+  // — it is far stricter than an edit distance.
+  //
+  // The session is deliberately stored under the plate the camera READ, not the
+  // pass's plate: the exit camera will almost certainly misread it the same way,
+  // and the open-session lookup at exit is keyed on the read. Correcting it here
+  // would move the stranding from entry to exit. The pass link and the audit row
+  // carry the true plate.
+  let nearMissPass: ReturnType<typeof findSeasonPassByNearPlate> = null;
   if (camera?.accessMode === 'pass_only' && !pass) {
+    nearMissPass = findSeasonPassByNearPlate(
+      event.plate,
+      entryInstant ? { entryAt: entryInstant, exitAt: entryInstant } : undefined,
+    );
+    if (nearMissPass) {
+      flog(`ENTRY ADMITTED (NEAR-MISS PASS): plate=${event.plate} does not match any pass exactly, but is one character (${nearMissPass.kind}) from ${nearMissPass.matchedPlate}, which holds a valid ${nearMissPass.pass.passType} pass (id=${nearMissPass.pass.passId}) → admitting on that pass. The session is recorded under the READ plate ${event.plate} so the exit camera can find it; the holder's real plate is ${nearMissPass.matchedPlate}. If this is wrong, the plate can be corrected on the Sessions page.`);
+      parkingEvents.emit('warning', {
+        kind: 'entry-near-miss-pass',
+        plate: event.plate,
+        matchedPlate: nearMissPass.matchedPlate,
+        matchKind: nearMissPass.kind,
+        passId: nearMissPass.pass.passId,
+        cameraId: camera.id,
+        cameraName: camera.name,
+      });
+    }
+  }
+
+  if (camera?.accessMode === 'pass_only' && !pass && !nearMissPass && event.operatorAdmit) {
+    flog(`ENTRY ADMITTED BY STAFF (OVERRIDE): plate=${event.plate} holds no pass and camera "${camera.name}" is set to Only Pass Allow, but a member of staff admitted this car by hand → session created, barrier pulsed. Recorded in the activity log.`);
+    parkingEvents.emit('warning', {
+      kind: 'entry-operator-override',
+      plate: event.plate,
+      cameraId: camera.id,
+      cameraName: camera.name,
+    });
+  }
+
+  if (camera?.accessMode === 'pass_only' && !pass && !nearMissPass && !event.operatorAdmit) {
     const when = entryInstant ? `valid at the simulated entry time (${entryInstant})` : 'valid right now';
     flog(`ENTRY REFUSED (NO PASS): plate=${event.plate} camera="${camera.name}" is set to Only Pass Allow and this plate holds no pass ${when} → no session created, barrier NOT pulsed. Issue a pass in the cloud and press Sync now, or turn the toggle off.`);
     parkingEvents.emit('warning', {
@@ -341,25 +388,30 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
   //
   // Counted from THIS box's own open sessions, so it holds through a WAN
   // outage. The box is the authority for its own site.
-  if (pass) {
-    const inside = countPassPlatesInside(pass.passId, event.plate);
-    if (inside >= pass.concurrentLimit) {
+  // A near-miss admission is still an admission ON THAT PASS, so it consumes a
+  // slot like any other. Leaving it out would make the quota bypassable: a holder
+  // with a one-bay pass could put a second car inside whenever a camera dropped a
+  // character, which is the opposite of what the quota exists for.
+  const quotaPass = pass ?? nearMissPass?.pass ?? null;
+  if (quotaPass) {
+    const inside = countPassPlatesInside(quotaPass.passId, event.plate);
+    if (inside >= quotaPass.concurrentLimit) {
       flog(
-        `ENTRY REFUSED (QUOTA FULL): plate=${event.plate} pass=${pass.passId} already has ${inside}/${pass.concurrentLimit} car(s) inside → no session created, barrier NOT pulsed. One of the pass's other vehicles must exit first.`,
+        `ENTRY REFUSED (QUOTA FULL): plate=${event.plate} pass=${quotaPass.passId} already has ${inside}/${quotaPass.concurrentLimit} car(s) inside → no session created, barrier NOT pulsed. One of the pass's other vehicles must exit first.`,
       );
       parkingEvents.emit('warning', {
         kind: 'entry-quota-full',
         plate: event.plate,
         cameraId: camera?.id ?? event.cameraId,
         cameraName: camera?.name ?? '',
-        passId: pass.passId,
+        passId: quotaPass.passId,
         inside,
-        limit: pass.concurrentLimit,
+        limit: quotaPass.concurrentLimit,
       });
       return;
     }
     flog(
-      `PASS OK: plate=${event.plate} holds a valid ${pass.passType} pass (id=${pass.passId}, valid ${pass.startDate ?? '—'}→${pass.endDate ?? 'forever'}, ${inside}/${pass.concurrentLimit} slots used) → admitted`,
+      `PASS OK: plate=${event.plate} holds a valid ${quotaPass.passType} pass (id=${quotaPass.passId}, valid ${quotaPass.startDate ?? '—'}→${quotaPass.endDate ?? 'forever'}, ${inside}/${quotaPass.concurrentLimit} slots used)${nearMissPass ? ` · matched by near-miss on ${nearMissPass.matchedPlate}` : ''} → admitted`,
     );
   }
 
@@ -375,9 +427,17 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
 
   // DEV/QA timed entry — back-date the stored entry_at so a later exit prices a
   // controlled stay. Real camera events never set this.
-  const stored = event.entryAtOverride
+  let stored = event.entryAtOverride
     ? (updateSessionFields(session.id, { entryAt: event.entryAtOverride }) ?? session)
     : session;
+
+  // Admitted on a GUESS about the plate: record which pass let this car in, so the
+  // exit honours the entitlement instead of asking the same unanswerable question
+  // about the same misread plate. Only for near-miss admissions — an exact match
+  // needs nothing recorded, because the exit's own lookup will find it again.
+  if (nearMissPass) {
+    stored = updateSessionFields(stored.id, { passId: nearMissPass.pass.passId }) ?? stored;
+  }
 
   flog(`ENTRY STORED: plate=${event.plate} session=${stored.id} lane=${lane?.id ?? 'none'} entryAt=${stored.entryAt} → opening barrier`);
   // Reaching this line means the entry was AUTHORISED, so the barrier opens.
@@ -440,8 +500,28 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   const exitIsoNow = event.exitAtOverride ?? new Date().toISOString();
   // Scoped to the EXIT instant (not bare "now") so a simulated exit at a chosen
   // time asks the same question a real exit at that time would.
-  const passNow = findSeasonPassByPlate(event.plate, { entryAt: exitIsoNow, exitAt: exitIsoNow });
+  const exactPassNow = findSeasonPassByPlate(event.plate, { entryAt: exitIsoNow, exitAt: exitIsoNow });
+
+  // ─── the entitlement this stay was ADMITTED on ────────────────────────
+  // A camera that misread the plate on the way in will misread it the same way on
+  // the way out, so a holder admitted by near-miss would reach the exit and be
+  // charged — worse than being stopped at entry, since they were already let in on
+  // that pass.
+  //
+  // The fix is to carry the entry decision forward, NOT to re-guess here. Guessing
+  // at exit is a revenue leak: it hands a free exit to any plate one character from
+  // a holder's, and the session suite caught exactly that (PMO0001B, a different
+  // car, exiting free on PMO0001's pass). Only a stay THIS box already admitted on
+  // a pass can benefit, and the pass is re-validated at the exit instant so one
+  // revoked or expired mid-stay still stops waiving the fare.
+  const recordedPass = !exactPassNow && session?.passId
+    ? findSeasonPassById(session.passId, { entryAt: exitIsoNow, exitAt: exitIsoNow })
+    : null;
+  const passNow = exactPassNow ?? recordedPass;
   if (passNow) {
+    if (recordedPass) {
+      flog(`EXIT FREE (PASS RECORDED AT ENTRY): plate=${event.plate} matches no pass exactly — this stay was admitted on pass ${recordedPass.passId} (${recordedPass.passType}) despite a misread plate, and that pass is still valid → honouring it rather than re-guessing from the plate.`);
+    }
     if (!session) {
       // Pass holder with no entry on record — the barrier stays DOWN.
       //
@@ -1504,6 +1584,70 @@ export async function simulateEntryAt(
   // Listen BEFORE dispatching: handlePlateEvent can resolve within the same tick
   // chain, and a listener attached afterwards would miss the outcome and report a
   // timeout on a perfectly good entry.
+  const outcome = awaitEntryOutcome(norm);
+  lprEvents.emit('plate', event);
+  return { ok: true, cameraId: cam.id, ...(await outcome) };
+}
+
+/**
+ * Admit a car BY HAND — the staff-facing counterpart to a camera read.
+ *
+ * WHY IT EXISTS
+ * -------------
+ * Three things used to leave staff with no legitimate move: a plate the camera
+ * cannot read at all, an entry camera that is down, and a car whose reading is too
+ * far out for near-miss matching. The only ways to open a stay were a real plate
+ * event or the DEV simulator, which is not something to hand a shift worker — and
+ * the other escape hatch, pulsing the barrier by hand, records NO session, so the
+ * driver is stopped again at exit.
+ *
+ * DELIBERATELY THE SAME PATH AS A REAL READ
+ * -----------------------------------------
+ * This builds a plate event and dispatches it, exactly as the simulator does, so
+ * the blacklist, the already-inside guard, the pass lookup, the quota, the session
+ * write, the barrier pulse, the cloud push and the audit row are the ones the live
+ * flow uses — not a second copy that can drift. The ONLY difference is
+ * `operatorAdmit`, which waives Only Pass Allow.
+ *
+ * WHAT IT STILL REFUSES
+ * --------------------
+ * A blacklisted plate and a car already inside, both by design: a ban is a
+ * deliberate decision that a shift worker should not be able to wave through
+ * silently, and a second open stay for one plate would break every plate-keyed
+ * lookup. Entry time is always NOW — back-dating a stay changes what it will be
+ * charged, which is the simulator's job, not this one's.
+ */
+export async function admitVehicleByOperator(
+  laneId: number, plate: string,
+): Promise<{ ok: boolean; error?: string; cameraId?: number; sessionId?: number; refused?: string }> {
+  const lane = getLane(laneId);
+  if (!lane) return { ok: false, error: 'lane_not_found' };
+  const norm = normalisePlate(plate);
+  if (!norm) return { ok: false, error: 'plate_required — a plate must contain at least one letter or digit' };
+
+  // Answered here as well as inside the flow so the operator gets a sentence
+  // naming the other stay, rather than a silent no-op from the rescan guard.
+  const already = findOpenSessionByPlate(norm);
+  if (already) {
+    return { ok: false, error: `${norm} is already inside (session #${already.id}). Nothing to admit.` };
+  }
+
+  // ENTRY-facing only, same rule as the simulator: an entry driven through an exit
+  // camera would be judged by the wrong camera and pulse the wrong boom.
+  const cam = laneCameraFacing(laneId, 'entry');
+  if (!cam) return { ok: false, error: laneCannotServe(laneId, lane.name, 'entry') };
+
+  const event: PlateEvent = {
+    cameraId: cam.id,
+    plate: norm,
+    // No captured frame: nobody photographed this car, and attaching the live feed
+    // would put a picture of whatever is at the boom NOW against this stay.
+    imagePath: null,
+    timestamp: new Date().toISOString(),
+    direction: 'entry',
+    operatorAdmit: true,
+  };
+  flog(`STAFF ADMIT: lane="${lane.name}" plate=${norm} via camera=${cam.id} "${cam.name}" — admitted by hand, dispatching as a real plate event`);
   const outcome = awaitEntryOutcome(norm);
   lprEvents.emit('plate', event);
   return { ok: true, cameraId: cam.id, ...(await outcome) };

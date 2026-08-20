@@ -136,6 +136,7 @@ const api: BridgeApi = {
 
   // barrier — operator-driven relay pulse
   manualOpenGate: (opts: { cameraId?: number | null; laneId?: number | null }) => ipcRenderer.invoke('gate:manual-open', opts),
+  admitVehicle: (input: { laneId: number; plate: string }) => ipcRenderer.invoke('gate:admit-vehicle', input),
 
   // App self-update — check / download / apply against the qparking cloud.
   appUpdateCheck: () => ipcRenderer.invoke('app-update:check'),
