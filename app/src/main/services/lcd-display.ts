@@ -23,7 +23,13 @@
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import type { LcdDisplay, LcdDisplayStatus, ParkingSession } from '../../shared/types';
-import { getLaneLcd, getSessionById, listLcds } from './db';
+import {
+  findSeasonPassById,
+  findSeasonPassByPlate,
+  getLaneLcd,
+  getSessionById,
+  listLcds,
+} from './db';
 import { parkingEvents } from './parking-flow';
 
 /**
@@ -112,6 +118,9 @@ interface Frame {
   amountCents?: number | null;
   currency?: string | null;
   durationMinutes?: number | null;
+  /** What the driver is at this site — resident | staff | season | visitor —
+   *  read off their pass. The panel tags the glass with it; see holderTypeFor. */
+  role?: string | null;
   free?: boolean;
   holdMs?: number | null;
 }
@@ -335,6 +344,7 @@ class LcdLink {
     if (frame.amountCents != null) payload.amountCents = frame.amountCents;
     if (frame.currency != null) payload.currency = frame.currency;
     if (frame.durationMinutes != null) payload.durationMinutes = frame.durationMinutes;
+    if (frame.role != null) payload.role = frame.role;
     if (frame.free) payload.free = true;
     if (frame.holdMs != null) payload.holdMs = frame.holdMs;
 
@@ -483,15 +493,20 @@ export function testLcd(host: string, port: number): Promise<{ ok: boolean; erro
 
     socket.once('connect', () => {
       const send = (o: Record<string, unknown>) => socket.write(`${JSON.stringify(o)}\n`);
-      send({ v: 1, seq: 1, type: 'show', screen: 'exit', plate: 'TEST 1234', amountCents: 500, durationMinutes: 135 });
       // Walk the panel through the real sequence rather than parking it on a
-      // fake fare: the installer sees the fare, the thank-you and the return to
-      // idle, which is the whole behaviour under test.
-      setTimeout(() => send({ v: 1, seq: 2, type: 'show', screen: 'thankyou', plate: 'TEST 1234' }), 3_000);
+      // fake fare: the installer sees the welcome a driver meets first, then the
+      // fare, the thank-you and the return to idle — the whole behaviour under
+      // test, and every screen the panel can draw.
+      send({ v: 1, seq: 1, type: 'show', screen: 'entry', plate: 'TEST 1234', role: 'resident' });
+      setTimeout(
+        () => send({ v: 1, seq: 2, type: 'show', screen: 'exit', plate: 'TEST 1234', amountCents: 500, durationMinutes: 135, role: 'resident' }),
+        3_000,
+      );
+      setTimeout(() => send({ v: 1, seq: 3, type: 'show', screen: 'thankyou', plate: 'TEST 1234' }), 6_000);
       setTimeout(() => {
-        send({ v: 1, seq: 3, type: 'idle' });
+        send({ v: 1, seq: 4, type: 'idle' });
         done({ ok: true, latencyMs: Date.now() - startedAt });
-      }, 6_000);
+      }, 9_000);
     });
 
     socket.once('timeout', () => done({ ok: false, error: `${host}:${port} did not answer within ${CONNECT_TIMEOUT_MS}ms.` }));
@@ -581,10 +596,36 @@ function laneShowingFare(payload: { laneId?: number | null; sessionId?: number |
   return session?.exitLaneId ?? session?.entryLaneId ?? null;
 }
 
+/**
+ * What this driver is at the site — resident | staff | season | visitor — or null
+ * when no pass covers them.
+ *
+ * Read off the pass rather than the session because the session records money and
+ * movement, not who the driver is. The recorded passId wins where there is one:
+ * it is the pass this stay was actually admitted on, which on a near-miss plate
+ * read is NOT the pass a fresh plate lookup would find (see the near-miss rescue
+ * in parking-flow). Falling back to the plate covers the ordinary case, where the
+ * session carries no pass at all because nothing about the exit was free.
+ *
+ * Only ever decorates a screen: a lookup that comes back empty costs a tag, never
+ * a frame, so this is deliberately not allowed to throw into the display path.
+ */
+function holderTypeFor(session: ParkingSession): string | null {
+  try {
+    const pass = session.passId
+      ? findSeasonPassById(session.passId, { entryAt: session.entryAt, exitAt: session.exitAt })
+      : findSeasonPassByPlate(session.plate);
+    return pass?.role ?? null;
+  } catch (e) {
+    llog(`could not read the holder type for ${session.plate}: ${(e as Error).message}`);
+    return null;
+  }
+}
+
 /** FREE, held long enough to read, then THANK YOU. The sequence for any exit the
  *  driver pays nothing for — a pass holder, or an operator waiving the fee. */
 function showFreeThenThankYou(laneId: number | null | undefined, session: ParkingSession): void {
-  showOnLane(laneId, { screen: 'exit', plate: session.plate, free: true, amountCents: 0, durationMinutes: session.durationMinutes, holdMs: FREE_DWELL_MS });
+  showOnLane(laneId, { screen: 'exit', plate: session.plate, free: true, amountCents: 0, durationMinutes: session.durationMinutes, role: holderTypeFor(session), holdMs: FREE_DWELL_MS });
   const t = setTimeout(() => showOnLane(laneId, { screen: 'thankyou', plate: session.plate }), FREE_DWELL_MS);
   t.unref?.();
 }
@@ -663,7 +704,7 @@ export function startLcdDisplays(): void {
   parkingEvents.on('entry', (payload: { session: ParkingSession }) => {
     const session = payload?.session;
     if (!session) return;
-    showOnLane(session.entryLaneId, { screen: 'entry', plate: session.plate });
+    showOnLane(session.entryLaneId, { screen: 'entry', plate: session.plate, role: holderTypeFor(session) });
   });
 
   // ─── exit priced: plate + fare (or FREE) ──────────────────────────────────
@@ -683,6 +724,7 @@ export function startLcdDisplays(): void {
         free: feeCents === 0,
         currency: policy?.currency ?? null,
         durationMinutes,
+        role: holderTypeFor(session),
       });
     },
   );
