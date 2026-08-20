@@ -247,16 +247,15 @@ function applySchema(db: Database.Database) {
       -- a future mode must not require a table rebuild on live sites, and the
       -- flow treats any unknown value as 'open' (fail-open, never fail-shut).
       access_mode TEXT NOT NULL DEFAULT 'open',
-      -- RETIRED 2026-08-07, kept only so existing DBs (where it is NOT NULL)
-      -- still accept inserts that omit it. Nothing reads or writes it any more.
-      --
-      -- It chose who lifted the boom: 'camera' (the device's own relay logic,
-      -- and the shipped default) or 'app'. In practice the default meant this
-      -- app recorded the session and then pulsed nothing, so the gate simply
-      -- never moved — indistinguishable from a broken trigger. The app now
-      -- always opens the barrier for a car it has authorised; a site whose
-      -- camera firmware also auto-opens switches that off on the device.
-      barrier_control TEXT NOT NULL DEFAULT 'app',
+      -- REMOVED 2026-08-20 from this DDL: barrier_control ('camera' | 'app').
+      -- Retired 2026-08-07, read by nothing since, yet still created on every new
+      -- install. It chose who lifted the boom: the camera's own relay logic, or
+      -- this app. The shipped default meant the app recorded the session and
+      -- pulsed nothing, so the gate never moved — indistinguishable from a broken
+      -- trigger. The app now always opens the barrier for a car it has authorised;
+      -- a site whose camera firmware also auto-opens switches that off on the
+      -- device. Installs that already have the column keep it (dropping one means
+      -- a full table rebuild for no behavioural gain) — it is simply never read.
       host TEXT,
       -- The port THIS server listens on for this camera's plate pushes. Per
       -- camera because camera firmware varies in what it will let you set: the
@@ -555,12 +554,16 @@ function applySchema(db: Database.Database) {
       space_code TEXT,
       status TEXT NOT NULL DEFAULT 'available',
       customer_name TEXT,
-      vehicle_plate TEXT,
+      -- REMOVED 2026-08-20: vehicle_plate and pass_type. Both were declared
+      -- here and nowhere else — absent from replaceParkingSpaces()'s INSERT, from
+      -- rowToParkingSpace() and from the ParkingSpace type — so they were NULL on
+      -- every row of every install. bay_type below is what the page actually
+      -- reads: what the bay is SET ASIDE for, which holds whether or not anyone
+      -- is in it. Existing installs keep two always-NULL columns; nothing reads
+      -- them.
+      --
       -- What the bay is SET ASIDE for: visitor | resident | season | staff.
-      -- pass_type below is a denormalised copy of whoever holds it, so an
-      -- EMPTY resident bay carried nothing at all and read as general parking.
       bay_type TEXT,
-      pass_type TEXT,
       pass_id TEXT,
       start_date TEXT,
       end_date TEXT,
@@ -835,10 +838,6 @@ function applySchema(db: Database.Database) {
 		"device_password TEXT",
 		"device_port INTEGER",
 		"access_mode TEXT NOT NULL DEFAULT 'open'",
-		// Retired 2026-08-07 and no longer read, but still added on upgrade: the
-		// column is NOT NULL on installs that already have it, and dropping a
-		// column means a full table rebuild for no behavioural gain.
-		"barrier_control TEXT NOT NULL DEFAULT 'app'",
 	]) {
 		try {
 			db.exec(`ALTER TABLE cameras ADD COLUMN ${col}`);

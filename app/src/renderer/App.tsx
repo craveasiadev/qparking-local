@@ -180,7 +180,16 @@ interface StaffAlert { id: number; tone: 'error' | 'warn' | 'success'; title: st
  *  the modal already confirmed it — so toasting it back at them (as a red error, and
  *  under its raw event name at that) was pure noise. It is still written to the
  *  activity log at high severity, which is where an override belongs. */
-const SILENT_WARNINGS = new Set(['entry-operator-override']);
+const SILENT_WARNINGS = new Set([
+  'entry-operator-override',
+  // A mid-cycle internal step: the charge failed and the terminal is being
+  // re-armed 2s later, up to three times. It raised a red toast titled with its
+  // own event name on every attempt — three alarms for one stuck car, before
+  // anything had actually gone wrong for good. The give-up moment
+  // ('exit-auto-retrigger-capped', below) is the one worth interrupting for, and
+  // every attempt is already in the W4G device log.
+  'exit-auto-retrigger',
+]);
 
 /** Turn a raw parking-flow 'warning' kind into a plain-language message an
  *  on-site operator can act on, plus the tone it deserves — not every warning is
@@ -231,6 +240,11 @@ function describeWarning(kind: string, d: any): { title: string; detail: string;
         tone: 'warn',
         title: `Admitted on a near match — ${d?.plate ?? 'unknown plate'}`,
         detail: `The read is one character from "${d?.matchedPlate ?? '?'}", which holds a valid pass, so the car was let in on that pass. The stay is recorded under the plate as READ so the exit camera can match it — correct it on Parking Activity if this was the wrong car.`,
+      };
+    case 'exit-auto-retrigger-capped':
+      return {
+        title: `Still not paid after ${d?.attempts ?? 'several'} tries — ${d?.plate ?? 'a car'} is waiting`,
+        detail: 'The terminal was re-armed automatically as far as it goes and the fare still was not settled, so nothing more happens on its own. The car is at the barrier with its session open — go to Parking Activity and either retrigger the payment or release it by hand.',
       };
     case 'entry-blacklisted':
       return {

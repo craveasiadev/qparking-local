@@ -497,25 +497,30 @@ function wireRendererEvents() {
           ? 'tried to enter — refused (no session created, barrier not opened)'
           : 'tried to exit — refused, car held at barrier'}${p?.reason ? ` · reason: ${p.reason}` : ''}`,
       });
-    } else if (kind === 'entry-not-authorised' || kind === 'exit-not-authorised') {
+    } else if (kind === 'entry-not-authorised') {
       // Pass-only lane, plate holds no valid pass. Same treatment as a blacklist
       // refusal — barrier stays down, staff release manually.
-      const isEntry = kind === 'entry-not-authorised';
+      //
+      // ENTRY only. This branch also accepted 'exit-not-authorised' until
+      // 2026-08-20, which nothing has ever emitted and nothing should: a car that
+      // was let in must always be able to leave, so there is no such thing as an
+      // exit refused for want of a pass. Carrying the phantom meant every message
+      // here had to be written twice, once for a direction that cannot happen.
       sendToRenderer('log', {
         terminalId: 0,
         direction: 'error',
-        message: `NOT AUTHORISED · ${p?.plate} has no valid pass — ${isEntry ? 'entry' : 'exit'} refused at "${p?.cameraName ?? `camera ${p?.cameraId}`}". Barrier stayed closed; operator must handle this manually.`,
+        message: `NOT AUTHORISED · ${p?.plate} has no valid pass — entry refused at "${p?.cameraName ?? `camera ${p?.cameraId}`}". Barrier stayed closed; operator must handle this manually.`,
         payload: p,
       });
       audit({
-        eventKey: isEntry ? 'gate.entry.not_authorised' : 'gate.exit.not_authorised',
-        action: isEntry ? 'entry' : 'exit',
+        eventKey: 'gate.entry.not_authorised',
+        action: 'entry',
         category: 'gate',
         severity: 'medium',
         outcome: 'blocked',
         resourceType: 'vehicle',
         resourceId: p?.plate ?? null,
-        description: `${p?.plate ?? '?'} tried to ${isEntry ? 'enter' : 'exit'} a pass-only lane without a valid pass — refused, barrier not opened`,
+        description: `${p?.plate ?? '?'} tried to enter a pass-only lane without a valid pass — refused, barrier not opened`,
       });
     } else if (kind === 'entry-near-miss-pass') {
       // Admitted on a GUESS. Louder than a normal entry on purpose: the operator
