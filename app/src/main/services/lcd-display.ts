@@ -74,6 +74,21 @@ const STALE_FRAME_MS = 15_000;
  *  for. Long enough to read, short enough not to hold up the next car. */
 const FREE_DWELL_MS = 2_500;
 
+/**
+ * How long a fare stays on the glass after the charge for it FAILED (declined,
+ * timed out, no terminal, callbacks not running) before the panel goes back to
+ * idle.
+ *
+ * It is a dwell rather than an instant wipe for two reasons. The driver gets a
+ * beat to see the screen they were reading is finished with, and — the load-bearing
+ * one — the flow decides whether to auto-retry in the same tick it announces the
+ * failure: 'exit-declined' arrives, then 'exit-auto-retrigger' immediately after
+ * if another attempt is armed. Cancelling a scheduled idle is therefore free,
+ * while an idle already sent would have to be undone with a second frame the
+ * driver would see flicker.
+ */
+const FAILED_FARE_DWELL_MS = 4_000;
+
 // ─── logging ────────────────────────────────────────────────────────────────
 
 /**
@@ -426,6 +441,10 @@ export function getLcdStatuses(): LcdDisplayStatus[] {
 
 /** Push a frame to the panel wired to this lane, if there is one. */
 function showOnLane(laneId: number | null | undefined, frame: Frame): void {
+  // Whatever we are about to show is newer than a queued blank-the-screen, so
+  // drop that first: a retrigger's fresh fare must not be wiped 2s later by the
+  // idle scheduled when the PREVIOUS attempt failed.
+  if (frame.screen !== 'idle') cancelPendingIdle(laneId, `superseded by a ${frame.screen} frame`);
   const lcd = getLaneLcd(laneId);
   if (!lcd) return;
   const link = links.get(lcd.id);
@@ -490,24 +509,126 @@ export function testLcd(host: string, port: number): Promise<{ ok: boolean; erro
 // ─── parking-flow subscriptions ─────────────────────────────────────────────
 
 /**
- * Exits whose fare we have already put on screen, by sessionId. It answers one
- * question at settlement time: has the driver already seen a price?
+ * Exits whose fare we have already put on screen, by sessionId. It answers two
+ * questions: at settlement time, has the driver already seen a price? And on a
+ * failed charge, WHICH panel is showing it?
  *
  * A pass-holder exit settles in a single step and never emits 'exit-pending', so
  * without this we could not tell it apart from a paid exit and would jump
  * straight to THANK YOU — the driver would never learn why they were let out
  * for nothing. Entries are swept on settlement; the periodic sweep below
  * catches sessions that never settled at all.
+ *
+ * The lane is remembered because a failed exit leaves the session OPEN, so the
+ * row has no exit_lane_id yet — recovering the gate from the database would fall
+ * back to the ENTRY lane and blank a panel at the far side of the site while the
+ * one in front of the driver kept its dead fare.
  */
-const faresShown = new Map<number, number>();
+const faresShown = new Map<number, { at: number; laneId: number }>();
 const FARE_SHOWN_TTL_MS = 60 * 60_000;
 
 function sweepFaresShown(): void {
   const cutoff = Date.now() - FARE_SHOWN_TTL_MS;
-  for (const [id, at] of faresShown) {
-    if (at < cutoff) faresShown.delete(id);
+  for (const [id, shown] of faresShown) {
+    if (shown.at < cutoff) faresShown.delete(id);
   }
 }
+
+// ─── clearing a dead fare ───────────────────────────────────────────────────
+
+/** Idle frames waiting out FAILED_FARE_DWELL_MS, by laneId. At most one per lane
+ *  — a second failure on the same gate just restarts the clock. */
+const pendingIdle = new Map<number, NodeJS.Timeout>();
+
+function cancelPendingIdle(laneId: number | null | undefined, why: string): void {
+  if (laneId == null) return;
+  const timer = pendingIdle.get(laneId);
+  if (!timer) return;
+  clearTimeout(timer);
+  pendingIdle.delete(laneId);
+  llog(`lane ${laneId}: pending idle cancelled — ${why}`);
+}
+
+/** Send this lane's panel back to idle shortly, unless something supersedes it
+ *  first (a retry being armed, or any new frame — see showOnLane). */
+function scheduleIdle(laneId: number | null | undefined, why: string): void {
+  if (laneId == null) return;
+  const existing = pendingIdle.get(laneId);
+  if (existing) clearTimeout(existing);
+  llog(`lane ${laneId}: clearing the fare in ${FAILED_FARE_DWELL_MS}ms — ${why}`);
+  const timer = setTimeout(() => {
+    pendingIdle.delete(laneId);
+    showOnLane(laneId, { screen: 'idle' });
+  }, FAILED_FARE_DWELL_MS);
+  timer.unref?.();
+  pendingIdle.set(laneId, timer);
+}
+
+/**
+ * The lane whose panel is showing this session's fare.
+ *
+ * Prefers what the payload states outright, then the lane we actually sent the
+ * fare to, and only then the session row — see faresShown for why that last
+ * resort is a poor one.
+ */
+function laneShowingFare(payload: { laneId?: number | null; sessionId?: number | null }): number | null {
+  if (payload?.laneId != null) return payload.laneId;
+  const sessionId = payload?.sessionId;
+  if (sessionId == null) return null;
+  const shown = faresShown.get(sessionId);
+  if (shown) return shown.laneId;
+  const session = getSessionById(sessionId);
+  return session?.exitLaneId ?? session?.entryLaneId ?? null;
+}
+
+/** FREE, held long enough to read, then THANK YOU. The sequence for any exit the
+ *  driver pays nothing for — a pass holder, or an operator waiving the fee. */
+function showFreeThenThankYou(laneId: number | null | undefined, session: ParkingSession): void {
+  showOnLane(laneId, { screen: 'exit', plate: session.plate, free: true, amountCents: 0, durationMinutes: session.durationMinutes, holdMs: FREE_DWELL_MS });
+  const t = setTimeout(() => showOnLane(laneId, { screen: 'thankyou', plate: session.plate }), FREE_DWELL_MS);
+  t.unref?.();
+}
+
+/**
+ * An operator released this car by hand — put that on the glass.
+ *
+ * Called directly by the release handler rather than driven by an event, because
+ * a manual release never enters the parking flow: it rewrites the row and pulses
+ * the boom itself, so the 'exit-completed' subscription above never fires and the
+ * panel was left showing whatever it had — a fare the driver is no longer being
+ * asked for, or the last car's thank-you.
+ *
+ * `laneId` is the gate the operator chose to open, so the message lands on the
+ * panel at the barrier that is actually lifting.
+ *
+ * Fire-and-forget like everything else here (see the module header): the car is
+ * already going out, and a display must never be able to hold that up.
+ */
+export function showManualReleaseOnLane(laneId: number | null | undefined, session: ParkingSession): void {
+  // Any fare put on screen for this session is now void — drop the marker so a
+  // later settlement (a PayResult that lost the race, say) cannot decide the
+  // driver "already saw a price" for a stay that no longer exists.
+  faresShown.delete(session.id);
+  llog(`manual release · ${session.plate} → FREE then THANK YOU on lane ${laneId ?? '—'}`);
+  showFreeThenThankYou(laneId, session);
+}
+
+/**
+ * Warnings that mean the fare on screen will never be collected as it stands.
+ *
+ * `exit-busy` is deliberately absent: that is a duplicate read arriving while a
+ * DIFFERENT car is mid-charge, and the fare on the glass belongs to that car.
+ * `exit-auto-retrigger` is handled separately — it is the one warning that says
+ * "keep it up".
+ */
+const FAILED_FARE_WARNINGS = new Set([
+  'exit-timeout',              // no response from the terminal
+  'exit-charge-crashed',       // the charge threw
+  'exit-no-terminal',          // fare priced, nothing wired to take it
+  'exit-terminal-disabled',    // terminal switched off
+  'exit-tng-not-configured',   // refused before sending: callbacks not running
+  'exit-auto-retrigger-capped',// out of automatic attempts; only staff can move it now
+]);
 
 export function startLcdDisplays(): void {
   reloadLcdLinks();
@@ -525,7 +646,7 @@ export function startLcdDisplays(): void {
     (payload: { session: ParkingSession; lane: { id: number } | null; policy: { currency?: string } | null; durationMinutes: number; feeCents: number }) => {
       const { session, lane, policy, durationMinutes, feeCents } = payload ?? {};
       if (!session || !lane) return;
-      faresShown.set(session.id, Date.now());
+      faresShown.set(session.id, { at: Date.now(), laneId: lane.id });
       showOnLane(lane.id, {
         screen: 'exit',
         plate: session.plate,
@@ -562,9 +683,32 @@ export function startLcdDisplays(): void {
     // No fare was ever shown — a season-pass exit, which the flow settles in one
     // step. Show FREE first so the driver sees why the barrier opened, then the
     // thank-you.
-    showOnLane(laneId, { screen: 'exit', plate: session.plate, free: true, amountCents: 0, durationMinutes: session.durationMinutes, holdMs: FREE_DWELL_MS });
-    const t = setTimeout(() => showOnLane(laneId, { screen: 'thankyou', plate: session.plate }), FREE_DWELL_MS);
-    t.unref?.();
+    showFreeThenThankYou(laneId, session);
+  });
+
+  // ─── charge failed: take the dead fare off the glass ──────────────────────
+  // Nothing is collecting the amount on screen any more, so leaving it up asks a
+  // driver to pay something no terminal is armed for — and it is still there when
+  // the NEXT car pulls up. All of these leave the session open at the barrier;
+  // staff either retrigger (the fare comes back, see showOnLane) or release.
+  parkingEvents.on('exit-declined', (p: any) => {
+    scheduleIdle(laneShowingFare(p ?? {}), 'card declined');
+  });
+  parkingEvents.on('warning', (p: any) => {
+    const kind = String(p?.kind ?? '');
+
+    // A retry is armed for THIS lane — the terminal is about to ask again, so the
+    // fare stays exactly where it is. Emitted in the same tick as the failure
+    // above, which is what makes the scheduled idle cancellable rather than a
+    // visible flicker. Deliberately not keyed on the session: the panel belongs
+    // to the lane.
+    if (kind === 'exit-auto-retrigger') {
+      cancelPendingIdle(p?.laneId, `auto-retrigger #${p?.attempt ?? '?'}/${p?.max ?? '?'} armed`);
+      return;
+    }
+
+    if (!FAILED_FARE_WARNINGS.has(kind)) return;
+    scheduleIdle(laneShowingFare(p ?? {}), kind);
   });
 
   const sweep = setInterval(sweepFaresShown, FARE_SHOWN_TTL_MS);

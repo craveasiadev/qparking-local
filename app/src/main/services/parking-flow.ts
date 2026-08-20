@@ -711,12 +711,14 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   const device = lane.terminalId ? getTerminal(lane.terminalId) : null;
   if (!device) {
     flog(`EXIT REFUSED: plate=${event.plate} session=${session.id} owes RM ${(feeCents / 100).toFixed(2)} but lane "${lane.name}" has NO payment terminal wired to it — nothing can take the money. Attach one on the Lanes page. Session stays OPEN, barrier NOT pulsed.`);
-    parkingEvents.emit('warning', { kind: 'exit-no-terminal', laneId: lane.id });
+    parkingEvents.emit('warning', { kind: 'exit-no-terminal', laneId: lane.id, sessionId: session.id });
     return;
   }
   if (!device.enabled) {
     flog(`EXIT REFUSED: plate=${event.plate} session=${session.id} owes RM ${(feeCents / 100).toFixed(2)} but terminal "${device.name}" is switched OFF. Re-enable it on the Terminals page. Session stays OPEN, barrier NOT pulsed.`);
-    parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: device.id });
+    // laneId/sessionId are here so a subscriber can act on the car, not just the
+    // device: the LCD on this lane is still showing a fare nothing will now take.
+    parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: device.id, laneId: lane.id, sessionId: session.id });
     return;
   }
   // The device takes the money the moment the driver taps, but the charge only
@@ -1654,6 +1656,18 @@ export async function admitVehicleByOperator(
 }
 
 /**
+ * Entry warnings that are ANNOUNCEMENTS, not refusals: the flow emits them and
+ * then carries straight on to open the session. Treating one as an outcome is
+ * what made a staff override report "Refused by the gate: entry-operator-override"
+ * while the session it had just created sat in the table — the warning listener
+ * simply fired before the 'entry' event did.
+ *
+ * A genuine refusal (blacklisted / not-authorised / quota-full) returns from the
+ * flow without a session, so anything NOT listed here is still reported as one.
+ */
+const ENTRY_ADVISORY_WARNINGS = new Set(['entry-operator-override', 'entry-near-miss-pass']);
+
+/**
  * What the flow decided about this plate's entry — the session it opened, or the
  * refusal it emitted. Resolves empty if neither arrives, which is not an error in
  * itself: an earlier guard (rescan window, lane busy) can drop a read without a
@@ -1675,7 +1689,11 @@ function awaitEntryOutcome(plate: string, timeoutMs = 3_000): Promise<{ sessionI
     };
     const onWarning = (payload: any) => {
       if (normalisePlate(String(payload?.plate ?? '')) !== plate) return;
-      finish({ refused: String(payload?.kind ?? 'refused') });
+      const kind = String(payload?.kind ?? 'refused');
+      // Keep listening: an advisory means the entry is still in progress, and the
+      // 'entry' event (or a later, real refusal) is the outcome.
+      if (ENTRY_ADVISORY_WARNINGS.has(kind)) return;
+      finish({ refused: kind });
     };
     const timer = setTimeout(() => finish({}), timeoutMs);
     parkingEvents.on('entry', onEntry);

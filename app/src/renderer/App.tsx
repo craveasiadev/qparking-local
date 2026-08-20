@@ -175,9 +175,17 @@ function CloudSyncStamp() {
  *  log — these are the few events an operator must ACT on. */
 interface StaffAlert { id: number; tone: 'error' | 'warn' | 'success'; title: string; detail: string; }
 
+/** Warning kinds that must NOT raise a staff alert. `entry-operator-override` is
+ *  the operator's OWN action — they pressed "Admit & open barrier" a second ago and
+ *  the modal already confirmed it — so toasting it back at them (as a red error, and
+ *  under its raw event name at that) was pure noise. It is still written to the
+ *  activity log at high severity, which is where an override belongs. */
+const SILENT_WARNINGS = new Set(['entry-operator-override']);
+
 /** Turn a raw parking-flow 'warning' kind into a plain-language message an
- *  on-site operator can act on. */
-function describeWarning(kind: string, d: any): { title: string; detail: string } {
+ *  on-site operator can act on, plus the tone it deserves — not every warning is
+ *  a failure. */
+function describeWarning(kind: string, d: any): { title: string; detail: string; tone?: 'error' | 'warn' } {
   switch (kind) {
     case 'exit-timeout':
       return { title: 'Payment device not responding', detail: 'No response from the card reader within 15s. Check the payment controller is powered on and reachable on the network (IP / port).' };
@@ -209,6 +217,22 @@ function describeWarning(kind: string, d: any): { title: string; detail: string 
       return {
         title: `Blocked vehicle at the exit — ${d?.plate ?? 'unknown plate'}`,
         detail: `${d?.reason ? `Reason: ${d.reason}. ` : ''}The barrier stays closed and nothing was charged — the car is held. Speak to the driver, then either lift the ban in the cloud or release the session manually from Parking Activity.`,
+      };
+    case 'entry-not-authorised':
+      return {
+        title: `No valid pass — ${d?.plate ?? 'unknown plate'}`,
+        detail: `${d?.cameraName ? `"${d.cameraName}"` : 'This camera'} only admits pass holders, and this plate holds none — entry refused, no session opened and the barrier stayed down. Issue a pass in the cloud and press Sync now, or admit the car by hand from Parking Activity.`,
+      };
+    case 'entry-quota-full':
+      return {
+        title: `Pass is full — ${d?.plate ?? 'unknown plate'}`,
+        detail: `The pass is valid, but ${d?.inside ?? '?'} of its ${d?.limit ?? '?'} vehicle slot(s) are already inside — entry refused and the barrier stayed down. One of the holder's other cars must leave first.`,
+      };
+    case 'entry-near-miss-pass':
+      return {
+        tone: 'warn',
+        title: `Admitted on a near match — ${d?.plate ?? 'unknown plate'}`,
+        detail: `The read is one character from "${d?.matchedPlate ?? '?'}", which holds a valid pass, so the car was let in on that pass. The stay is recorded under the plate as READ so the exit camera can match it — correct it on Parking Activity if this was the wrong car.`,
       };
     case 'entry-blacklisted':
       return {
@@ -271,8 +295,9 @@ export function App() {
     const off = window.bridge.onEvent('session', (p: any) => {
       const kind = p?.kind; const d = p?.payload ?? {};
       if (kind === 'warning') {
+        if (SILENT_WARNINGS.has(String(d?.kind))) return;
         const m = describeWarning(d?.kind, d);
-        pushAlert({ tone: 'error', title: m.title, detail: m.detail });
+        pushAlert({ tone: m.tone ?? 'error', title: m.title, detail: m.detail });
       } else if (kind === 'exit-declined') {
         pushAlert({ tone: 'error', title: 'Card declined', detail: 'The payment was declined — the barrier stays closed. Ask the driver to retry, or release the car manually from Parking Activity.' });
       }

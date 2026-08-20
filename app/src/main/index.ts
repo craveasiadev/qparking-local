@@ -119,7 +119,7 @@ import {
 import { retryAllFailedSync } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
-import { startLcdDisplays, stopLcdDisplays, reloadLcdLinks, getLcdStatuses, testLcd } from './services/lcd-display';
+import { startLcdDisplays, stopLcdDisplays, reloadLcdLinks, getLcdStatuses, testLcd, showManualReleaseOnLane } from './services/lcd-display';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier, isSdkLoaded } from './services/camera-relay';
 import {
   startDeviceHealth, stopDeviceHealth, sweepDeviceHealth, snapshotDeviceHealth, deviceHealthEvents,
@@ -1216,6 +1216,10 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: num
   // returns promptly; the barrier open is best-effort.
   const gateLaneId = laneId ?? session?.exitLaneId ?? session?.entryLaneId ?? null;
   if (gateLaneId) openBarrier({ laneId: gateLaneId, reason: 'manual-release' }).catch(() => null);
+  // Tell the driver, on the panel at the gate that is lifting. A release never
+  // goes through the parking flow, so nothing else would clear the fare the panel
+  // may still be showing — see showManualReleaseOnLane.
+  if (session) showManualReleaseOnLane(gateLaneId, session);
   return session;
 });
 // DEV/QA: timed live flow — open a session at a chosen entry time, then exit at

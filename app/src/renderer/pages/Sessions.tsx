@@ -97,9 +97,6 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
   const [plate, setPlate] = useState('');
   const [laneId, setLaneId] = useState<number | ''>('');
   const [error, setError] = useState<string | null>(null);
-  // Explicit consent for waiving Only Pass Allow. Deliberately NOT remembered
-  // between opens: each override is its own decision by a person.
-  const [acknowledged, setAcknowledged] = useState(false);
   // Roster + who is inside, for the live read-back under the plate field. Advisory
   // only — the gate remains the decider. The one exception is "already inside",
   // which is a certainty rather than a guess, so it does disable the button.
@@ -171,12 +168,6 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
       return kind !== null && kind !== 'exact';
     }) ?? null;
 
-  // WAIVING ONLY PASS ALLOW IS THE ONE THING HERE THAT WEAKENS THE GATE, so it is
-  // never silent. Not needed when the plate is on the roster, nor when it is one
-  // character from a roster plate — the flow's near-miss match covers that and
-  // records the pass, so no override is involved.
-  const needsOverride = !!selectedCam && selectedCam.accessMode === 'pass_only' && !!typed && !onRoster && !suggestion;
-
   const [admit, busy] = useAsyncAction(async () => {
     setError(null);
     if (!typed) { setError('Enter the plate as it reads on the car.'); return; }
@@ -198,7 +189,7 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
     onAdmitted();
   }, { onError: (e: unknown) => setError(bridgeErrorMessage(e)) });
 
-  const blocked = !typed || !!clash || laneId === '' || !selectedCam || (needsOverride && !acknowledged);
+  const blocked = !typed || !!clash || laneId === '' || !selectedCam;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose}>
@@ -287,7 +278,7 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
             </label>
             <select
               value={laneId}
-              onChange={(e) => { setLaneId(e.target.value === '' ? '' : Number(e.target.value)); setAcknowledged(false); }}
+              onChange={(e) => setLaneId(e.target.value === '' ? '' : Number(e.target.value))}
               className="w-full h-10 px-3 rounded-lg border border-gray-300 bg-white text-sm outline-none focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10"
             >
               <option value="">— none —</option>
@@ -327,27 +318,6 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
               </p>
             )}
           </div>
-
-          {/* The override, made deliberate. This is the only action here that
-              weakens the gate, and the button stays disabled until someone says
-              they have looked at the car. */}
-          {needsOverride && (
-            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
-              <p className="flex items-start gap-2 text-[11px] leading-relaxed text-amber-900">
-                <ShieldAlert size={13} className="mt-0.5 shrink-0" />
-                <span>
-                  <strong>{selectedCam?.name}</strong> is set to <strong>Only Pass Allow</strong>, and
-                  <span className="font-mono"> {typed}</span> holds no pass. A camera read of this plate
-                  would be <strong>refused</strong> — admitting it here overrides that.
-                </span>
-              </p>
-              <label className="mt-2 flex items-start gap-2 text-[11px] font-semibold text-amber-900 cursor-pointer">
-                <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)}
-                  className="mt-0.5 accent-amber-600" />
-                I have checked this vehicle and authorise it to enter.
-              </label>
-            </div>
-          )}
 
           <p className="flex items-start gap-2 rounded-lg bg-gray-50 px-3 py-2.5 text-[11px] leading-relaxed text-gray-600">
             <Clock size={13} className="mt-0.5 shrink-0 text-gray-400" />
@@ -655,7 +625,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     setCameras(await window.bridge.listCameras());
   }
 
-  // Exit-capable lanes for the manual-release gate picker. A lane's direction is
+  // Exit-capable lanes for the gate pickers (detail-modal Actions bar and the
+  // manual-release modal — both act on a car LEAVING). A lane's direction is
   // derived from its cameras (the source of truth): a car can leave through any
   // lane that has an exit-facing camera — which covers both a dedicated exit
   // lane and a shared barrier whose lane holds an entry AND an exit camera.
@@ -976,7 +947,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
         <ViewSessionModal
           session={viewing}
           policy={policyForSession(viewing)}
-          lanes={lanes}
+          lanes={exitLanes}
           entryLaneName={laneNameForId(viewing.entryLaneId)}
           exitLaneName={laneNameForId(viewing.exitLaneId)}
           retriggering={retriggering}
@@ -1006,7 +977,15 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           lanes={exitLanes}
           defaultLaneId={releasing.laneId}
           onClose={() => setReleasing(null)}
-          onReleased={async () => { setReleasing(null); await fetchPage(); }}
+          onReleased={async () => {
+            const plate = releasing.session.plate;
+            setReleasing(null);
+            // Close the detail modal too — the session it was showing is now
+            // closed, so leaving it up would only show a stale record.
+            setViewing(null);
+            toast({ tone: 'success', title: `Released ${plate}`, detail: "Session closed without payment and the selected gate's barrier was pulsed." });
+            await fetchPage();
+          }}
         />
       )}
 
@@ -1187,10 +1166,17 @@ function ViewSessionModal({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const s = session;
   // Which gate the operator wants to act on (retrigger charge / release open).
-  // Default to the session's exit lane, else a lane with a terminal wired, else
-  // its entry lane / the first lane.
+  //
+  // Both actions put a car OUT, so `lanes` here is the exit-capable set only — an
+  // entry lane in this picker was an offer that could not work: charging on it
+  // drives the wrong terminal, and releasing on it pulses the boom the car came
+  // in through while it sits at the exit. It is also why the default never falls
+  // back to s.entryLaneId any more.
   const [actionLaneId, setActionLaneId] = useState<number | null>(
-    s.exitLaneId ?? lanes.find((l) => l.terminalId != null)?.id ?? s.entryLaneId ?? lanes[0]?.id ?? null,
+    lanes.find((l) => l.id === s.exitLaneId)?.id
+    ?? lanes.find((l) => l.terminalId != null)?.id
+    ?? lanes[0]?.id
+    ?? null,
   );
   const mins = s.durationMinutes ?? (s.exitAt ? null : elapsedMinutesSince(s.entryAt));
   let displayFeeCents: number | null = s.feeCents ?? null;
