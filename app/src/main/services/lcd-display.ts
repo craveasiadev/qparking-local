@@ -630,6 +630,32 @@ const FAILED_FARE_WARNINGS = new Set([
   'exit-auto-retrigger-capped',// out of automatic attempts; only staff can move it now
 ]);
 
+/**
+ * The record behind the fare on screen has just been deleted or rewritten by an
+ * operator — take it off the glass now.
+ *
+ * Neither the session editor nor the delete button goes anywhere near the parking
+ * flow, so no event announces them: without this, deleting a car that owes RM 5.00
+ * leaves its fare on the panel with no record left to pay it, and it is still
+ * there when the next driver pulls up.
+ *
+ * Unlike a failed charge this is immediate, not a dwell: there is nothing left to
+ * wait for and no retry that could revive it.
+ *
+ * Acts ONLY if this session is the one whose fare we actually put up. That is the
+ * whole safety condition — if it isn't, the panel is showing another car (or is
+ * already idle) and blanking it would take out a live fare belonging to someone
+ * else's stay.
+ */
+export function clearFareForSession(sessionId: number, why: string): void {
+  const shown = faresShown.get(sessionId);
+  if (!shown) return;
+  faresShown.delete(sessionId);
+  cancelPendingIdle(shown.laneId, 'the fare is being cleared now');
+  llog(`session ${sessionId}: clearing the fare on lane ${shown.laneId} — ${why}`);
+  showOnLane(shown.laneId, { screen: 'idle' });
+}
+
 export function startLcdDisplays(): void {
   reloadLcdLinks();
 

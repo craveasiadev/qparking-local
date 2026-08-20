@@ -1,0 +1,76 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "the lane resolves to a live panel",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "a timed-out charge clears the fare back to idle",
+      "pass": true,
+      "detail": "exit:500 → idle"
+    },
+    {
+      "name": "an armed auto-retrigger keeps the fare on screen",
+      "pass": true,
+      "detail": "exit:500"
+    },
+    {
+      "name": "a capped retry cycle clears the fare",
+      "pass": true,
+      "detail": "exit:500 → idle"
+    },
+    {
+      "name": "a declined card clears the fare",
+      "pass": true,
+      "detail": "exit:500 → idle"
+    },
+    {
+      "name": "a retriggered fare survives the queued idle",
+      "pass": true,
+      "detail": "exit:500 → exit:500"
+    },
+    {
+      "name": "exit-busy leaves the fare alone (it belongs to the charging car)",
+      "pass": true,
+      "detail": "exit:500"
+    },
+    {
+      "name": "clears the panel that showed the fare, not the session's entry lane",
+      "pass": true,
+      "detail": "exit=[exit:500 → idle] entry=[]"
+    },
+    {
+      "name": "a manual release shows FREE then THANK YOU",
+      "pass": true,
+      "detail": "exit:500 → exit:free:0 → thankyou"
+    },
+    {
+      "name": "…and nothing blanks the panel afterwards",
+      "pass": true,
+      "detail": "exit:500 → exit:free:0 → thankyou"
+    },
+    {
+      "name": "deleting the session clears its fare at once",
+      "pass": true,
+      "detail": "exit:500 → idle"
+    },
+    {
+      "name": "clearing an unrelated session leaves the live fare up",
+      "pass": true,
+      "detail": "exit:500"
+    },
+    {
+      "name": "a paid exit goes straight to THANK YOU",
+      "pass": true,
+      "detail": "exit:500 → thankyou"
+    },
+    {
+      "name": "a pass exit shows FREE then THANK YOU",
+      "pass": true,
+      "detail": "exit:free:0 → thankyou"
+    }
+  ],
+  "error": null
+}

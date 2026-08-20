@@ -119,7 +119,7 @@ import {
 import { retryAllFailedSync } from './services/db';
 import { pingCamera, pingHost } from './services/camera-probe';
 import { pingTerminalHost } from './services/payment-probe';
-import { startLcdDisplays, stopLcdDisplays, reloadLcdLinks, getLcdStatuses, testLcd, showManualReleaseOnLane } from './services/lcd-display';
+import { startLcdDisplays, stopLcdDisplays, reloadLcdLinks, getLcdStatuses, testLcd, showManualReleaseOnLane, clearFareForSession } from './services/lcd-display';
 import { startCameraRelay, stopCameraRelay, resync as resyncCameraRelay, pulseBarrier, isSdkLoaded } from './services/camera-relay';
 import {
   startDeviceHealth, stopDeviceHealth, sweepDeviceHealth, snapshotDeviceHealth, deviceHealthEvents,
@@ -621,8 +621,7 @@ function wireRendererEvents() {
     } else if (kind === 'exit-no-lane'
       || kind === 'exit-no-terminal'
       || kind === 'exit-terminal-disabled'
-      || kind === 'exit-tng-not-configured'
-      || kind === 'exit-terminal-offline') {
+      || kind === 'exit-tng-not-configured') {
       // ─── the car is at the barrier and CANNOT be charged ────────────────
       // Every one of these leaves a driver stuck at a closed boom with an open
       // session, and until now not one of them was recorded anywhere the
@@ -634,7 +633,11 @@ function wireRendererEvents() {
         'exit-no-terminal': 'the lane has no payment terminal wired to it',
         'exit-terminal-disabled': 'the lane\'s payment terminal is switched off',
         'exit-tng-not-configured': `no PayResult listener is running${p?.reason ? ` (${p.reason})` : ''} — no charge was attempted, so no money could be taken and lost`,
-        'exit-terminal-offline': 'the payment terminal did not answer',
+        // REMOVED 2026-08-20: 'exit-terminal-offline'. Nothing ever emitted it —
+        // a terminal that does not answer surfaces as 'exit-timeout' from
+        // startTngExitCharge, which IS emitted and handled here. Two names for one
+        // failure meant every new subscriber had to be told about both, and the LCD
+        // fare-clearing set was already only told about one.
       }[kind] ?? kind;
       audit({
         eventKey: 'gate.exit.refused',
@@ -1183,6 +1186,9 @@ ipcMain.handle('sessions:delete', (_e, id: number) => {
   const session = getSessionById(id);
   const ok = deleteSession(id);
   if (ok && session) enqueueDelete(session);
+  // The row is gone, so a fare on the panel for it can never be settled — see
+  // clearFareForSession, which no-ops unless this session is the one on screen.
+  if (ok) clearFareForSession(id, 'session deleted by an operator');
   return ok;
 });
 ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
@@ -1353,6 +1359,18 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   // the record it created — without it a correction forks a second record there
   // and the original never closes.
   if (working) enqueueUpdate(working, session.plate);
+
+  // A panel showing this car's fare is now showing something untrue, but only for
+  // edits that actually invalidate it: the stay was closed by hand (nothing left
+  // to collect), or the plate was corrected (the glass names the old one). A fee,
+  // note or entry-time edit deliberately does NOT clear it — an operator fixing a
+  // note must not blank the screen of a driver who is mid-tap, and the amount in
+  // flight at the terminal is the one already quoted either way.
+  const closedByEdit = !!working?.exitAt && !session.exitAt;
+  const plateCorrected = !!plate && plate !== session.plate;
+  if (closedByEdit || plateCorrected) {
+    clearFareForSession(id, closedByEdit ? 'stay closed by an operator edit' : 'plate corrected by an operator');
+  }
   return working;
 });
 

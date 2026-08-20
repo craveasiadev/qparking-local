@@ -193,8 +193,6 @@ function describeWarning(kind: string, d: any): { title: string; detail: string;
       return { title: 'No payment terminal on this lane', detail: 'Wire a payment terminal to this lane (Lanes → Terminal), then retrigger the exit.' };
     case 'exit-terminal-disabled':
       return { title: 'Payment terminal is disabled', detail: 'Enable this lane\'s terminal under Payment terminals, then retrigger.' };
-    case 'exit-terminal-offline':
-      return { title: 'Payment terminal offline', detail: 'The terminal isn\'t reachable. Check its power and network connection.' };
     case 'exit-tng-not-configured':
       return {
         title: 'Charge refused — payment callbacks are not running',
