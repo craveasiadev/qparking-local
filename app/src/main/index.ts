@@ -85,9 +85,9 @@ import {
   getDb, getSettings, saveSettings,
   listTerminals, upsertTerminal, deleteTerminal,
   listLcds, upsertLcd, deleteLcd,
-  listCameras, upsertCamera, deleteCamera,
+  listCameras, upsertCamera, deleteCamera, getCamera,
   listLanes, upsertLane, deleteLane, getLane, setLaneCameras,
-  listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById, findOpenSessionByPlate,
+  listOpenSessions, listRecentSessions, manualReleaseSession, getSessionById, findOpenSessionByPlate, sessionHasPaidTransaction,
   countSessions, listSessionsPage, deleteSession,
   listSessionsNeedingCloudPush, countSessionsNeedingCloudPush,
   updateSessionFields,
@@ -95,12 +95,12 @@ import {
   listTransactionsPage, countTransactions,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
-  findSeasonPassByPlate, findSeasonPassById,
+  findSeasonPassByPlate, findSeasonPassById, listBlockedPlates,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind, closeDb,
   listActivityLogs, countActivityLogs, insertActivityLog, dayTotals, reconcileOrphanedTransactions,
   pruneTerminalLog, pruneActivityLogs, pruneOldPlateImages,
 } from './services/db';
-import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents, laneCameraFacing, shouldRepriceEditedSession, findExitInFlightBySession } from './services/parking-flow';
+import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents, laneCameraFacing, shouldRepriceEditedSession, findExitInFlightBySession, findExitInFlightByLane } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
 import { startLprServers, stopLprServers, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
@@ -526,6 +526,11 @@ function wireRendererEvents() {
     // cloud used to be the only writer of this row (on the pushed record), which
     // meant a WAN outage or a not-yet-synced box had no entry history at all.
     const entryLane = p?.session?.entryLaneId ? getLane(p.session.entryLaneId) : null;
+    // S7: record whether staff hand-admitted this car. The old override audit
+    // fired only on pass_only lanes; on a normal lane a staff admit was
+    // indistinguishable from a camera read. operatorAdmit rides on the event for
+    // EVERY lane, so a hand-admit is always marked here.
+    const byOperator = !!p?.event?.operatorAdmit;
     audit({
       eventKey: 'session.entry',
       action: 'entry',
@@ -534,8 +539,8 @@ function wireRendererEvents() {
       outcome: 'ok',
       resourceType: 'parking_record',
       resourceId: p?.session?.id != null ? String(p.session.id) : null,
-      description: `Entry · ${p?.session?.plate ?? '?'}${entryLane ? ` · ${entryLane.name}` : ''}`,
-      changes: { entryAt: p?.session?.entryAt ?? null, laneId: p?.session?.entryLaneId ?? null, cameraId: p?.event?.cameraId ?? null },
+      description: `Entry · ${p?.session?.plate ?? '?'}${entryLane ? ` · ${entryLane.name}` : ''}${byOperator ? ' · staff admit (override)' : ''}`,
+      changes: { entryAt: p?.session?.entryAt ?? null, laneId: p?.session?.entryLaneId ?? null, cameraId: p?.event?.cameraId ?? null, operatorAdmit: byOperator },
     });
     // Mirror to qparking SaaS via the persistent sync queue (retries on
     // failure so a temporary outage doesn't drop the entry record).
@@ -1108,6 +1113,20 @@ ipcMain.handle('lcds:test', (_e, input: { host: string; port: number }) => testL
 
 ipcMain.handle('cameras:list', () => listCameras());
 ipcMain.handle('cameras:save', async (_e, input) => {
+  // C4: two ENABLED cameras on one host silently misroute — a vendor read from
+  // either physical device resolves to a single camera row (lowest id), so one
+  // direction's reads get processed as the other's and cars can never exit.
+  // Refuse the save. A DISABLED duplicate is fine: it is skipped at resolve time.
+  if (input.enabled && input.host && String(input.host).trim()) {
+    const host = String(input.host).trim();
+    const clash = listCameras().find((c) => c.id !== input.id && c.enabled && (c.host ?? '').trim() === host);
+    if (clash) {
+      throw new Error(
+        `Host ${host} is already used by the enabled camera "${clash.name}". Two enabled cameras on one address `
+        + 'get their reads misrouted to a single camera — give this one its own address, or disable the other first.',
+      );
+    }
+  }
   const saved = upsertCamera(input);
   // Local-only save (cloud sync is manual via the Cameras page button). Still
   // refresh the RTSP video feed and warm relay connection if host/creds changed.
@@ -1126,6 +1145,23 @@ ipcMain.handle('cameras:save', async (_e, input) => {
   return saved;
 });
 ipcMain.handle('cameras:delete', (_e, id: number) => {
+  // C3: refuse while this camera's lane has an exit mid-charge. Same reasoning
+  // as sessions:delete — the in-flight PayRequest keys off the lane, and the
+  // barrier pulse keys off this camera. Delete the camera now and a driver who
+  // taps pays into a session whose exit boom no longer has a camera row to
+  // pulse: money taken, car stuck, and the failure audit blames a camera that
+  // is gone. Make the operator wait for the tap to settle (or release the car).
+  const cam = getCamera(id);
+  if (cam?.laneId) {
+    const charging = findExitInFlightByLane(cam.laneId);
+    if (charging) {
+      throw new Error(
+        `${charging.plate} is being charged at lane ${getLane(charging.laneId)?.name ?? charging.laneId} right now `
+        + `(RM ${(charging.feeCents / 100).toFixed(2)}) — this camera serves that lane. Wait for the tap to settle, `
+        + 'or release the car, before deleting the camera.',
+      );
+    }
+  }
   deleteCamera(id);
   resyncRtspGrabbers();
   resyncCameraRelay();
@@ -1169,7 +1205,19 @@ ipcMain.handle('lanes:save', (_e, input: any) => {
   // Local-only save. Cloud sync is manual via the Lanes / Cameras page buttons.
   return saved;
 });
-ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));
+ipcMain.handle('lanes:delete', (_e, id: number) => {
+  // C10: refuse while an exit is mid-charge on this lane — the same guard
+  // sessions:delete and cameras:delete use. Deleting the lane out from under a
+  // live charge orphans the in-flight entry and leaves a dangling exit_lane_id.
+  const charging = findExitInFlightByLane(id);
+  if (charging) {
+    throw new Error(
+      `${charging.plate} is being charged at this lane right now (RM ${(charging.feeCents / 100).toFixed(2)}). `
+      + 'Wait for the tap to settle, or release the car, before deleting the lane.',
+    );
+  }
+  return deleteLane(id);
+});
 
 ipcMain.handle('sessions:open', () => listOpenSessions());
 // Today's headline figures, aggregated in SQL rather than filtered out of a
@@ -1312,9 +1360,26 @@ ipcMain.handle('sessions:delete', (_e, id: number) => {
   // The row is gone, so a fare on the panel for it can never be settled — see
   // clearFareForSession, which no-ops unless this session is the one on screen.
   if (ok) clearFareForSession(id, 'session deleted by an operator');
+  // S9: audit HERE, in the main process, not from the renderer after the fact —
+  // a closed window or a direct IPC caller must not be able to delete a stay
+  // with no trail. Written only on the path where the delete actually happened.
+  if (ok && session) {
+    audit({
+      eventKey: 'session.delete', action: 'delete', category: 'session', severity: 'high',
+      outcome: 'ok', resourceType: 'parking_record', resourceId: String(id),
+      description: `Session deleted · ${session.plate}`,
+    });
+  }
   return ok;
 });
 ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
+  // A release without payment is a recorded, accountable act — it must carry a
+  // reason. The modal already blocks an empty one, but the server is the real
+  // gate (a direct IPC caller would otherwise release with an empty note).
+  if (!reason || !String(reason).trim()) {
+    throw new Error('reason_required — a manual release must state why (it is recorded as the reason no fee was taken).');
+  }
+  reason = String(reason).trim();
   // Abort any in-flight W4G exit charge FIRST, so a PayResult that lands after
   // this release can't flip the voided txn back to 'paid' and un-release the car.
   cancelExitInFlight(id);
@@ -1349,6 +1414,17 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: num
   // goes through the parking flow, so nothing else would clear the fare the panel
   // may still be showing — see showManualReleaseOnLane.
   if (session) showManualReleaseOnLane(gateLaneId, session);
+  // S9: audit in the main process (was renderer-side, after the fact). A manual
+  // release without payment is a critical action; it must be recorded even if
+  // the window closes or the reason came from a direct IPC caller. reason is
+  // validated below in the handler-guard added for empty strings.
+  if (session) {
+    audit({
+      eventKey: 'session.manual_release', action: 'manual_release', category: 'session', severity: 'critical',
+      outcome: 'ok', resourceType: 'parking_record', resourceId: String(id),
+      description: `Session manually released without payment · ${session.plate} · ${reason}`,
+    });
+  }
   return session;
 });
 // DEV/QA: timed live flow — open a session at a chosen entry time, then exit at
@@ -1389,6 +1465,66 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
 }) => {
   const session = getSessionById(id);
   if (!session) throw new Error('not_found');
+
+  // ─── S3: a settled stay cannot be reopened ───────────────────────────────
+  // Clearing the exit on a paid / free / released session flips it back to OPEN,
+  // and the next LPR read (or a retrigger) finds an open session again and
+  // charges the driver a SECOND time — two 'paid' rows for one stay. A closed,
+  // settled stay is done: a paid car that still needs the boom is let out with
+  // Open Barrier, which never touches the session. So block the reopen outright.
+  const reopening = patch.exitAt !== undefined && !patch.exitAt && !!session.exitAt;
+  const settled = session.paymentStatus === 'paid'
+    || session.paymentStatus === 'free'
+    || session.paymentStatus === 'manual_release';
+  if (reopening && settled) {
+    throw new Error(
+      `${session.plate} is a settled ${session.paymentStatus} stay — its exit time can't be cleared. `
+      + 'Reopening it would let the next camera read charge the driver a second time. '
+      + 'If the car still needs to leave, use Open Barrier instead — it opens the gate without touching the stay.',
+    );
+  }
+
+  // ─── S4: no edits while the stay is being charged ─────────────────────────
+  // Same guard sessions:delete uses. A PayResult landing mid-edit would be
+  // overwritten by recordExit, or — if the plate was corrected mid-charge —
+  // settle onto the renamed session with nothing tying the ledger to the plate
+  // the terminal displayed.
+  const chargingNow = findExitInFlightBySession(id);
+  if (chargingNow) {
+    throw new Error(
+      `${session.plate} is being charged at lane ${getLane(chargingNow.laneId)?.name ?? chargingNow.laneId} right now `
+      + `(RM ${(chargingNow.feeCents / 100).toFixed(2)}). Wait for the tap to settle before editing this stay — an edit `
+      + 'now would be overwritten when the payment lands, or settle onto the wrong plate.',
+    );
+  }
+
+  // ─── S1 / S2: the timestamps the edit would produce must make sense ───────
+  // Zone-aware parse: bare 'YYYY-MM-DD HH:MM:SS' rows mean UTC, but Date.parse
+  // would read them as local — normalise the same way parseStoredInstant does.
+  const parseInstant = (v: string | null | undefined): number => {
+    if (!v) return NaN;
+    let t = String(v).trim();
+    const hasZone = /[zZ]$|[+-]\d\d:?\d\d$/.test(t);
+    if (!hasZone) { t = t.replace(' ', 'T'); if (t.includes('T')) t += 'Z'; }
+    return Date.parse(t);
+  };
+  // S2: a blank entry used to resolve to "now". The blank-means-still-inside
+  // signal belongs to the EXIT field, never the entry.
+  if (patch.entryAt !== undefined && !String(patch.entryAt).trim()) {
+    throw new Error('entry_required — a stay must keep an entry time. To mark it still inside, clear the EXIT time instead.');
+  }
+  const effEntry = patch.entryAt ?? session.entryAt;
+  const effExit = patch.exitAt !== undefined ? patch.exitAt : session.exitAt;
+  const effEntryMs = parseInstant(effEntry);
+  if (Number.isFinite(effEntryMs) && effEntryMs > Date.now() + 120_000) {
+    throw new Error('entry_in_future — the entry time is in the future. Check the date; a stay cannot start after the current time.');
+  }
+  if (effExit) {
+    const effExitMs = parseInstant(effExit);
+    if (Number.isFinite(effEntryMs) && Number.isFinite(effExitMs) && effExitMs < effEntryMs) {
+      throw new Error('exit_before_entry — the exit time is earlier than the entry time. A car cannot leave before it arrived.');
+    }
+  }
 
   // Canonicalise the plate exactly as the LPR ingest and the pass/blacklist
   // lookups do (shared/plate.ts). Without this, an operator typing "ABC 1234"
@@ -1466,7 +1602,12 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
     // money. Whether the FEE may be rewritten is a policy question with a history
     // behind it, so it lives in one testable place: see
     // shouldRepriceEditedSession in parking-flow.
-    const reprice = shouldRepriceEditedSession({
+    // S5: once a stay has actually collected money, its fee is LOCKED. Checked
+    // against the ledger (a paid transaction), not the editable payment_status
+    // field — so neither the flip-flop bypass (paid→pending→paid) nor a policy
+    // pick can rewrite revenue that was already taken. Duration still follows
+    // the timestamps below; only the fee is frozen.
+    const reprice = !sessionHasPaidTransaction(id) && shouldRepriceEditedSession({
       patchEntryAt: patch.entryAt,
       patchExitAt: patch.exitAt,
       patchPolicyIdOverride: patch.policyIdOverride,
@@ -1509,6 +1650,16 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   const plateCorrected = !!plate && plate !== session.plate;
   if (closedByEdit || plateCorrected) {
     clearFareForSession(id, closedByEdit ? 'stay closed by an operator edit' : 'plate corrected by an operator');
+  }
+  // S9: audit in the main process — an edit that rewrites a stay's plate, times
+  // or payment must be recorded regardless of whether the renderer survived to
+  // log it.
+  if (working) {
+    audit({
+      eventKey: 'session.edited', action: 'edit', category: 'session', severity: 'high',
+      outcome: 'ok', resourceType: 'parking_record', resourceId: String(id),
+      description: `Session edited · ${working.plate} · ${working.paymentStatus}`,
+    });
   }
   return working;
 });
@@ -1570,6 +1721,7 @@ ipcMain.handle('season-passes:sync', () => syncSeasonPasses());
 // could freshen the red Blocked badges it displays while leaving the barrier's
 // own copy stale — the UI showing a ban that was not being enforced.
 ipcMain.handle('blocked-plates:sync', () => syncBlockedPlates());
+ipcMain.handle('blocked-plates:list', () => listBlockedPlates());
 ipcMain.handle('activity-logs:push', () => pushActivityLogsToCloud());
 // Read-only directories. Deliberately NOT on the 60s background tick (they
 // change rarely and only feed lookups, never a gate decision) — refreshed by
@@ -1628,6 +1780,28 @@ ipcMain.handle('settings:get', () => getSettings());
 ipcMain.handle('site:get-current', () => getCurrentSite());
 ipcMain.handle('settings:save', (_e, patch) => {
   const prev = getSettings();
+  // C2: never tear down the W4G callback listener while a card payment is
+  // mid-tap. Turning the master switch off — or changing a callback port —
+  // closes the ports immediately; if a driver then taps, the device deducts but
+  // the PayResult has nowhere to land (money taken, no ledger row, and the
+  // exit times out into an auto-retrigger). Checked BEFORE saveSettings so a
+  // refusal leaves the settings untouched, not half-applied.
+  const pending = w4gStatus().pending;
+  if (pending.length > 0) {
+    const tngWouldChange =
+      (patch.tngEnabled !== undefined && patch.tngEnabled !== prev.tngEnabled) ||
+      (patch.tngCallbackPort !== undefined && patch.tngCallbackPort !== prev.tngCallbackPort) ||
+      (patch.tngCallbackPorts !== undefined
+        && JSON.stringify(patch.tngCallbackPorts) !== JSON.stringify(prev.tngCallbackPorts));
+    if (tngWouldChange) {
+      const n = pending.length;
+      throw new Error(
+        `Can't change the payment terminal settings right now — ${n} card payment${n > 1 ? 's are' : ' is'} `
+        + `mid-tap at the terminal. Wait for ${n > 1 ? 'them' : 'it'} to settle (or cancel at the device) first, `
+        + 'or a driver could be deducted with the callback port already closed.',
+      );
+    }
+  }
   const next = saveSettings(patch);
   // W4G TNG callback listener: same rule — only touch it when the master switch
   // or the callback port(s) actually change value.
@@ -1662,6 +1836,9 @@ ipcMain.handle('site:preview-rebind', async (_e, input: { baseUrl: string; apiKe
       changed: !!boundId && boundId !== candidate.id,
       candidateSite: { id: candidate.id, name: candidate.name },
       boundSite: bound ? { id: bound.id, name: bound.name } : null,
+      // C9: how many cars are still on site. A rebind wipes them, so the confirm
+      // dialog warns with this count — it does not block (wiping is the point).
+      openSessions: listOpenSessions().length,
     };
   } catch (error) {
     return { ok: false, error: describeRequestError(error) };
@@ -1673,6 +1850,20 @@ ipcMain.handle('site:preview-rebind', async (_e, input: { baseUrl: string; apiKe
 // is NOT auto-pushed — after a rebind the operator decides per device page
 // whether to Push this box's equipment up or Pull the new site's down.
 ipcMain.handle('site:rebind', async (_e, input: { baseUrl: string; apiKey: string; wipeEquipment: boolean }) => {
+  // C9: refuse while a card payment is mid-tap. A rebind deletes sessions and
+  // transactions; a PayResult landing after the wipe would settle against a row
+  // that no longer exists — money taken, no record. Parked cars are different:
+  // wiping is the purpose of moving to a new site, so those are warned in the
+  // confirm dialog (open-session count) rather than blocked here.
+  const pendingPay = w4gStatus().pending;
+  if (pendingPay.length > 0) {
+    const n = pendingPay.length;
+    throw new Error(
+      `Can't switch sites right now — ${n} card payment${n > 1 ? 's are' : ' is'} mid-tap at the terminal. `
+      + `Wait for ${n > 1 ? 'them' : 'it'} to settle (or cancel at the device) first; a rebind would delete the `
+      + 'stay the payment settles against.',
+    );
+  }
   const previousId = getBoundSiteId();
   const previousName = previousId ? getSite(previousId)?.name ?? null : null;
   saveSettings({ qparkingBaseUrl: input.baseUrl, qparkingApiKey: input.apiKey });

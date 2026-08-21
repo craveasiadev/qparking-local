@@ -13,7 +13,10 @@ import { usePagination } from '../hooks/usePagination';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { PaginationBar, PageLoadingOverlay } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
-import { fmtDateTime, fmtTimeSeconds, elapsedMinutesSince } from '../lib/datetime';
+import {
+  fmtDateTime, fmtTimeSeconds, elapsedMinutesSince,
+  todayInAppTz, appTzDayStartUtc, appTzDayEndUtc, appTzInputValue, appTzInputToUtc,
+} from '../lib/datetime';
 import { bridgeErrorMessage } from '../lib/errors';
 import { toast } from '../toast';
 import { useCurrentSite } from '../context/SiteContext';
@@ -25,20 +28,16 @@ const PAGE_SIZE = 20;
  *  the tariff_rules schedule), so the page response attaches the real number. */
 type SessionRow = ParkingSession & { livePreviewFeeCents?: number | null };
 
-/** Local YYYY-MM-DD for today (avoids the UTC off-by-one from toISOString). */
-function todayStr(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-/** A YYYY-MM-DD calendar day -> the ISO instant at its 00:00:00 local start. */
-function dayStartIso(d: string): string | null {
-  return d ? new Date(`${d}T00:00:00`).toISOString() : null;
-}
-/** A YYYY-MM-DD calendar day -> the ISO instant at its 23:59:59.999 local end. */
-function dayEndIso(d: string): string | null {
-  return d ? new Date(`${d}T23:59:59.999`).toISOString() : null;
-}
+// The day filter runs on GMT+8 calendar days, like every other date in this app.
+//
+// These were hand-rolled on the OPERATOR PC's clock: `getFullYear/getMonth` for
+// "today" and a zone-less `new Date('…T00:00:00')` for the bounds. On a gate PC
+// that is not set to KL — which main/tz.ts exists precisely because it might not
+// be — "Today" selected the wrong day and the range boundaries sat eight hours
+// off, so a car near either edge fell in or out of the filter wrongly.
+const todayStr = todayInAppTz;
+const dayStartIso = appTzDayStartUtc;
+const dayEndIso = appTzDayEndUtc;
 
 /** Payment-status dropdown options — mirrors the operator Parking Activity page
  *  (All Status + the six payment outcomes). */
@@ -102,12 +101,15 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
   // which is a certainty rather than a guess, so it does disable the button.
   const [passPlates, setPassPlates] = useState<string[]>([]);
   const [insidePlates, setInsidePlates] = useState<{ plate: string; id: number }[]>([]);
+  // B7: banned plates, so the read-back can warn BEFORE the gate refuses the admit.
+  const [bannedPlates, setBannedPlates] = useState<string[]>([]);
 
   useEffect(() => {
-    Promise.all([window.bridge.listSeasonPasses(), window.bridge.listOpenSessions()])
-      .then(([passes, open]) => {
+    Promise.all([window.bridge.listSeasonPasses(), window.bridge.listOpenSessions(), window.bridge.listBlockedPlates()])
+      .then(([passes, open, banned]) => {
         setPassPlates(passes.filter((pass) => pass.status === 'active').map((pass) => canonicalPlate(pass.plateNumber)));
         setInsidePlates(open.map((session) => ({ plate: canonicalPlate(session.plate), id: session.id })));
+        setBannedPlates(banned.map((b) => canonicalPlate(b.plateNumber)));
       })
       .catch(() => { /* the hints are a bonus; the form works without them */ });
   }, []);
@@ -158,6 +160,11 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
   const typed = canonicalPlate(plate);
   const clash = typed ? insidePlates.find((row) => row.plate === typed) : undefined;
   const onRoster = !!typed && passPlates.includes(typed);
+  // B7: the gate refuses a banned plate outright, so surface it here and block
+  // the button rather than round-trip to a refusal. An unknown plate is admitted
+  // as a transient with no extra confirmation — the read-back already says it
+  // will be charged at exit.
+  const isBanned = !!typed && !clash && bannedPlates.includes(typed);
   // One character out from a pass plate — the likeliest reason staff are on this
   // screen at all. Offered as a correction they accept with one click, never
   // applied silently. Suppressed once the typed plate is itself on the roster.
@@ -189,7 +196,7 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
     onAdmitted();
   }, { onError: (e: unknown) => setError(bridgeErrorMessage(e)) });
 
-  const blocked = !typed || !!clash || laneId === '' || !selectedCam;
+  const blocked = !typed || !!clash || isBanned || laneId === '' || !selectedCam;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose}>
@@ -244,6 +251,11 @@ function AdmitVehicleModal({ lanes, cameras, onClose, onAdmitted }: {
                 <p className="flex items-center gap-1.5 font-semibold text-red-600">
                   <ShieldAlert size={12} className="shrink-0" />
                   {typed} is already inside (session #{clash.id}) — nothing to admit.
+                </p>
+              ) : isBanned ? (
+                <p className="flex flex-wrap items-center gap-1.5 font-semibold text-red-600">
+                  <ShieldAlert size={12} className="shrink-0" />
+                  {typed} is BLACKLISTED — the gate will refuse this admit. Check why it is banned before letting it in.
                 </p>
               ) : suggestion ? (
                 <p className="flex flex-wrap items-center gap-1.5 text-amber-700">
@@ -697,17 +709,8 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     // toast below carries that refusal to the operator. The audit row is only
     // written on the path where the delete actually happened.
     await window.bridge.deleteSession(id);
-    await window.bridge.insertActivityLog({
-      eventKey: 'session.delete',
-      action: 'delete',
-      category: 'session',
-      severity: 'high',
-      siteId: site?.id ?? null,
-      outcome: 'ok',
-      resourceType: 'parking_record',
-      resourceId: String(id),
-      description: `Session deleted · ${row?.plate ?? `#${id}`}`
-    });
+    // S9: the audit row is written in the main process (sessions:delete) so it
+    // cannot be lost if this window closes mid-action.
     setViewing(null);
     await fetchPage();
   }, { onError: (e: unknown) => toast({ tone: 'error', title: "Couldn't delete", detail: bridgeErrorMessage(e) }) });
@@ -715,7 +718,11 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   const [runRetrigger, retriggering] = useAsyncAction(async (id: number, plate: string, laneId: number | null) => {
     const r = await window.bridge.retriggerSessionPayment(id, laneId);
     if (r.ok) {
-      toast({ tone: 'success', title: `Retrigger sent for ${plate}`, detail: "If the fee is RM0 the barrier opens; otherwise the selected gate's terminal is armed for the driver to tap." });
+      // S8: r.ok means only that the retrigger was accepted and sent — the gate
+      // can still decline downstream (blacklist, terminal off, no callback
+      // listener), which surfaces in the activity log, not here. So don't claim
+      // the terminal is armed; say what actually happened and where to confirm.
+      toast({ tone: 'success', title: `Retrigger sent for ${plate}`, detail: 'Watch the gate: if the fee is RM0 the barrier opens, otherwise the driver is asked to tap. If the gate declines it, the reason shows in the activity log.' });
     } else {
       toast({ tone: 'error', title: "Couldn't retrigger", detail: String(r.error) });
     }
@@ -840,6 +847,14 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
           <span className="text-gray-500">session{counts.total === 1 ? '' : 's'}</span>
           {debouncedPlateSearch && <ActiveChip label={`"${debouncedPlateSearch}"`} onClear={() => setPlateSearch('')} />}
           {statusFilter !== 'all' && <ActiveChip label={statusLabel} onClear={() => setStatusFilter('all')} />}
+          {/* S13: a date range had no chip, so an operator could forget the list
+              was scoped to a day and think the site was empty. */}
+          {(startDate || endDate) && (
+            <ActiveChip
+              label={startDate && endDate ? `${startDate} → ${endDate}` : `on ${startDate || endDate}`}
+              onClear={() => { setStartDate(''); setEndDate(''); }}
+            />
+          )}
         </div>
       </div>
 
@@ -1325,7 +1340,10 @@ function ViewSessionModal({
       {confirmDelete && (
         <ConfirmModal
           title={`Delete session #${s.id}?`}
-          body={`The session for plate ${s.plate} will be permanently removed from the local database. This cannot be undone.`}
+          body={`The session for plate ${s.plate} will be permanently removed from the local database. This cannot be undone.`
+            + (!s.exitAt
+              ? ` ⚠ This car is still on site — deleting the stay leaves it with no entry record, so it will be refused at the exit ("no open session"). Use Manual release to let it out instead, or Edit to correct the record.`
+              : '')}
           confirmLabel="Delete"
           confirmTone="red"
           busy={deleting}
@@ -1422,17 +1440,7 @@ function ReleaseSessionModal({
     if (!reason.trim()) { setError('Reason is required.'); return; }
     setError(null);
     await window.bridge.manualReleaseSession(session.id, reason.trim(), laneId);
-    await window.bridge.insertActivityLog({
-      eventKey: 'session.manual_release',
-      action: 'manual_release',
-      category: 'session',
-      severity: 'critical',
-      siteId: site?.id ?? null,
-      outcome: 'ok',
-      resourceType: 'parking_record',
-      resourceId: String(session.id),
-      description: `Session manually released without payment · ${session.plate} · ${reason.trim()}`
-    });
+    // S9: audit written in the main process (sessions:release).
     onReleased();
   }, { onError: (e: any) => setError(e?.message ?? String(e)) });
 
@@ -1556,20 +1564,13 @@ function EditSessionModal({
       entryAt: toIso(entryAt),
       exitAt: exitAt ? toIso(exitAt) : null,
       paymentStatus,
-      notes: notes.trim() || undefined,
+      // S11: send the trimmed value (empty string included) so emptying the box
+      // actually clears the note. `|| undefined` meant "untouched", so a cleared
+      // note silently kept its old text.
+      notes: notes.trim(),
       policyIdOverride: policyOverride || null,
     });
-    await window.bridge.insertActivityLog({
-      eventKey: 'session.edited',
-      action: 'edit',
-      category: 'session',
-      severity: 'high',
-      siteId: site?.id ?? null,
-      outcome: 'ok',
-      resourceType: 'parking_record',
-      resourceId: String(session.id),
-      description: `Session edited · ${plate.trim().toUpperCase()} · ${paymentStatus}`
-    });
+    // S9: audit written in the main process (sessions:update).
     onSaved();
     // bridgeErrorMessage, not e.message: main-process rejections arrive wrapped in
     // Electron's "Error invoking remote method …" prefix, which makes a deliberate
@@ -1726,15 +1727,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function toLocalInput(iso: string): string {
-  const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-function toIso(local: string): string {
-  if (!local) return new Date().toISOString();
-  return new Date(local).toISOString();
-}
+// Both sides of the datetime-local round-trip are GMT+8-pinned now — see
+// appTzInputValue / appTzInputToUtc. They used to read the operator PC's own
+// timezone while every display helper and the main-process fee engine were pinned
+// to KL, so the edit box and the table beside it disagreed by the machine's offset
+// and a typed correction landed that far out.
+const toLocalInput = appTzInputValue;
+const toIso = appTzInputToUtc;
 
 function StatusBadge({ status }: { status: ParkingSession['paymentStatus'] }) {
   const map: Record<ParkingSession['paymentStatus'], string> = {

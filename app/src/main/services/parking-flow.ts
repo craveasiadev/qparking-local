@@ -13,9 +13,9 @@
  *   1. plate event arrives on an exit-direction camera
  *   2. look up open session, compute duration + fee from the lane's policy rate
  *   3. if fee == 0 → record exit immediately as "free", trigger gate
- *   4. otherwise → drive the payment terminal:
- *        kiosk-mode lane: terminal.initExit → waits for card tap → proceedExit
- *        lpr-mode lane: terminal.initTxn → reader runs EMV → txnResult arrives
+ *   4. otherwise → charge the lane's W4G device: PayRequest → the driver taps →
+ *      the device POSTs PayResult back to us (see payment-tng.ts). Refused before
+ *      sending if no callback listener is bound.
  *   5. on APPROVED → record exit as paid, open gate
  *   6. on DECLINED/TIMEOUT/CANCELLED → session stays open; operator can
  *      manually release from the UI
@@ -90,6 +90,15 @@ export function findExitInFlightBySession(sessionId: number): ActiveExit | null 
     if (exit.sessionId === sessionId) return exit;
   }
   return null;
+}
+
+/**
+ * The live charge on a given lane, if any. `exitsInFlight` is keyed by lane, so
+ * this is a direct lookup. Used by cameras:delete / lanes:delete to refuse
+ * pulling equipment out from under a car mid-tap.
+ */
+export function findExitInFlightByLane(laneId: number): ActiveExit | null {
+  return exitsInFlight.get(laneId) ?? null;
 }
 
 // ─── auto-retrigger ─────────────────────────────────────────────────────────
@@ -220,6 +229,25 @@ function handlePlateEvent(event: PlateEvent) {
   const lane = laneForCamera(event.cameraId);
   flog(`routed → ${direction}, lane=${lane?.id ?? 'null'} (terminalId=${lane?.terminalId ?? 'null'}, policyId=${lane?.policyId ?? 'null'})`);
 
+  // ─── C1: a disabled lane acts on nothing ──────────────────────────────────
+  // "Enabled" was decorative — the flow never read it, so a lane an operator had
+  // switched off for maintenance kept admitting and charging cars. Treat OFF as
+  // the whole lane being closed: neither entries nor exits act on it and the
+  // boom never pulses (a car already inside leaves via another lane or a manual
+  // Open Barrier). Mirrors how a disabled CAMERA already drops its reads.
+  if (lane && !lane.enabled) {
+    flog(`LANE DISABLED: lane=${lane.id} (${lane.name}) is switched off — ${direction} read for plate=${event.plate} IGNORED, barrier NOT pulsed. Re-enable the lane to resume.`);
+    parkingEvents.emit('warning', {
+      kind: 'lane-disabled',
+      laneId: lane.id,
+      laneName: lane.name,
+      plate: event.plate,
+      direction,
+      cameraId: event.cameraId,
+    });
+    return;
+  }
+
   if (direction === 'entry') {
     handleEntry(event, lane);
   } else {
@@ -244,11 +272,49 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
     // log NOTHING, which made a normal duplicate look identical to a dropped
     // read. Both go in the live log now.
     const insideForMin = Math.max(0, Math.round((Date.now() - Date.parse(existing.entryAt)) / 60_000));
-    flog(`DUPLICATED DETECT: plate=${event.plate} is already inside (session=${existing.id}, entered ${existing.entryAt}, ${insideForMin}min ago) → no new session, barrier NOT pulsed. Use the exit lane to close it.`);
+    // B8: if this plate has since been blacklisted, say so. The already-inside
+    // guard sits ahead of the blacklist check, so a banned car sitting inside
+    // otherwise logs only "already inside" on its re-reads — the operator never
+    // sees the ban at the entry end. Enforcement is unchanged (the exit refuses);
+    // this just tells the truth about the one car they most need it for.
+    const bannedInside = findBlockedPlate(event.plate);
+    flog(`DUPLICATED DETECT: plate=${event.plate} is already inside (session=${existing.id}, entered ${existing.entryAt}, ${insideForMin}min ago)${bannedInside ? ` — NOTE: this plate is BLACKLISTED (${bannedInside.reason ?? 'no reason given'}); it will be refused at exit and must be released by hand` : ''} → no new session, barrier NOT pulsed. Use the exit lane to close it.`);
     parkingEvents.emit('rescan-ignored', {
       plate: event.plate,
       sessionId: existing.id,
       entryAt: existing.entryAt,
+      blacklisted: !!bannedInside,
+    });
+    return;
+  }
+
+  // ─── Blacklist at entry ──────────────────────────────────────────────
+  // A banned plate opens NOTHING: no session row, no cloud mirror, no WELCOME,
+  // no barrier pulse. Checked before createEntrySession so the refusal leaves no
+  // trace to clean up — "blocked" reading as "Entry stored" in the table was
+  // exactly the wrong signal.
+  //
+  // The car may still roll in if the camera's own auto-open rule is left on,
+  // so the safety net is at the other end: handleExit checks the deny list
+  // BEFORE it requires an open session, meaning a banned plate is identified as
+  // BLOCKED at the exit whether or not an entry was ever recorded.
+  //
+  // Asked BEFORE the re-scan grace below, and that order is deliberate. Both
+  // refuse the entry, so nothing was ever admitted either way — but a banned
+  // plate that happened to leave within the grace window was reported as
+  // "duplicate camera read of the departing car" and never named as banned. The
+  // operator was told the wrong thing about the one car they most need the truth
+  // about. A ban is a standing decision; a duplicate read is a guess about
+  // timing, and the standing decision answers first.
+  const blockedOnEntry = findBlockedPlate(event.plate);
+  if (blockedOnEntry) {
+    flog(`ENTRY REFUSED (BLACKLISTED): plate=${event.plate} lane=${lane?.id ?? 'none'} reason=${blockedOnEntry.reason ?? 'none given'} → no session created, barrier NOT pulsed. Staff must open it by hand if this car is to come in.`);
+    parkingEvents.emit('warning', {
+      kind: 'entry-blacklisted',
+      plate: event.plate,
+      sessionId: null,
+      reason: blockedOnEntry.reason ?? null,
+      vehicleId: blockedOnEntry.vehicleId,
     });
     return;
   }
@@ -289,29 +355,6 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
       });
       return;
     }
-  }
-
-  // ─── Blacklist at entry ──────────────────────────────────────────────
-  // A banned plate opens NOTHING: no session row, no cloud mirror, no WELCOME,
-  // no barrier pulse. Checked before createEntrySession so the refusal leaves no
-  // trace to clean up — "blocked" reading as "Entry stored" in the table was
-  // exactly the wrong signal.
-  //
-  // The car may still roll in if the camera's own auto-open rule is left on,
-  // so the safety net is at the other end: handleExit checks the deny list
-  // BEFORE it requires an open session, meaning a banned plate is identified as
-  // BLOCKED at the exit whether or not an entry was ever recorded.
-  const blockedOnEntry = findBlockedPlate(event.plate);
-  if (blockedOnEntry) {
-    flog(`ENTRY REFUSED (BLACKLISTED): plate=${event.plate} lane=${lane?.id ?? 'none'} reason=${blockedOnEntry.reason ?? 'none given'} → no session created, barrier NOT pulsed. Staff must open it by hand if this car is to come in.`);
-    parkingEvents.emit('warning', {
-      kind: 'entry-blacklisted',
-      plate: event.plate,
-      sessionId: null,
-      reason: blockedOnEntry.reason ?? null,
-      vehicleId: blockedOnEntry.vehicleId,
-    });
-    return;
   }
 
   // ─── Only Pass Allow (ENTRY ONLY) ────────────────────────────────────
@@ -547,7 +590,21 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     ? findSeasonPassById(session.passId, { entryAt: exitIsoNow, exitAt: exitIsoNow })
     : null;
   const passNow = exactPassNow ?? recordedPass;
-  if (passNow) {
+
+  // B1: does this pass also cover the ENTRY? A pass that STARTED mid-stay leaves
+  // the head — entry up to its first valid day — unpaid, the mirror of PASS
+  // PARTIAL's lapsed tail. When the pass does NOT cover entry (and there is a
+  // stay to have a head), skip the free exit and fall through to the paid path,
+  // which bills only that head (see PASS HEAD below). A pass holder with no
+  // session, or a pass that covered entry, still takes the free path as before.
+  // "Covered at entry" means ANY pass valid at the entry instant — not just
+  // passNow. A renewal chain (an expiring pass covering entry, a fresh one
+  // covering exit) leaves no uncovered head, so it must still exit free. Same
+  // entry-window lookup PASS PARTIAL uses, plus the pass this stay was admitted on.
+  const passCoversEntry = !!(passNow && session
+    && (findSeasonPassByPlate(event.plate, { entryAt: session.entryAt, exitAt: session.entryAt })
+        ?? (session.passId ? findSeasonPassById(session.passId, { entryAt: session.entryAt, exitAt: session.entryAt }) : null)));
+  if (passNow && (!session || passCoversEntry)) {
     if (recordedPass) {
       flog(`EXIT FREE (PASS RECORDED AT ENTRY): plate=${event.plate} matches no pass exactly — this stay was admitted on pass ${recordedPass.passId} (${recordedPass.passType}) despite a misread plate, and that pass is still valid → honouring it rather than re-guessing from the plate.`);
     }
@@ -671,6 +728,21 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     flog(`PASS PARTIAL: plate=${event.plate} pass=${seasonPass.passType} id=${seasonPass.passId} lapsed ${seasonPass.endDate} mid-stay → billing ${billedMinutes}min of ${durationMinutes}min (from ${new Date(billStartMs).toISOString()}) as transient`);
   }
 
+  // ─── PASS HEAD: pass began mid-stay, covers the exit ─────────────────
+  // Mirror of PASS PARTIAL. passNow is valid at the EXIT instant but did NOT
+  // cover the entry (it started after the car arrived), so the head — entry up
+  // to the pass's first valid day — is a normal transient stay; from there on
+  // the pass covers it. Bill ONLY the head window. Without this the free-exit
+  // path above waived the WHOLE stay, so a one-day pass could wipe out days of
+  // transient fees accrued before it started. durationMinutes keeps the true
+  // stay length for the audit; only the fee window shrinks.
+  if (passNow && !passCoversEntry && passNow.startDate) {
+    const billEndMs = Math.min(exitMs, startOfDayKeyMs(passNow.startDate));
+    const billedMinutes = stayDurationMinutes(entryMs, billEndMs);
+    feeCents = computeFee(billedMinutes, policy, session.entryAt, new Date(billEndMs).toISOString());
+    flog(`PASS HEAD: plate=${event.plate} pass=${passNow.passType} id=${passNow.passId} started ${passNow.startDate} mid-stay → billing ${billedMinutes}min of ${durationMinutes}min (entry→${new Date(billEndMs).toISOString()}) as transient; the covered remainder is free.`);
+  }
+
   // Diagnostic — without this, a 0-fee exit looks identical to "terminal
   // didn't fire", which is exactly the support ticket we keep getting.
   flog(`FEE MATH: plate=${event.plate} no valid pass → priced as a transient · stay=${durationMinutes}min · plan="${policy?.policyName ?? 'NONE ATTACHED'}" (grace=${policy?.freeMinutes ?? '-'}min, firstBlock=${policy?.firstBlockCents ?? '-'}c, perBlock=${policy?.perBlockCents ?? '-'}c) → fee=RM ${(feeCents / 100).toFixed(2)}`);
@@ -784,6 +856,21 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     parkingEvents.emit('warning', { kind: 'exit-terminal-disabled', terminalId: device.id, laneId: lane.id, sessionId: session.id });
     return;
   }
+  // C5: refuse if this lane's payment device is ALREADY mid-charge on ANOTHER
+  // lane. exitsInFlight is keyed by lane, so two exit lanes sharing one reader
+  // each clear their own lane guard — then two PayRequests hit one device and,
+  // because results match only by orderId, driver B's tap can settle driver A's
+  // fare. One live charge per physical terminal. (The Lanes picker also warns
+  // when a terminal is already wired to another lane, so this should be rare.)
+  const busyOnTerminal = [...exitsInFlight.values()].find((ex) => {
+    if (ex.laneId === lane.id) return false;
+    return getLane(ex.laneId)?.terminalId === device.id;
+  });
+  if (busyOnTerminal) {
+    flog(`EXIT BUSY (TERMINAL): plate=${event.plate} session=${session.id} — device "${device.name}" is already charging ${busyOnTerminal.plate} (session=${busyOnTerminal.sessionId}) on lane ${busyOnTerminal.laneId}. One live charge per reader: a second PayRequest could let this tap settle the other car's fare. Session stays OPEN, barrier NOT pulsed — retrigger once the device is free.`);
+    parkingEvents.emit('warning', { kind: 'exit-terminal-busy', laneId: lane.id, sessionId: session.id, terminalId: device.id, chargingLaneId: busyOnTerminal.laneId });
+    return;
+  }
   // The device takes the money the moment the driver taps, but the charge only
   // becomes a recorded transaction when its PayResult callback reaches us. With
   // no listener bound, a tap is a real deduction we can never record — and the
@@ -863,9 +950,17 @@ async function startTngExitCharge(
     flog(`W4G PayRequest failed/timeout: ${e?.message ?? e}`);
   }
 
-  // If the exit was cancelled while we were awaiting (e.g. manual release), bail
-  // without touching the session; the manual-release path voids the attempt.
-  if (!exitsInFlight.get(lane.id)) return;
+  // Is the charge we are returning from STILL the one this lane is running?
+  //
+  // Identity, not truthiness. This used to ask only whether the lane was busy at
+  // all, which is a different question: if a manual release cleared the lane and
+  // another car's exit then claimed it, this continuation sailed through — it
+  // deleted the NEW car's busy-guard (freeing a lane mid-charge) and settled
+  // against its own captured `inflight`, i.e. the released car. Plate events
+  // arrive on I/O so the window is a microtask and effectively unreachable, but
+  // it is the exact shape every other guard here exists to prevent, and the fix
+  // is one comparison.
+  if (exitsInFlight.get(lane.id) !== inflight) return;
   exitsInFlight.delete(lane.id);
 
   if (!body) {
@@ -1024,11 +1119,35 @@ function maybeAutoRetrigger(
       return;
     }
     if (exitsInFlight.has(lane.id)) {
-      w4gLog('info', `AUTO-RETRIGGER aborted at fire · ${tag} — lane already busy with another attempt.`, { sessionId: prev.sessionId, laneId: lane.id });
+      // The 2s gap released this lane's busy-guard, and another car took it. That
+      // ends this stay's automatic recovery: nothing re-arms it, because the
+      // retrigger chain only continues from a failed attempt and this attempt
+      // never happened.
+      //
+      // It used to end there with one `info` line in the W4G panel — no Activity
+      // Log row, no warning, and the attempt counter left in place — so a car
+      // abandoned at the barrier looked identical to one still being retried.
+      // Reported like the cap is: this is the give-up moment, and nothing recovers
+      // it without an operator.
+      w4gLog('error', `AUTO-RETRIGGER abandoned · ${tag} — lane ${lane.id} was taken by another car during the ${AUTO_RETRIGGER_DELAY_MS}ms re-arm gap, so this attempt never fired. Nothing will retry it; the car needs a manual retrigger or release.`, { sessionId: prev.sessionId, laneId: lane.id });
+      autoRetriggerCounts.delete(prev.sessionId);
+      parkingEvents.emit('warning', {
+        kind: 'exit-auto-retrigger-abandoned',
+        sessionId: prev.sessionId,
+        plate: prev.plate,
+        laneId: lane.id,
+      });
       return;
     }
-    if (!device.enabled) {
-      w4gLog('error', `AUTO-RETRIGGER aborted at fire · ${tag} — terminal "${device.name}" is disabled.`, { sessionId: prev.sessionId });
+    // Re-READ the terminal rather than trusting the snapshot captured when the
+    // exit began. That object can be several seconds stale across up to three
+    // retries, so an operator switching the device off to stop a stuck car being
+    // asked again got one more attempt anyway. The listener check below already
+    // re-reads live state; this now matches it. A device deleted outright reads as
+    // gone, which is also a reason not to fire.
+    const liveDevice = getTerminal(device.id);
+    if (!liveDevice || !liveDevice.enabled) {
+      w4gLog('error', `AUTO-RETRIGGER aborted at fire · ${tag} — terminal "${device.name}" is ${liveDevice ? 'disabled' : 'gone'}.`, { sessionId: prev.sessionId });
       autoRetriggerCounts.delete(prev.sessionId);
       return;
     }
@@ -1073,8 +1192,12 @@ function maybeAutoRetrigger(
  * recorded/displayed duration; the schedule path recomputes internally either way.
  */
 export function stayDurationMinutes(entryAt: string | number, exitAt: string | number): number {
-  const entryMs = typeof entryAt === 'number' ? entryAt : Date.parse(entryAt);
-  const exitMs = typeof exitAt === 'number' ? exitAt : Date.parse(exitAt);
+  // B6: parse strings zone-aware — a legacy bare 'YYYY-MM-DD HH:MM:SS' row means
+  // UTC, but Date.parse reads it as local. When only ONE side is a bare row (a
+  // mixed-format stay) that 8h skew would distort the duration; parseStoredInstant
+  // normalises both the same way.
+  const entryMs = typeof entryAt === 'number' ? entryAt : parseStoredInstant(entryAt);
+  const exitMs = typeof exitAt === 'number' ? exitAt : parseStoredInstant(exitAt);
   if (Number.isNaN(entryMs) || Number.isNaN(exitMs)) return 0;
   return Math.max(0, diffFloorMinutes(entryMs, exitMs));
 }
@@ -1196,6 +1319,15 @@ export function computeFee(
 function startOfDayAfterKeyMs(dayKey: string): number {
   const [y, m, d] = dayKey.split('-').map(Number);
   return new Date(y, m - 1, d + 1, 0, 0, 0, 0).getTime();
+}
+
+/** ms instant of site-local midnight AT THE START of the given yyyy-MM-dd day —
+ *  the first moment a pass whose start_date is that day begins covering. The
+ *  mirror of startOfDayAfterKeyMs, used to bill the uncovered HEAD of a stay a
+ *  pass only started covering mid-way. */
+function startOfDayKeyMs(dayKey: string): number {
+  const [y, m, d] = dayKey.split('-').map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
 }
 
 // ─── fee-calc internals (1:1 mirror of SaaS App\Services\TariffCalculator) ───
@@ -1590,7 +1722,7 @@ export function cancelExitInFlight(sessionId: number): boolean {
  *
  * Implementation: synthesize an LPR plate event and re-emit it via the
  * existing `lprEvents` channel, so all the normal orchestration kicks in —
- * fee compute, W4G race, ECPI initCard, replay guards, session record.
+ * fee compute, the W4G charge, replay guards, session record.
  * The direction is forced to 'exit' so it never accidentally becomes an
  * entry retry.
  */

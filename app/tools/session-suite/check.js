@@ -838,14 +838,19 @@ async function main() {
     && tailRow.freeReason === 'rate-zero',
     `${tailRow.freeReason}/passId=${tailRow.passId}`);
 
-  // Entered before the pass started, leaving on its first covered day: coverage
-  // of the EXIT day is what buys a free exit.
+  // B1 / PASS HEAD: entered 09 Aug (BEFORE the pass starts 10 Aug), left on the
+  // pass's first covered day. The covered part (10 Aug 00:00 → exit) is free, but
+  // the uncovered HEAD — entry 09 Aug 10:00 MYT → 10 Aug 00:00 MYT = 840 min — is
+  // billed as a transient: RM5 first hour + 13×RM3 = RM44. It used to waive the
+  // WHOLE stay (the mirror gap of PASS PARTIAL); now only the head is charged.
   const exitOnly = await drive('GEO0004', '2026-08-09T02:00:00.000Z', EXIT,
     L.noTerm.id, C.noTermIn.id, C.noTermOut.id);
   const exitOnlyRow = db.getSessionById(exitOnly.id);
-  check('G6 a pass covering only the EXIT day still buys a free exit',
-    exitOnlyRow.paymentStatus === 'free' && exitOnlyRow.passId === 'g-exitonly',
-    `${exitOnlyRow.paymentStatus}/${exitOnlyRow.passId}`);
+  check('G6 a pass that starts mid-stay bills the uncovered head, NOT a free exit',
+    exitOnlyRow.status === 'entered' && exitOnlyRow.paymentStatus !== 'free' && exitOnlyRow.passId === null,
+    `${exitOnlyRow.status}/${exitOnlyRow.paymentStatus}/${exitOnlyRow.passId}`);
+  check('G6b …and only the uncovered head is billed (RM44)',
+    pendingFor('GEO0004')?.feeCents === 4400, `quoted=${pendingFor('GEO0004')?.feeCents}`);
 
   // Revocation: replace-all must make a cloud-revoked pass stop working here.
   const beforeRevoke = await passExit('FRV0014');
@@ -893,6 +898,19 @@ async function main() {
   check('G10b …nor an empty one on a box that holds nothing (a genuinely empty site)',
     (db.replaceAllSeasonPasses([]), sync.refuseEmptyWipe('passes', 0)) === null);
 
+  // ── G11 · B3: prefer the cloud's OWN count over "the operator pressed again" ──
+  // A genuine emptying reports total=0; a half-deployed backend returns a bare
+  // empty array with no count. With a count present, the destructive wipe no
+  // longer needs a second confirming pull.
+  db.replaceAllSeasonPasses([pass('g-keep2', 'KEEP0002', { startDate: null, endDate: null })]);
+  check('G11 a cloud total of 0 corroborates the emptying — wipe allowed on the FIRST pull',
+    sync.refuseEmptyWipe('passes', 0, 0) === null, 'total=0 should allow the wipe immediately');
+  check('G11b a cloud total > 0 with no rows is inconsistent — refused as a partial/failed response',
+    !!sync.refuseEmptyWipe('passes', 0, 12), 'total>0 with empty data should be refused');
+  check('G11c …and the refusal says how many the cloud claims to have',
+    /reports 12/.test(sync.refuseEmptyWipe('passes', 0, 12)?.error ?? ''),
+    sync.refuseEmptyWipe('passes', 0, 12)?.error);
+
   // ══════════════════════════════════════════════════════════════════════
   G('H · duration & fee integrity');
   // ══════════════════════════════════════════════════════════════════════
@@ -903,12 +921,36 @@ async function main() {
   check('H2 exactly 60 minutes is 60', flow.stayDurationMinutes(t0, t0 + 60 * 60_000) === 60);
   check('H3 an exit before the entry clamps to 0', flow.stayDurationMinutes(t0, t0 - 60_000) === 0);
   check('H4 unparseable timestamps clamp to 0', flow.stayDurationMinutes('nonsense', EXIT) === 0);
+  // B6: a legacy bare 'YYYY-MM-DD HH:MM:SS' entry means UTC. Mixed with an ISO
+  // exit, Date.parse would read the bare side as local (GMT+8) and inflate the
+  // stay by 8h (240 → 720). parseStoredInstant normalises both to UTC.
+  check('H4b a bare (zone-less) legacy timestamp is read as UTC, not local',
+    flow.stayDurationMinutes('2026-08-10 02:00:00', '2026-08-10T06:00:00.000Z') === 240,
+    flow.stayDurationMinutes('2026-08-10 02:00:00', '2026-08-10T06:00:00.000Z'));
 
   const sim = flow.simulateRatePolicyFee('charge', ENTRY, EXIT);
   check('H5 "Test price" quotes the same RM14 the gate charged',
     sim.ok && sim.feeCents === FULL_FEE && sim.durationMinutes === 240, JSON.stringify(sim));
   check('H6 …and agrees with the gate on the duration',
     flow.stayDurationMinutes(ENTRY, EXIT) === sim.durationMinutes);
+
+  // C7: the terminal port/timeout were the one device with no normaliser.
+  const tClamp = db.upsertTerminal({ name: 'W4G-clamp', host: '10.0.0.99', port: 0, timeoutSeconds: 0, enabled: true });
+  check('C7cfg terminal saved with port 0 clamps to the W4G default (80)',
+    tClamp.port === 80, `port=${tClamp.port}`);
+  check('C7cfg-b …and a 0 timeout clamps into the 5–300s band',
+    tClamp.timeoutSeconds === 5, `t=${tClamp.timeoutSeconds}`);
+  const tHigh = db.upsertTerminal({ name: 'W4G-clamp2', host: '10.0.0.98', port: 99999, timeoutSeconds: 100000, enabled: true });
+  check('C7cfg-c an out-of-range port falls back to 80 and a huge timeout caps at 300',
+    tHigh.port === 80 && tHigh.timeoutSeconds === 300, `port=${tHigh.port} t=${tHigh.timeoutSeconds}`);
+
+  // S10: a manual release APPENDS its reason to existing notes, never replaces.
+  const noted = db.createEntrySession('NOTE0001', L.noTerm.id, C.noTermIn.id, null);
+  db.updateSessionFields(noted.id, { notes: 'Restored from cloud' });
+  db.manualReleaseSession(noted.id, 'barrier stuck');
+  check('S10 manual release appends its reason to existing notes, not overwrite',
+    db.getSessionById(noted.id).notes === 'Restored from cloud · barrier stuck',
+    db.getSessionById(noted.id).notes);
   // ── H8-H13 · what an operator edit may do to the FEE ──────────────────
   // The admin editor re-priced on ANY edit that left an exit time in place, so
   // adding a note to a pass-free exit turned RM 0 into a full transient fare with
@@ -970,6 +1012,52 @@ async function main() {
   db.relinkDevices();
   check('J1c …and a detached camera stays detached',
     db.getCamera(relCam.id).laneId === null, `laneId=${db.getCamera(relCam.id).laneId}`);
+
+  // ── J1d · the blacklist answers BEFORE the re-scan grace ────────────────
+  // Both refuse the entry, so nothing was ever admitted either way — but a banned
+  // plate that happened to leave within the grace window was reported as a
+  // "duplicate camera read of the departing car" and never named as banned. The
+  // operator was told the wrong thing about the one car they most need the truth
+  // about.
+  db.saveSettings({ exitGracePeriodSeconds: 90 });
+  db.replaceAllBlockedPlates([{ plateNumber: 'BANGRACE', vehicleId: null, reason: 'unpaid fines', fetchedAt: nowIso }]);
+  const banJustLeft = db.createEntrySession('BANGRACE', L.zero.id, C.zeroIn.id, null);
+  db.recordExit(banJustLeft.id, {
+    exitAt: new Date(Date.now() - 5_000).toISOString(),
+    exitLaneId: L.zero.id, exitCameraId: C.zeroOut.id, exitImagePath: null,
+    durationMinutes: 5, feeCents: 0, paymentStatus: 'free', terminalTxnId: null, freeReason: 'rate-zero',
+  });
+  read(C.zeroIn.id, 'BANGRACE', 'entry');
+  await tick(12);
+  check('J1d a banned plate inside the grace window is named as BANNED, not a duplicate read',
+    warnedFor('entry-blacklisted', 'BANGRACE'),
+    `lastWarn=${ev.warning.slice(-1)[0]?.kind ?? '-'}`);
+  check('J1e …and still opens no session', !inside('BANGRACE'));
+  db.replaceAllBlockedPlates([]);
+
+  // ── J1f · the barrier relay is per-camera, clamped ──────────────────────
+  // Channel and pulse length were hard-coded (0 / 1000ms) with no caller passing
+  // anything else, so a boom on another IO output meant a gate that authorised
+  // every car and never opened.
+  const relayCam = db.upsertCamera({
+    name: 'C-RELAYCFG', laneId: null, direction: 'entry', host: '10.1.0.40',
+    deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null,
+    relayChannel: 2, relayPulseMs: 2500, enabled: true,
+  });
+  check('J1f relay channel + pulse are stored per camera',
+    relayCam.relayChannel === 2 && relayCam.relayPulseMs === 2500,
+    `ch=${relayCam.relayChannel} ms=${relayCam.relayPulseMs}`);
+  const clamped = db.upsertCamera({ ...relayCam, relayChannel: -5, relayPulseMs: 99_999 });
+  check('J1g …and clamped to what the SDK will actually accept',
+    clamped.relayChannel === 0 && clamped.relayPulseMs === 5000,
+    `ch=${clamped.relayChannel} ms=${clamped.relayPulseMs}`);
+  const defaulted = db.upsertCamera({
+    name: 'C-RELAYDEF', laneId: null, direction: 'entry', host: '10.1.0.41',
+    deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null,
+    relayChannel: 0, relayPulseMs: 1000, enabled: true,
+  });
+  check('J1h …with the old hard-coded constants as the defaults, so nothing changes for existing sites',
+    defaulted.relayChannel === 0 && defaulted.relayPulseMs === 1000);
 
   // ── J2 · a dead process's 'pending' payment attempts are closed at boot ──
   // The ledger row opens 'pending' before the device is driven; a crash mid-

@@ -452,7 +452,15 @@ export function Lanes() {
                 <Field label="Payment device (Alarmtech W4G)">
                   <select className="input" value={editing.terminalId ?? ''} onChange={(e) => setEditing({ ...editing, terminalId: e.target.value ? Number(e.target.value) : null })}>
                     <option value="">— none —</option>
-                    {terminals.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    {terminals.map((t) => {
+                      // C5: flag a terminal already wired to another lane. One reader
+                      // serving two exit lanes can take two concurrent taps and
+                      // cross-settle; the runtime guard blocks the second charge, and
+                      // this warning stops the misconfiguration being made in the first
+                      // place — same treatment the LCD picker below already gives.
+                      const takenBy = list.find((l) => l.terminalId === t.id && l.id !== editing.id);
+                      return <option key={t.id} value={t.id}>{t.name}{takenBy ? ` — on "${takenBy.name}"` : ''}</option>;
+                    })}
                   </select>
                 </Field>
               )}

@@ -99,6 +99,53 @@ export function elapsedMinutesSince(entryAt?: string | null): number | null {
   return Math.max(0, Math.floor((Date.now() - d.getTime()) / 60_000));
 }
 
+/**
+ * A stored instant as the value for an `<input type="datetime-local">`, in APP_TZ.
+ *
+ * The pair to appTzInputToUtc below. Both exist because the obvious
+ * implementation — `d.getHours()` and `new Date(localString)` — reads the
+ * OPERATOR PC's timezone, while every display helper in this file and the fee
+ * engine in the main process are pinned to GMT+8. On a gate PC whose clock is not
+ * KL (which is precisely why main/tz.ts exists) that meant the edit box showed
+ * 06:49 while the table beside it showed 14:49 for the same row, and a typed
+ * correction landed eight hours out.
+ *
+ * formatToParts rather than a locale string, so the shape is ours and does not
+ * depend on how a locale happens to punctuate.
+ */
+export function appTzInputValue(ts?: string | null): string {
+  const d = toDate(ts);
+  if (!d) return '';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: APP_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(d).reduce<Record<string, string>>((acc, p) => {
+    acc[p.type] = p.value;
+    return acc;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+/**
+ * The reverse: a `datetime-local` value, READ AS GMT+8, as a UTC ISO instant.
+ *
+ * The input carries no zone, so someone has to decide what its digits mean. They
+ * mean what the operator saw on the wall clock, which this app has decided is
+ * GMT+8 everywhere. Appending the offset literally is exact because GMT+8 has no
+ * DST — the same reasoning appTzDayStartUtc already relies on.
+ *
+ * Accepts values with or without seconds (browsers omit them unless step demands
+ * them). Empty input yields "now", matching what the old local helper did.
+ */
+export function appTzInputToUtc(local?: string | null): string {
+  if (!local) return new Date().toISOString();
+  const withSeconds = /T\d{2}:\d{2}$/.test(local) ? `${local}:00` : local;
+  const d = new Date(`${withSeconds}+08:00`);
+  return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
 /** A given instant's calendar date in APP_TZ as "YYYY-MM-DD" (en-CA → ISO order). */
 export function dateInAppTz(d: Date): string {
   return d.toLocaleDateString('en-CA', { timeZone: APP_TZ });

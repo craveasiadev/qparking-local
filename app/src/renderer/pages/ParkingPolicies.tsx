@@ -6,7 +6,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
-import { fmtDateTime, dateInAppTz, APP_TZ } from '../lib/datetime';
+import { fmtDateTime, dateInAppTz, appTzInputValue, APP_TZ } from '../lib/datetime';
 import { toast } from '../toast';
 
 const PAGE_SIZE = 10;
@@ -419,10 +419,18 @@ function RulesTable({ policy, compact = false }: { policy: RatePolicy; compact?:
   );
 }
 
-/** Local datetime → "YYYY-MM-DDTHH:mm" for a <input type="datetime-local">. */
+/**
+ * An instant → the value for a <input type="datetime-local">, in GMT+8.
+ *
+ * The SENDING side of Test price is correct as it stands: the zone-less string the
+ * input yields is parsed as local time by the main process, which tz.ts pins to
+ * KL, so the digits the operator typed are the digits the gate prices. What was
+ * wrong was this PREFILL — it used the operator PC's clock, so on a box that is
+ * not set to KL the box opened showing one wall clock and priced against another.
+ * Pinning it makes both ends agree.
+ */
 function toLocalInput(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  return appTzInputValue(d.toISOString()).slice(0, 16);   // trim seconds: step is 1min
 }
 
 /**

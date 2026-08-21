@@ -393,8 +393,17 @@ export interface BarrierResult { ok: boolean; error?: string; via?: 'reused' | '
 export async function pulseBarrier(cameraId: number, opts: { channel?: number; durationMs?: number } = {}): Promise<BarrierResult> {
   if (!ensureLib()) return { ok: false, error: 'sdk_unavailable' };
   if (!fns.SetIOOutputAuto) return { ok: false, error: 'SetIOOutputAuto_unavailable' };
-  const channel = opts.channel ?? 0;
-  const durationMs = Math.min(5000, Math.max(500, Math.round(opts.durationMs ?? 1000)));
+  // Per-camera by default now (cameras.relay_channel / relay_pulse_ms), with the
+  // explicit opts still winning for a caller that knows better.
+  //
+  // These were fixed constants — channel 0, 1000ms — and nothing ever passed
+  // anything else, so a site whose boom is wired to a different IO output, or
+  // whose controller needs a longer pulse to latch, had no way to say so: the app
+  // authorised every car correctly and the boom never moved. The camera row is
+  // where the rest of that camera's wiring already lives, so it belongs there.
+  const configured = listCameras().find((c) => c.id === cameraId);
+  const channel = opts.channel ?? configured?.relayChannel ?? 0;
+  const durationMs = Math.min(5000, Math.max(500, Math.round(opts.durationMs ?? configured?.relayPulseMs ?? 1000)));
 
   // Fast path: reuse the warm, already-connected handle. A handle that came up
   // and then dropped is NOT usable — pulsing it fails on every car until
@@ -413,7 +422,7 @@ export async function pulseBarrier(cameraId: number, opts: { channel?: number; d
 
   // No warm connection — open a short-lived handle just to pulse the relay, then
   // close it after a margin (mirrors closeConnection's deferred Close).
-  const cam = listCameras().find((c) => c.id === cameraId);
+  const cam = configured;
   if (!cam?.host) return { ok: false, error: 'camera_has_no_host' };
   const port = Number(cam.devicePort) || 80;
 

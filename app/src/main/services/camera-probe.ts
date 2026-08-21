@@ -10,7 +10,15 @@ import { getCamera } from './db';
 
 const PING_TIMEOUT_MS = 3_000;
 
-export interface PingResult { ok: boolean; status?: number; latencyMs?: number; error?: string }
+export interface PingResult {
+  ok: boolean;
+  status?: number;
+  latencyMs?: number;
+  error?: string;
+  /** True when the device answered but refused the request (401/403, or a login
+   *  redirect). Reachable — which is the whole question here — but not open. */
+  needsAuth?: boolean;
+}
 
 /**
  * Lightweight HTTP reachability probe against a camera host:port. Takes the
@@ -27,8 +35,18 @@ export async function pingHost(host: string, port?: number): Promise<PingResult>
       timeout: PING_TIMEOUT_MS,
       validateStatus: () => true,
     });
-    const httpOk = response.status >= 200 && response.status < 300;
-    return { ok: httpOk, status: response.status, latencyMs: Date.now() - startedAt };
+    // ANY HTTP response proves the device is THERE, which is the only thing this
+    // probe is asked. Counting only 2xx as reachable called a camera whose web
+    // root answers 401 — or redirects to a login page — "unreachable", when the
+    // answer itself is the proof it is on the network and listening. The operator
+    // was then sent to check an IP that was correct all along.
+    //
+    // A 5xx is still the device talking, so it counts as reachable too; the status
+    // rides along either way, and an auth refusal is flagged so the caller can say
+    // "reachable, needs credentials" rather than pretending it is wide open.
+    const status = response.status;
+    const needsAuth = status === 401 || status === 403 || (status >= 300 && status < 400);
+    return { ok: true, status, needsAuth, latencyMs: Date.now() - startedAt };
   } catch (error: any) {
     return { ok: false, error: error?.message ?? String(error), latencyMs: Date.now() - startedAt };
   }

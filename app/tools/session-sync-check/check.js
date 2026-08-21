@@ -248,6 +248,49 @@ try {
   check('a payload with no photo is not split (nothing to take off)',
     queue.__test_splitImagesOff({ ...beforeSplit[0], payload: { plate_number: 'NOPIC' } }) === false);
 
+  // ── a local delete must not race its own pending pushes ────────────────
+  // Observed 2026-08-21: an `entry` was still queued for a stay that had been
+  // deleted here. The delete landed first (soft-deleting the cloud record), the
+  // entry landed after, and because the cloud's upsert deliberately excludes
+  // soft-deleted rows from its lookup it created a SECOND record for one stay.
+  // Reversed, the survivor is a LIVE record for a stay deleted locally — a car
+  // showing as inside forever.
+  const delStay = db.createEntrySession('DELRACE1', null, null, null);
+  const otherStay = db.createEntrySession('KEEPME01', null, null, null);
+  queue.enqueueEntry(db.getSessionById(delStay.id));
+  queue.enqueueUpdate(db.getSessionById(delStay.id));
+  queue.enqueueEntry(db.getSessionById(otherStay.id));
+  const far = () => new Date(Date.now() + 3600_000).toISOString();
+  const beforeDel = db.listDueSync(far(), 200);
+  check('precondition: two pushes queued for the doomed stay, one for the other',
+    beforeDel.filter((r) => r.sessionId === delStay.id).length === 2
+    && beforeDel.filter((r) => r.sessionId === otherStay.id).length === 1,
+    `doomed=${beforeDel.filter((r) => r.sessionId === delStay.id).length} other=${beforeDel.filter((r) => r.sessionId === otherStay.id).length}`);
+
+  queue.enqueueDelete(db.getSessionById(delStay.id));
+  const afterDel = db.listDueSync(far(), 200);
+  const leftForStay = afterDel.filter((r) => r.sessionId === delStay.id);
+  const deleteRows = afterDel.filter((r) => r.op === 'session.delete' && r.payload.plate_number === 'DELRACE1');
+  check('a local delete drops every push still queued for that stay',
+    leftForStay.length === 0, `still queued: ${leftForStay.map((r) => r.op).join(', ') || 'none'}`);
+  check('…and queues the delete itself, so the cloud is still told',
+    deleteRows.length === 1, `delete rows=${deleteRows.length}`);
+  check('…while a different stay keeps its own queued push',
+    afterDel.filter((r) => r.sessionId === otherStay.id).length === 1);
+
+  // A row that already exhausted its retries must go too: it no longer retries on
+  // its own, but "Retry failed" would resurrect it after the stay is gone.
+  const failStay = db.createEntrySession('DELRACE2', null, null, null);
+  queue.enqueueEntry(db.getSessionById(failStay.id));
+  const failRow = db.listDueSync(far(), 200).find((r) => r.sessionId === failStay.id);
+  db.markSyncFailed(failRow.id, 'simulated exhaustion');
+  check('precondition: the row is parked as failed',
+    db.syncQueueStats().failed >= 1, JSON.stringify(db.syncQueueStats()));
+  queue.enqueueDelete(db.getSessionById(failStay.id));
+  const failedLeft = db.listSyncQueueIssues(50).filter((i) => i.ref === 'DELRACE2' && i.status === 'failed');
+  check('a FAILED push for a deleted stay is dropped too, so Retry failed cannot revive it',
+    failedLeft.length === 0, `failed rows left: ${failedLeft.length}`);
+
   out.ok = out.checks.every((c) => c.pass);
 } catch (error) {
   out.error = error?.stack ?? String(error);

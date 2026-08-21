@@ -52,6 +52,19 @@ export interface SyncResult {
 /** The SaaS wraps every list payload in a `{ data: [...] }` envelope. */
 interface CloudListBody {
 	data?: any[];
+	// Laravel resource collections carry a total the box can trust to tell a
+	// GENUINELY empty list apart from a half-deployed backend that just returned
+	// `{"data":[]}`. Optional — older backends omit it (see readCloudTotal).
+	total?: number;
+	meta?: { total?: number; pagination?: { total?: number } };
+}
+
+/** The cloud's OWN reported row count, if the response carries one (Laravel
+ *  pagination meta). null when absent — the caller then can't corroborate an
+ *  empty pull and must fall back to the streak guard. */
+function readCloudTotal(body: CloudListBody | any): number | null {
+	const t = body?.meta?.total ?? body?.total ?? body?.meta?.pagination?.total;
+	return typeof t === "number" && Number.isFinite(t) ? t : null;
 }
 
 const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: "qparking_not_configured" };
@@ -91,6 +104,7 @@ const emptyPullStreak: Record<"passes" | "blockedPlates" | "ratePolicies", numbe
 export function refuseEmptyWipe(
 	mirror: "passes" | "blockedPlates" | "ratePolicies",
 	incoming: number,
+	cloudTotal: number | null = null,
 ): SyncResult | null {
 	if (incoming > 0) {
 		emptyPullStreak[mirror] = 0;
@@ -98,10 +112,29 @@ export function refuseEmptyWipe(
 	}
 	const held = mirrorRowCounts()[mirror];
 	if (held === 0) return null;
+
+	// B3: prefer the cloud's OWN count. A genuine emptying reports total=0; a
+	// half-deployed or errored backend returns a bare empty array with no count.
+	// So the destructive wipe no longer rides on "the operator pressed Sync
+	// again" — it rides on the cloud corroborating the emptiness.
+	if (cloudTotal !== null) {
+		if (cloudTotal === 0) {
+			emptyPullStreak[mirror] = 0;
+			console.warn(`[cloud-sync] empty ${mirror} pull CORROBORATED by cloud total=0 — applying the wipe (was holding ${held} row(s))`);
+			return null;
+		}
+		// The cloud says it HAS rows but sent none — inconsistent. Keep the cache.
+		const inconsistent =
+			`refused_empty_wipe — the cloud reports ${cloudTotal} ${mirror} but returned none. ` +
+			`Keeping the cached copy; this looks like a partial or failed response, not a real emptying.`;
+		console.warn(`[cloud-sync] ${inconsistent}`);
+		return { ok: false, fetched: 0, error: inconsistent };
+	}
+
+	// No count field (older backend): fall back to the two-consecutive-empty
+	// streak so a real emptying can still land, just not on a single blip.
 	emptyPullStreak[mirror] += 1;
 	if (emptyPullStreak[mirror] >= 2) {
-		// Second consecutive empty pull — the operator (or two boots in a row)
-		// has confirmed it. Let the wipe through and start the next watch fresh.
 		emptyPullStreak[mirror] = 0;
 		console.warn(`[cloud-sync] empty ${mirror} pull CONFIRMED by a second consecutive pull — applying the wipe (was holding ${held} row(s))`);
 		return null;
@@ -112,9 +145,9 @@ export function refuseEmptyWipe(
 		ratePolicies: "rate plans",
 	}[mirror];
 	const error =
-		`refused_empty_wipe — the cloud returned NO ${label} while this box holds ${held}. ` +
+		`refused_empty_wipe — the cloud returned NO ${label} while this box holds ${held}, and sent no count to confirm it. ` +
 		`Keeping the cached copy: applying it would stop the gate honouring passes / enforcing bans / pricing stays. ` +
-		`If the list really is empty now, press Sync now again to confirm.`;
+		`Do NOT retry unless you have verified in the cloud that the list is genuinely empty — a failed/half-deployed backend looks exactly like this.`;
 	console.warn(`[cloud-sync] ${error}`);
 	return { ok: false, fetched: 0, error };
 }
@@ -233,7 +266,7 @@ export async function syncRatePolicies(): Promise<SyncResult> {
 		// The backend flags one policy as is_site_default (RatePolicyController
 		// marks the first by name), so isSiteDefault comes straight from the payload.
 		const ratePolicies = ratePolicyRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt));
-		const refused = refuseEmptyWipe("ratePolicies", ratePolicies.length);
+		const refused = refuseEmptyWipe("ratePolicies", ratePolicies.length, readCloudTotal(responseBody));
 		if (refused) return refused;
 
 		let savedCount = 0;
@@ -329,7 +362,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const { data: v2Body } = await cloud.get<CloudListBody>("/season-passes/v2");
 		const v2Rows = v2Body.data ?? [];
 		const seasonPasses = v2Rows.flatMap((row: any) => mapV2RowToSeasonPasses(row, fetchedAt));
-		const refusedV2 = refuseEmptyWipe("passes", seasonPasses.length);
+		const refusedV2 = refuseEmptyWipe("passes", seasonPasses.length, readCloudTotal(v2Body));
 		if (refusedV2) return refusedV2;
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
@@ -344,7 +377,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const seasonPasses = seasonPassRows
 			.filter((seasonPassRow: any) => seasonPassRow.vehicle?.plate_number)
 			.map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
-		const refused = refuseEmptyWipe("passes", seasonPasses.length);
+		const refused = refuseEmptyWipe("passes", seasonPasses.length, readCloudTotal(responseBody));
 		if (refused) return refused;
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
@@ -495,7 +528,7 @@ export async function syncBlockedPlates(): Promise<SyncResult> {
 				reason: row.reason ?? null,
 				fetchedAt,
 			}));
-		const refused = refuseEmptyWipe("blockedPlates", blockedPlates.length);
+		const refused = refuseEmptyWipe("blockedPlates", blockedPlates.length, readCloudTotal(responseBody));
 		if (refused) return refused;
 		replaceAllBlockedPlates(blockedPlates);
 		return { ok: true, fetched: blockedPlates.length };

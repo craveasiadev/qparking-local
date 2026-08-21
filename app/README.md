@@ -4,11 +4,15 @@ On-prem parking controller. Runs as a Windows desktop app on the site's gate PC.
 It sits between the physical parking hardware and the qparking cloud:
 
 - **LPR cameras** over HTTP — cameras POST plate detections to our webhook.
-- **ECPI payment terminals** over TCP (JSON + SHA-256 + heartbeat) — drives the
-  gate's payment flow.
+- **Touch'n'Go W4G payment devices** over HTTP — drives the gate's payment flow.
+  (ECPI, a TCP/SHA-256 protocol, was the original driver and was retired on
+  2026-07-14; see `migrateTerminalsToW4g` in `db.ts`. Nothing speaks it any more.)
 - **qparking SaaS** over HTTPS — a **Laravel REST API** we pull rate-policy config
-  from every 60 seconds (so fees can be calculated even when the WAN is down) and
-  push session records up to. All of these calls go through **one shared axios
+  from (so fees can be calculated even when the WAN is down) and push session
+  records up to. Cadence: `company_settings.sync_interval_minutes`, default **60
+  minutes**, and the recurring tick pulls only a SUBSET — rate policies, season
+  passes and the deny list arrive at boot, on a site rebind, or when someone
+  presses "Sync now" (see `syncEssentials` vs `syncAll` in `cloud-sync.ts`). All of these calls go through **one shared axios
   client** (`services/cloud-api.ts`).
 
 State lives in a local SQLite DB at `%APPDATA%\qparking-local\qparking-local.db`.
@@ -44,10 +48,11 @@ When a car **enters**:
 When a car **exits**:
 1. Exit-lane LPR camera reads the plate, POSTs to `/lpr/event`.
 2. We look up the open session, compute duration + fee using the lane's rate policy.
-3. We drive the payment terminal:
-   - **Kiosk-mode lane**: `initExit` → wait for card tap → `proceedExit` → wait for txnStatus.
-   - **LPR-mode lane**: `initCard` (reader settles the tap) → wait for cardRead.
-4. On `APPROVED` we record the exit + open the gate.
+3. We charge the lane's W4G device: `PayRequest` → the driver taps → the device
+   calls back on `POST /w4g/PayResult`. Refused before sending if no callback
+   listener is bound, because a tap with no way home is money we could never
+   record.
+4. On `State: 0` (approved) we record the exit + open the gate.
 5. On declined/timeout/cancelled the session stays open; the operator can
    manually release from the UI.
 
@@ -341,7 +346,7 @@ What this buys:
   hang forever on a dead WAN.
 
 Two deliberate exceptions that do **not** use the shared client:
-`w4g-tng.ts` (see table above) and `lpr-webhook.ts` (an inbound HTTP *server*,
+`payment-tng.ts` (see table above) and `lpr-webhook.ts` (an inbound HTTP *server*,
 not a client).
 
 ### `src/renderer/` (React ⚛️)
@@ -748,19 +753,22 @@ The portable build is handy for testing on a new PC: copy the file, double-click
 1. Launch the app.
 2. **Settings** → enter qparking base URL + API key → Save. Click **Parking Rates →
    Sync now**. The lane/rate-policy dropdowns now populate.
-3. **Payment terminals** → Add each ECPI reader on the LAN:
-   - Host = reader's static IP (default `192.168.1.199`)
-   - Port = `5000` (ECPI default)
-   - Secret key = the one assigned by CoherentPlus during commissioning
-   - Plaza ID / Lane ID = whatever the integrator gave you
-   - Driver mode = **Kiosk** for self-pay stations, **LPR** for gate-controlled readers
+3. **Payment terminals** → Add each W4G device on the LAN:
+   - Host = the device's static IP (the test rig is `192.168.1.105`)
+   - Port = `80` (its HTTP port)
+   - Connection timeout = `30`s is the default and suits most devices
+   Then in **Settings**, switch TNG on and set the callback port(s) the device
+   POSTs `PayResult` to. There is no secret key, plaza id or driver mode — those
+   belonged to ECPI.
 4. **LPR cameras** → Add each camera. Copy the webhook URL shown at the top of the
    page into the camera's "alarm-action / event-push" config. Use the per-camera
    webhook secret.
 5. **Lanes** → Define one lane per entry/exit gate. Pick the rate policy and
    the payment terminal (exit lanes only).
 6. **Cameras** → edit each camera and assign it to the right lane.
-7. Back to **Terminals**, click **Connect** on each row to establish the TCP session.
+7. Back to **Terminals**, use **Test connection** on each row to confirm the
+   device answers. (There is no Connect button — W4G is stateless HTTP, so there
+   is no session to establish.)
 8. **Dashboard** → watch the "Live plate events" panel as a real car drives
    through to confirm the wiring.
 
@@ -802,8 +810,10 @@ On the **LPR cameras** page each row has a **Simulate** button. Type a plate,
 click Simulate — the system processes it as if the camera had fired. Cars
 accumulate in the Dashboard's "Cars inside" list. Pair an entry camera + exit
 camera against the same lane and walk through both to test the end-to-end flow.
-There's also a **Demo full-flow** button that fires entry, waits, then fires exit
-so you can watch the whole cycle from one click.
+For a timed round-trip, turn on dev mode (tap the sidebar version 7×) and use the
+simulator on the **Parking Activity** page: it fires a real entry at a chosen
+time, then a real exit at another, through the same guards a camera read goes
+through.
 
 ---
 
@@ -828,9 +838,9 @@ so you can watch the whole cycle from one click.
 | Term | Meaning |
 |------|---------|
 | **LPR** | License-Plate Recognition (the cameras that read number plates) |
-| **ECPI** | The payment-terminal protocol/brand this app drives over TCP |
+| **ECPI** | The ORIGINAL payment-terminal protocol, retired 2026-07-14. Mentioned only in migration code |
 | **W4G / TNG** | Touch'n'Go IO-controller integration (Malaysian e-wallet / card) |
 | **rate policy / tariff** | A rate plan (how much to charge per hour/block), synced from the cloud |
 | **session** | One car's visit: entry event → exit event |
 | **qparking SaaS** | The cloud **Laravel API** this on-prem app syncs rates up/down with |
-| **kiosk vs LPR mode** | Self-pay station vs gate-controlled reader — different terminal command sets |
+| **PayRequest / PayResult** | The W4G exchange: we POST the fare to the device, it POSTs the outcome back to us |

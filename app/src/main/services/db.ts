@@ -1048,6 +1048,12 @@ function applySchema(db: Database.Database) {
 		// are already pushing to; anything else is backfilled below.
 		["cameras", "webhook_port INTEGER NOT NULL DEFAULT 6001"],
 		["season_passes", "plan TEXT"],
+		// Per-camera barrier relay wiring (2026-08-21). Defaults are the constants
+		// that were hard-coded before, so every existing camera keeps behaving exactly
+		// as it did — this only gives a site whose boom is on another channel, or
+		// needs a longer pulse to latch, somewhere to say so.
+		["cameras", "relay_channel INTEGER NOT NULL DEFAULT 0"],
+		["cameras", "relay_pulse_ms INTEGER NOT NULL DEFAULT 1000"],
 	] as const) {
 		try {
 			db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -1341,7 +1347,12 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
 	const tx = db.transaction(() => {
 		for (const [key, value] of Object.entries(patch)) {
 			if (value === undefined || value === null) continue;
-			stmt.run(key, String(value));
+			// C6: the exit grace period is the one numeric setting with no clamp.
+			// It is measured in SECONDS; an operator typing "86400" (meaning "a
+			// day") silently refuses every car that exited earlier as a duplicate
+			// read. Cap it here so a fat-fingered value can't close the site.
+			const v = key === 'exitGracePeriodSeconds' ? normaliseGraceSeconds(value) : value;
+			stmt.run(key, String(v));
 		}
 	});
 	tx();
@@ -1373,17 +1384,34 @@ export function getTerminal(id: number): PaymentTerminal | null {
 	return row ? rowToTerminal(row) : null;
 }
 
+/** C7: clamp the terminal's TCP port. The one device type with no normaliser —
+ *  clearing the field (0) or a typo saved, then the next paid exit fired a
+ *  PayRequest at host:0 and timed out. Falls back to 80 (the W4G HTTP default). */
+function normaliseTerminalPort(port: unknown): number {
+	const value = Number(port);
+	return Number.isInteger(value) && value > 0 && value < 65536 ? value : 80;
+}
+/** Clamp the PayResult wait. It is already floored at 15s at use, but a stored
+ *  0 / negative / absurd value is meaningless — keep it in a sane 5–300s band. */
+function normaliseTimeoutSeconds(seconds: unknown): number {
+	const value = Math.floor(Number(seconds));
+	if (!Number.isFinite(value)) return 30;
+	return Math.min(300, Math.max(5, value));
+}
+
 export function upsertTerminal(
 	terminal: Omit<PaymentTerminal, "id" | "externalId" | "createdAt" | "updatedAt"> & { id?: number; externalId?: string },
 ): PaymentTerminal {
 	const db = getDb();
+	const port = normaliseTerminalPort(terminal.port);
+	const timeoutSeconds = normaliseTimeoutSeconds(terminal.timeoutSeconds);
 	if (terminal.id) {
 		// external_id is immutable device identity — never rewritten on edit.
 		db.prepare(`UPDATE terminals SET name=?, host=?, port=?, timeout_seconds=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(
 			terminal.name,
 			terminal.host,
-			terminal.port,
-			terminal.timeoutSeconds,
+			port,
+			timeoutSeconds,
 			terminal.enabled ? 1 : 0,
 			terminal.id,
 		);
@@ -1392,7 +1420,7 @@ export function upsertTerminal(
 	const externalId = terminal.externalId ?? `dev-${randomUUID()}`;
 	const info = db
 		.prepare(`INSERT INTO terminals (external_id, name, host, port, timeout_seconds, enabled) VALUES (?,?,?,?,?,?)`)
-		.run(externalId, terminal.name, terminal.host, terminal.port, terminal.timeoutSeconds, terminal.enabled ? 1 : 0);
+		.run(externalId, terminal.name, terminal.host, port, timeoutSeconds, terminal.enabled ? 1 : 0);
 	return getTerminal(Number(info.lastInsertRowid))!;
 }
 
@@ -1509,6 +1537,30 @@ export function logTerminal(terminalId: number, direction: "send" | "recv" | "er
  * port, and anything above 65535 refuses to bind at all — either way the camera
  * pushes into nothing and cars sit at the barrier.
  */
+/** IO output index the boom is wired to. Non-negative int; anything else is 0,
+ *  the first/only relay on a single-barrier camera. */
+function normaliseRelayChannel(channel: unknown): number {
+	const value = Number(channel);
+	return Number.isInteger(value) && value >= 0 && value <= 15 ? value : 0;
+}
+
+/** Pulse length. CLAMPED to the SDK's documented 500-5000ms window rather than
+ *  passed through — VzLPRClient_SetIOOutputAuto rejects anything outside it, and a
+ *  rejected pulse is a boom that does not move. */
+function normaliseRelayPulseMs(ms: unknown): number {
+	const value = Number(ms);
+	if (!Number.isFinite(value)) return 1000;
+	return Math.min(5000, Math.max(500, Math.round(value)));
+}
+
+/** Clamp the exit grace period (seconds). 0 disables it; the 1-hour ceiling
+ *  keeps a "one day = 86400" slip from silently denying every re-entry. */
+function normaliseGraceSeconds(value: unknown): number {
+	const n = Math.floor(Number(value));
+	if (!Number.isFinite(n) || n < 0) return 0;
+	return Math.min(n, 3600);
+}
+
 function normaliseWebhookPort(port: unknown): number {
 	const value = Number(port);
 	return Number.isInteger(value) && value > 0 && value < 65536 ? value : 6001;
@@ -1535,6 +1587,11 @@ function rowToCamera(row: any): LprCamera {
 		// than 0/NULL: binding port 0 would take a random free port and the
 		// camera would never find it.
 		webhookPort: Number(row.webhook_port) > 0 ? Number(row.webhook_port) : 6001,
+		// Clamped on read as well as on write: a row predating these columns, or one
+		// hand-edited, must not be able to ask the SDK for a channel or a duration it
+		// will refuse. Same values the hard-coded constants used.
+		relayChannel: Number.isInteger(Number(row.relay_channel)) && Number(row.relay_channel) >= 0 ? Number(row.relay_channel) : 0,
+		relayPulseMs: Number(row.relay_pulse_ms) >= 500 && Number(row.relay_pulse_ms) <= 5000 ? Number(row.relay_pulse_ms) : 1000,
 		enabled: !!row.enabled,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -1586,7 +1643,7 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 		// is what relinkDevices() resolves lane_id back FROM after any equipment
 		// pull, so leaving it stale silently reverts this edit on the next pull.
 		db.prepare(
-			`UPDATE cameras SET name=?, lane_id=?, lane_external_id=(SELECT l.external_id FROM lanes l WHERE l.id = ?), direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE cameras SET name=?, lane_id=?, lane_external_id=(SELECT l.external_id FROM lanes l WHERE l.id = ?), direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_port=?, webhook_secret=?, relay_channel=?, relay_pulse_ms=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		).run(
 			camera.name,
 			camera.laneId,
@@ -1599,6 +1656,8 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 			camera.devicePort,
 			normaliseWebhookPort(camera.webhookPort),
 			camera.webhookSecret,
+			normaliseRelayChannel(camera.relayChannel),
+			normaliseRelayPulseMs(camera.relayPulseMs),
 			camera.enabled ? 1 : 0,
 			camera.id,
 		);
@@ -1612,8 +1671,8 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 	// silently detached it.
 	const info = db
 		.prepare(
-			`INSERT INTO cameras (external_id, name, lane_id, lane_external_id, direction, access_mode, host, device_user, device_password, device_port, webhook_port, webhook_secret, enabled)
-			 VALUES (?,?,?,(SELECT l.external_id FROM lanes l WHERE l.id = ?),?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO cameras (external_id, name, lane_id, lane_external_id, direction, access_mode, host, device_user, device_password, device_port, webhook_port, webhook_secret, relay_channel, relay_pulse_ms, enabled)
+			 VALUES (?,?,?,(SELECT l.external_id FROM lanes l WHERE l.id = ?),?,?,?,?,?,?,?,?,?,?,?)`,
 		)
 		.run(
 			externalId,
@@ -1628,6 +1687,8 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 			camera.devicePort,
 			normaliseWebhookPort(camera.webhookPort),
 			camera.webhookSecret,
+			normaliseRelayChannel(camera.relayChannel),
+			normaliseRelayPulseMs(camera.relayPulseMs),
 			camera.enabled ? 1 : 0,
 		);
 	return getCamera(Number(info.lastInsertRowid))!;
@@ -2237,11 +2298,16 @@ export function recordExit(
  */
 export function manualReleaseSession(sessionId: number, reason: string): { session: ParkingSession | null; changed: boolean } {
 	const now = new Date().toISOString();
+	// S10: APPEND the release reason to any existing notes rather than replacing
+	// them — a "Restored from cloud" marker or an operator annotation must not be
+	// wiped by the release note.
+	const existing = getSessionById(sessionId)?.notes?.trim();
+	const combined = existing ? `${existing} · ${reason}` : reason;
 	const info = getDb()
 		.prepare(
 			`UPDATE sessions SET exit_at=?, status='manual_release', payment_status='manual_release', notes=?, rev=rev+1, updated_at=${NOW_MS_SQL} WHERE id=? AND exit_at IS NULL`,
 		)
-		.run(now, reason, sessionId);
+		.run(now, combined, sessionId);
 	return { session: getSessionById(sessionId), changed: info.changes > 0 };
 }
 
@@ -2393,20 +2459,25 @@ function buildSessionFilters(filters: SessionFilters): { clauses: string[]; args
 		clauses.push("payment_status = ?");
 		args.push(filters.paymentStatus);
 	}
+	// S6: compare through datetime() on BOTH sides, not as raw text. Sessions
+	// hold two shapes — ISO '…Z' and bare 'YYYY-MM-DD HH:MM:SS' — and since
+	// ' ' (0x20) < 'T' (0x54) a raw string compare drops legacy-format rows that
+	// are genuinely inside a GMT+8 day window (and pulls in ones that aren't).
+	// datetime() normalises both to the same UTC form, exactly as dayTotals does.
 	if (filters.entryFrom) {
-		clauses.push("entry_at >= ?");
+		clauses.push("datetime(entry_at) >= datetime(?)");
 		args.push(filters.entryFrom);
 	}
 	if (filters.entryTo) {
-		clauses.push("entry_at <= ?");
+		clauses.push("datetime(entry_at) <= datetime(?)");
 		args.push(filters.entryTo);
 	}
 	if (filters.exitFrom) {
-		clauses.push("exit_at >= ?");
+		clauses.push("datetime(exit_at) >= datetime(?)");
 		args.push(filters.exitFrom);
 	}
 	if (filters.exitTo) {
-		clauses.push("exit_at <= ?");
+		clauses.push("datetime(exit_at) <= datetime(?)");
 		args.push(filters.exitTo);
 	}
 	return { clauses, args };
@@ -2593,6 +2664,17 @@ export function getTransactionById(id: number): Transaction | null {
 
 /** The most recent still-open (pending) attempt for a session, if any. Used to
  *  void an in-flight charge when a session is manually released. */
+/** S5: has this stay ever actually collected money? A single paid transaction
+ *  locks the recorded fee — editing times or picking a policy must not rewrite
+ *  revenue that has already been taken. Independent of the session's current
+ *  payment_status field, so the flip-flop bypass (paid→pending→paid) can't
+ *  unlock it. */
+export function sessionHasPaidTransaction(sessionId: number): boolean {
+	return !!getDb()
+		.prepare("SELECT 1 FROM transactions WHERE session_id = ? AND status = 'paid' LIMIT 1")
+		.get(sessionId);
+}
+
 export function getOpenTransactionForSession(sessionId: number): Transaction | null {
 	const row = getDb().prepare(`SELECT * FROM transactions WHERE session_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`).get(sessionId) as any;
 	return row ? rowToTransaction(row) : null;
@@ -2758,6 +2840,35 @@ export function listDueSync(now = new Date().toISOString(), limit = 25): SyncQue
 	return (getDb().prepare(`SELECT * FROM sync_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id ASC LIMIT ?`).all(now, limit) as any[]).map(
 		rowToSync,
 	);
+}
+
+/**
+ * Drop every queued push that describes this session.
+ *
+ * Called when the stay is deleted locally, BEFORE the delete is queued. Without
+ * it the two raced: the queue kept an `entry` (and possibly an `update`) for a
+ * stay that no longer exists here, and each carried its own backoff, so their
+ * order at the cloud was decided by whose retry clock happened to come up first.
+ *
+ * Seen for real on 2026-08-21. A delete landed, soft-deleting the cloud record;
+ * the still-queued entry landed afterwards; and because the upsert's lookup
+ * deliberately excludes soft-deleted rows ("a cancelled stay that gets re-pushed
+ * is a new record, not a resurrection") it created a SECOND record for the same
+ * stay. That run ended tidy only because another delete happened to land last —
+ * with the order reversed the cloud keeps a live record for a stay deleted here,
+ * i.e. a car showing as inside forever.
+ *
+ * Deleting the stay locally settles the question, so nothing queued about it is
+ * worth sending. `failed` rows go too: they no longer retry on their own, but
+ * "Retry failed" would resurrect them.
+ *
+ * Scoped to `session.%` so a transaction push is never touched — those carry no
+ * session_id anyway, and the payment ledger is not the stay's to discard.
+ */
+export function discardQueuedPushesForSession(sessionId: number): number {
+	return getDb()
+		.prepare(`DELETE FROM sync_queue WHERE session_id = ? AND op LIKE 'session.%'`)
+		.run(sessionId).changes;
 }
 
 export function markSyncOk(id: number): void {
@@ -3303,8 +3414,20 @@ function rowToSeasonPass(row: any): SeasonPass {
 /** Site-local (GMT+8, pinned in tz.ts) calendar day for an instant, as the
  *  YYYY-MM-DD the cloud stores pass start/end dates in. Comparing date-only
  *  strings keeps this a plain lexicographic test. */
+/** B6: parse a stored timestamp to ms, zone-aware. Older rows store bare
+ *  'YYYY-MM-DD HH:MM:SS' meaning UTC, but Date.parse reads that as LOCAL — an
+ *  8h skew that lands the day key on the wrong calendar day for entries near the
+ *  GMT+8 midnight. Treat a zone-less value as UTC, exactly as parseStoredInstant
+ *  does in parking-flow. */
+function parseStoredMs(value: string): number {
+	let t = value.trim();
+	const hasZone = /[zZ]$|[+-]\d\d:?\d\d$/.test(t);
+	if (!hasZone) { t = t.replace(" ", "T"); if (t.includes("T")) t += "Z"; }
+	return Date.parse(t);
+}
+
 function siteDayKey(at?: string | null): string {
-	const ms = at ? Date.parse(at) : Date.now();
+	const ms = at ? parseStoredMs(at) : Date.now();
 	const d = new Date(Number.isNaN(ms) ? Date.now() : ms);
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -3607,6 +3730,12 @@ function rowToBlockedPlate(row: any): BlockedPlate {
 export function findBlockedPlate(plate: string): BlockedPlate | null {
 	const row = getDb().prepare("SELECT * FROM blocked_plates WHERE plate_number = ?").get(canonicalPlate(plate)) as any;
 	return row ? rowToBlockedPlate(row) : null;
+}
+
+/** All banned plates. Used by the Admit box (B7) to show a plate's ban state in
+ *  the live read-back before staff press Admit. */
+export function listBlockedPlates(): BlockedPlate[] {
+	return (getDb().prepare("SELECT * FROM blocked_plates ORDER BY plate_number").all() as any[]).map(rowToBlockedPlate);
 }
 
 /**

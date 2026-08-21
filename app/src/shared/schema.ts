@@ -170,6 +170,21 @@ export interface LprCamera {
   // qparking-local isn't running, the lane does not open.
   /** Webhook secret — cameras POSTing /lpr/event must include this header. */
   webhookSecret: string | null;
+  /**
+   * Which IO output on the camera the boom is wired to, and how long to hold it.
+   *
+   * Both were hard-coded (channel 0, 1000ms) with no caller ever passing anything
+   * else, so a site whose boom sits on channel 1 — or whose barrier controller
+   * needs a longer pulse to latch — had nothing to change. The app authorised
+   * every car correctly and the boom never moved, which describeCameraRisk calls
+   * this app's most confusing failure.
+   *
+   * Channel 0 is the first/only relay on single-barrier cameras, which is why the
+   * old constant worked everywhere it was tried. Duration is clamped to the SDK's
+   * documented 500–5000ms range by pulseBarrier.
+   */
+  relayChannel: number;
+  relayPulseMs: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;

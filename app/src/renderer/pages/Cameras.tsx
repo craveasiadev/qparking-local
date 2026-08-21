@@ -41,6 +41,10 @@ const EMPTY: Omit<LprCamera, "id" | "externalId" | "createdAt" | "updatedAt"> = 
 	devicePort: 80,
 	webhookPort: DEFAULT_WEBHOOK_PORT,
 	webhookSecret: "",
+	// The values that were hard-coded in pulseBarrier until 2026-08-21, so a new
+	// camera behaves exactly as every camera did before they became editable.
+	relayChannel: 0,
+	relayPulseMs: 1000,
 	enabled: true,
 };
 
@@ -626,7 +630,17 @@ function CameraForm({
 		setPingResult("Pinging…");
 		// Probe the form values directly so this works before the camera is saved.
 		const r = await window.bridge.pingCameraHost({ host, port: value.devicePort ?? 80 });
-		setPingResult(r.ok ? `✓ Reachable · status ${r.status} · ${r.latencyMs}ms` : `✗ ${r.error ?? `status ${r.status}`} · ${r.latencyMs ?? "—"}ms`);
+		// Any HTTP answer means the camera is THERE, which is what this button asks.
+		// A 401 / login redirect used to read as a failure and send the installer off
+		// to re-check an IP that was correct — so it now reports reachable, and says
+		// the web interface wanted credentials.
+		setPingResult(
+			r.ok
+				? (r.needsAuth
+					? `✓ Reachable · its web page wants a login (status ${r.status}) · ${r.latencyMs}ms — fine for plate pushes; the SDK username/password below is what opens the barrier`
+					: `✓ Reachable · status ${r.status} · ${r.latencyMs}ms`)
+				: `✗ ${r.error ?? `status ${r.status}`} · ${r.latencyMs ?? "—"}ms`,
+		);
 		setPinging(false);
 	}
 	// The panel is capped to the viewport and laid out as a column: header and
@@ -779,6 +793,43 @@ function CameraForm({
 							</div>
 						)}
 					</div>
+					{/* The barrier itself. Grouped with the SDK login rather than the
+					    webhook fields because these three are what actually MOVE the boom:
+					    the login opens the handle, these two say which output to pulse and
+					    for how long. Both were constants with no way to change them, so a
+					    boom on another IO output meant a gate that authorised every car and
+					    never opened. */}
+					<Field label="Barrier relay output">
+						<input
+							className="input"
+							type="number"
+							min={0}
+							max={15}
+							value={value.relayChannel ?? 0}
+							onChange={(e) => set("relayChannel", Math.max(0, Math.min(15, Number(e.target.value) || 0)))}
+						/>
+						<p className="mt-1.5 text-[11px] text-gray-500 leading-relaxed">
+							Which IO output on the camera the boom is wired to. <strong>0</strong> is the
+							first (and on most cameras the only) relay — leave it there unless the
+							installer tells you otherwise.
+						</p>
+					</Field>
+					<Field label="Barrier pulse (ms)">
+						<input
+							className="input"
+							type="number"
+							min={500}
+							max={5000}
+							step={100}
+							value={value.relayPulseMs ?? 1000}
+							onChange={(e) => set("relayPulseMs", Number(e.target.value) || 1000)}
+						/>
+						<p className="mt-1.5 text-[11px] text-gray-500 leading-relaxed">
+							How long the relay is held closed. 1000&nbsp;ms suits most booms; raise it if
+							the barrier controller needs longer to latch. The camera SDK accepts
+							500&ndash;5000&nbsp;ms and anything outside that is clamped.
+						</p>
+					</Field>
 					<Field label="Webhook secret">
 						<div className="flex gap-2">
 							<input className="input font-mono text-xs" value={value.webhookSecret ?? ""} onChange={(e) => set("webhookSecret", e.target.value)} />

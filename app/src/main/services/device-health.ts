@@ -168,7 +168,14 @@ async function probeCamera(camera: LprCamera, opts: SweepOptions, previous?: Dev
     status: ping.ok ? 'online' : 'offline',
     via: 'http',
     latencyMs: ping.latencyMs ?? null,
-    detail: ping.ok ? null : (ping.error ?? (ping.status ? `HTTP ${ping.status}` : 'no response')),
+    // An auth refusal is ONLINE — the device answered, which is all this probe can
+    // ever establish — but it is worth naming, because "reachable" and "usable"
+    // are different things and only the SDK path can tell you the second (see
+    // cameraRelayHealth above, which is consulted first and wins when it has an
+    // opinion).
+    detail: ping.ok
+      ? (ping.needsAuth ? `reachable, but the web interface refused the request (HTTP ${ping.status})` : null)
+      : (ping.error ?? (ping.status ? `HTTP ${ping.status}` : 'no response')),
   };
 }
 

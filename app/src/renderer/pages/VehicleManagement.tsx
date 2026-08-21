@@ -144,9 +144,10 @@ export function VehicleManagement() {
               so the same pass appears on each of its plates — "slots" is how many
               of them may be inside at once, one per bay.
               {' '}Everything here is managed in the qparking cloud (Parking
-              Management → Customers, on the holder's row). The gate picks up a
-              block within about a minute; the pass roster refreshes on the sync
-              tick.
+              Management → Customers, on the holder's row). A block or pass issued
+              in the cloud reaches this gate at startup, after a rebind, or when
+              you press <strong>Sync now</strong> — it does <strong>not</strong>
+              arrive on the periodic tick, so press Sync now after changing one.
             </InfoTip>
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-1">

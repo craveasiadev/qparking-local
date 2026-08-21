@@ -320,26 +320,23 @@ function LcdCard({
     }
   }
 
-  // The strip carries the test result when there is one, and otherwise the live
-  // link failure — the reason a panel is offline is the one thing an operator
-  // opens this page to find out, and its text carries the fix, not just the
-  // errno (see describeSocketError in lcd-display.ts).
+  // The strip carries the TEST result ONLY. It used to also surface the live
+  // background-link error whenever a panel was offline, which meant opening this
+  // page to a panel merely switched off greeted the operator with an unsolicited
+  // red "no answer" band — even though nothing here pinged the device; that error
+  // is just the background monitor's last recorded reason. The OFFLINE badge
+  // already reports the verdict passively; the detailed reason + fix now appears
+  // only when the operator presses Test (see describeSocketError in lcd-display.ts).
   const strip = test.text
     ? { state: test.state, text: test.text }
-    : !status?.connected && status?.lastError && lcd.enabled
-      ? { state: 'err' as const, text: status.lastError }
-      : null;
+    : null;
 
   // ── the strip auto-hides ──────────────────────────────────────────────────
-  // A panel switched off for the weekend used to sit here with a permanent red
-  // band, which turns the whole page into a wall of alarm and trains the operator
-  // to stop reading it. So: show a message when it is NEW, then fold it away.
-  //
-  // Keyed on the TEXT, not a timestamp — the live link error is recomputed every
-  // 3s by the parent's poll, and re-arming on each poll would make it immortal.
-  // A genuinely different reason (a typo'd IP becoming "host unreachable") counts
-  // as new and shows again. Nothing is lost: the OFFLINE badge keeps the reason
-  // in its tooltip, permanently.
+  // The strip now only ever holds a Test result, and a test result should fold
+  // away once read rather than sit as a permanent band. Keyed on the TEXT so a
+  // fresh test re-arms it; the "watch the panel now" line is held open for the
+  // duration of the test itself (see the `testing` guard below). The passive
+  // online/offline verdict lives in the OFFLINE badge, not here.
   const [stripHidden, setStripHidden] = useState(false);
   const stripText = strip?.text ?? null;
   const testing = test.state === 'pinging';

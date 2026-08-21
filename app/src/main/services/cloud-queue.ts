@@ -14,6 +14,7 @@ import {
 	markSyncRetry,
 	markSyncFailed,
 	replaceSyncPayload,
+	discardQueuedPushesForSession,
 	syncQueueStats,
 	listSyncQueueIssues,
 	getLane,
@@ -340,6 +341,18 @@ export function enqueueTransaction(session: ParkingSession, txn: Transaction): v
 }
 
 export function enqueueDelete(session: ParkingSession): void {
+	// Clear anything still queued ABOUT this stay first — see
+	// discardQueuedPushesForSession. Deleting it locally settles the question, so a
+	// pending entry/exit/update/images push has nothing left to say, and leaving
+	// them in meant the cloud's final state depended on whose backoff clock came up
+	// first. On 2026-08-21 that produced a duplicate record for one stay.
+	const discarded = discardQueuedPushesForSession(session.id);
+	if (discarded > 0) {
+		console.warn(
+			`[cloud-queue] session ${session.id} (${session.plate}) deleted locally —`
+			+ ` dropped ${discarded} queued push(es) for it so they cannot race the delete`,
+		);
+	}
 	// No session id attached: the row is being deleted locally, so there is nothing
 	// left to stamp a sync watermark on by the time this drains.
 	enqueueSync("session.delete", {

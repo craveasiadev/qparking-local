@@ -141,7 +141,7 @@ export function Settings() {
   // (that would leak this site's equipment to the other site and leave the old
   // site's sessions/logs showing). Instead we preview the candidate site and,
   // if it differs, prompt the operator to confirm a reset.
-  const [rebindPrompt, setRebindPrompt] = useState<{ boundName: string; candidateName: string } | null>(null);
+  const [rebindPrompt, setRebindPrompt] = useState<{ boundName: string; candidateName: string; openSessions: number } | null>(null);
   const [wipeEquipment, setWipeEquipment] = useState(false);
 
   // Persist the on-screen settings, guarding the credential change: if the new
@@ -168,6 +168,7 @@ export function Settings() {
         setRebindPrompt({
           boundName: preview.boundSite?.name ?? '—',
           candidateName: preview.candidateSite?.name ?? '—',
+          openSessions: preview.openSessions ?? 0,
         });
         return 'rebind';
       }
@@ -324,6 +325,13 @@ export function Settings() {
                 Switching disconnects this box from {rebindPrompt.boundName} and <strong>permanently clears its local data</strong> —
                 sessions, transactions, activity logs and the pending cloud-sync queue — so nothing from the old site lingers.
               </p>
+              {rebindPrompt.openSessions > 0 ? (
+                <p className="text-sm rounded-lg bg-amber-50 border border-amber-300 text-amber-800 px-3 py-2">
+                  <strong>{rebindPrompt.openSessions} car{rebindPrompt.openSessions > 1 ? 's are' : ' is'} still on site.</strong>{' '}
+                  Switching now wipes {rebindPrompt.openSessions > 1 ? 'their stays' : 'its stay'} — {rebindPrompt.openSessions > 1 ? 'those cars' : 'that car'} will have no
+                  record at exit and must be let out with Open Barrier. Clear the site first if you can.
+                </p>
+              ) : null}
               <label className="flex items-start gap-2 text-sm text-gray-700">
                 <input type="checkbox" className="mt-0.5" checked={wipeEquipment} onChange={(e) => setWipeEquipment(e.target.checked)} />
                 <span>Also remove configured cameras, lanes, payment terminals and LCD displays (leave unchecked if the same hardware serves the new site).</span>
@@ -445,10 +453,11 @@ export function Settings() {
           <input
             type="number"
             min={0}
+            max={3600}
             step={5}
             className="input"
             value={settings.exitGracePeriodSeconds}
-            onChange={(e) => setSettings({ ...settings, exitGracePeriodSeconds: Math.max(0, Number(e.target.value) || 0) })}
+            onChange={(e) => setSettings({ ...settings, exitGracePeriodSeconds: Math.min(3600, Math.max(0, Number(e.target.value) || 0)) })}
           />
           <p className="text-[11px] text-gray-500 mt-1">
             After a car exits, ignore fresh <strong>entry</strong> reads of the same plate for this long.

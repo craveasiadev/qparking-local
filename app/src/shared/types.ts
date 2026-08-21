@@ -13,6 +13,7 @@ export * from "./schema";
 
 import type {
 	SeasonPass,
+	BlockedPlate,
 	CloudCustomer,
 	CloudVehicle,
 	AppSettings,
@@ -276,7 +277,10 @@ export interface BridgeApi {
 	pingCamera(cameraId: number): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
 	/** Probe reachability by host:port directly — lets "Test connection" run
 	 *  against the form values before the camera is saved. */
-	pingCameraHost(input: { host: string; port?: number }): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }>;
+	/** `ok` means the device ANSWERED, not that the answer was 2xx — any HTTP reply
+	 *  proves it is on the network, which is the only thing this probe establishes.
+	 *  `needsAuth` marks a 401/403/login-redirect: reachable, but not open. */
+	pingCameraHost(input: { host: string; port?: number }): Promise<{ ok: boolean; status?: number; latencyMs?: number; needsAuth?: boolean; error?: string }>;
 	/** Kill and respawn every live video feed, and re-attempt any barrier handle
 	 *  that never came up — what the Live display's "Refresh cameras" button does
 	 *  before it remounts its tiles. `feeds` is how many are running afterwards.
@@ -407,6 +411,9 @@ export interface BridgeApi {
 	 *  vehicle registry the Vehicles page displays: refreshing the badges without
 	 *  this left the barrier working off a stale ban list. */
 	syncBlockedPlatesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+	/** All banned plates cached locally — the Admit box reads this to show a
+	 *  plate's ban state before staff press Admit. */
+	listBlockedPlates(): Promise<BlockedPlate[]>;
 	/** Today's entry count and takings, aggregated in SQL over the whole table.
 	 *  Bounds are the GMT+8 calendar day expressed as UTC instants — use
 	 *  appTzDayStartUtc / appTzDayEndUtc from renderer/lib/datetime. Revenue comes
@@ -463,6 +470,9 @@ export interface BridgeApi {
 		changed?: boolean;
 		candidateSite?: { id: string; name: string };
 		boundSite?: { id: string; name: string } | null;
+		/** Cars still on site right now — a rebind will wipe them; shown in the
+		 *  confirm dialog as a warning (does not block the rebind). */
+		openSessions?: number;
 		error?: string;
 	}>;
 	/** Commit a re-provision: persist the new credentials, wipe the old site's

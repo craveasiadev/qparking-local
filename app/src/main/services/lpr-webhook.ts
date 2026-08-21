@@ -188,12 +188,34 @@ const servers = new Map<number, { server: http.Server; sockets: Set<import('node
 // every single vehicle pass, so this is the difference between "a warning you
 // can see" and "an Activity Log with nothing else left in it".
 const REJECT_REPORT_WINDOW_MS = 10 * 60_000;
-const lastRejectReportAt = new Map<number, number>();
+const lastRejectReportAt = new Map<string, number>();
 
-function shouldReportRejection(cameraId: number): boolean {
-  const last = lastRejectReportAt.get(cameraId) ?? 0;
+/**
+ * One audit row per SOURCE per window.
+ *
+ * Keyed by a string, not a camera id, because the id is not always the thing that
+ * distinguishes one problem from another. An unregistered camera has no id at all,
+ * so every unknown source used to share the single sentinel key `-1` — and during
+ * the exact scenario the unknown_camera message describes (a second camera added,
+ * both now having to match by IP) two misconfigured cameras produced ONE report
+ * per ten minutes between them. The operator fixed whichever got reported and
+ * never learned about the other.
+ *
+ * A registered camera still throttles per camera; an unknown one throttles per
+ * remote IP, so each misconfigured device gets its own row.
+ */
+function shouldReportRejection(key: string): boolean {
+  const last = lastRejectReportAt.get(key) ?? 0;
   if (Date.now() - last < REJECT_REPORT_WINDOW_MS) return false;
-  lastRejectReportAt.set(cameraId, Date.now());
+  lastRejectReportAt.set(key, Date.now());
+  // A long-running box must not accumulate one entry per IP that ever probed the
+  // port. Cheap: only walks the map once it is already large.
+  if (lastRejectReportAt.size > 200) {
+    const cutoff = Date.now() - REJECT_REPORT_WINDOW_MS;
+    for (const [k, at] of lastRejectReportAt) {
+      if (at < cutoff) lastRejectReportAt.delete(k);
+    }
+  }
   return true;
 }
 
@@ -479,7 +501,7 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
     // an exit camera and both must now match by IP, and any mismatch starts
     // dropping reads without a word.
     const known = listCameras().map((c) => `${c.name}=${c.host || 'no host set'}`).join(', ') || 'none registered';
-    if (shouldReportRejection(-1)) {
+    if (shouldReportRejection(`unknown:${remoteIp || extracted.ipaddr || '?'}`)) {
       lprEvents.emit('webhook-rejected', {
         cameraId: null,
         cameraName: null,
@@ -501,7 +523,7 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
   if (!camera.enabled) {
     // Same reasoning as unknown_camera: a disabled camera silently swallowed
     // every read, and "disabled" is easy to forget after a bit of testing.
-    if (shouldReportRejection(camera.id)) {
+    if (shouldReportRejection(`camera:${camera.id}`)) {
       lprEvents.emit('webhook-rejected', {
         cameraId: camera.id,
         cameraName: camera.name,
@@ -524,7 +546,7 @@ async function handleEvent(req: http.IncomingMessage, res: http.ServerResponse) 
       // side only (its reads are being dropped) or something on the LAN probing
       // the port. THROTTLED per camera: a misconfigured camera retries on every
       // pass, and a flood would bury the log it's trying to warn you through.
-      if (shouldReportRejection(camera.id)) {
+      if (shouldReportRejection(`camera:${camera.id}`)) {
         lprEvents.emit('webhook-rejected', {
           cameraId: camera.id,
           cameraName: camera.name,

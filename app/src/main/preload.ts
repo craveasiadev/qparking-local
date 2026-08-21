@@ -104,6 +104,7 @@ const api: BridgeApi = {
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
   syncSeasonPassesNow: () => ipcRenderer.invoke('season-passes:sync'),
   syncBlockedPlatesNow: () => ipcRenderer.invoke('blocked-plates:sync'),
+  listBlockedPlates: () => ipcRenderer.invoke('blocked-plates:list'),
   dayTotals: (opts: { dayStartUtc: string; dayEndUtc: string }) => ipcRenderer.invoke('sessions:day-totals', opts),
   listCloudCustomers: () => ipcRenderer.invoke('cloud-customers:list'),
   syncCloudCustomersNow: () => ipcRenderer.invoke('cloud-customers:sync'),

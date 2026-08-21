@@ -274,6 +274,7 @@ try {
     mkPlatePass('p-lapsed-b', 'REN0012', { passType: 'free_access', isFree: true }),
     mkPlatePass('p-renew', 'REN0012', { startDate: '2026-08-01', endDate: '2026-08-31' }),
     mkPlatePass('p-full', 'FULL0013', { endDate: '2026-12-31' }),
+    mkPlatePass('p-head', 'HEAD0014', { startDate: '2026-08-01', endDate: '2026-08-31' }),
   ]);
 
   const pendings = [];
@@ -319,6 +320,20 @@ try {
   driveExit('FULL0013', '2026-07-31T02:00:00.000Z', '2026-08-01T04:00:00.000Z');
   check('pass covering exit: free exit unchanged',
     completed.some((c) => c.passId === 'p-full' && c.outcome === 'free') && !db.findOpenSessionByPlate('FULL0013'));
+
+  // PASS HEAD (B1): the mirror of the lapsed tail — a pass that STARTS mid-stay.
+  // Entry 31 Jul 10:00 MYT (before the pass begins), exit 1 Aug 12:00 MYT
+  // (covered). The uncovered head = entry → 1 Aug 00:00 MYT = 840 min → RM5
+  // first hour + 13×RM3 = RM44. The full 26h stay would be RM80 and a free exit
+  // RM0, so RM44 proves only the head is billed and the covered remainder waived.
+  driveExit('HEAD0014', '2026-07-31T02:00:00.000Z', '2026-08-01T04:00:00.000Z');
+  const head = pendings.find((p) => p.session.plate === 'HEAD0014');
+  check('pass begins mid-stay: exit is NOT free (the head goes to payment)',
+    !!head && !completed.some((c) => c.reason?.startsWith('pass-') && c.sessionId === head?.session.id));
+  check('pass begins mid-stay: only the uncovered head is billed (RM44, not RM80)',
+    head?.feeCents === 4400, `feeCents=${head?.feeCents}`);
+  check('pass begins mid-stay: audit duration stays the full stay (1560min)',
+    head?.durationMinutes === 1560, `duration=${head?.durationMinutes}`);
 
   // ─── pass-holders-only access mode (2026-08-05) ──────────────────────────
   // A 'pass_only' camera asks ONE question at both ends: does this plate hold a
@@ -895,6 +910,48 @@ try {
   check('cloud pull: a row with no access_mode defaults to open (fail-open)',
     legacy?.accessMode === 'open',
     JSON.stringify({ a: legacy?.accessMode }));
+
+  // ─── C1: a disabled lane acts on nothing (both directions) ───────────────
+  {
+    const offWarns = [];
+    flow.parkingEvents.on('warning', (p) => { if (p && p.kind === 'lane-disabled') offWarns.push(p); });
+    const offLane = db.upsertLane({ name: 'L-OFF', policyId: null, terminalId: null, enabled: true });
+    const offIn = db.upsertCamera({
+      name: 'OFF-IN', laneId: offLane.id, direction: 'entry', host: '10.0.9.1',
+      deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
+    });
+    const offOut = db.upsertCamera({
+      name: 'OFF-OUT', laneId: offLane.id, direction: 'exit', host: '10.0.9.2',
+      deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
+    });
+    const fire = (camId, plate, direction) => lprEvents.emit('plate', {
+      cameraId: camId, plate, confidence: 1, imagePath: null,
+      timestamp: new Date().toISOString(), direction,
+    });
+
+    // Baseline: while ENABLED an entry read opens a session (so the block below
+    // proves the DISABLE, not a broken fixture).
+    fire(offIn.id, 'LANEOFF1', 'entry');
+    check('C1 baseline: an enabled lane admits a car', isInside('LANEOFF1'));
+
+    // Disable the lane — a new plate must not be admitted.
+    db.upsertLane({ ...offLane, enabled: false });
+    fire(offIn.id, 'LANEOFF2', 'entry');
+    check('C1: a disabled lane opens NO session on an entry read', !isInside('LANEOFF2'));
+    check('C1: …and emits a lane-disabled warning for that entry',
+      offWarns.some((w) => w.plate === 'LANEOFF2' && w.direction === 'entry'));
+
+    // The car already inside cannot leave on the disabled lane either.
+    fire(offOut.id, 'LANEOFF1', 'exit');
+    check('C1: a disabled lane blocks EXIT too — the stay stays open', isInside('LANEOFF1'));
+    check('C1: …and emits a lane-disabled warning for that exit',
+      offWarns.some((w) => w.plate === 'LANEOFF1' && w.direction === 'exit'));
+
+    // Re-enabling restores normal operation and the car can finally exit.
+    db.upsertLane({ ...offLane, enabled: true });
+    fire(offOut.id, 'LANEOFF1', 'exit');
+    check('C1: re-enabling the lane lets the car exit (session closes)', !isInside('LANEOFF1'));
+  }
 
   out.ok = out.checks.every((c) => c.pass);
 } catch (e) {
