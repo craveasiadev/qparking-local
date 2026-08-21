@@ -2739,6 +2739,21 @@ export function enqueueSync(op: SyncOp, payload: Record<string, unknown>, sessio
 	return Number(info.lastInsertRowid);
 }
 
+/**
+ * Rewrite a queued row's payload in place, keeping its id, attempts and backoff.
+ *
+ * Used by the image split (see splitImagesOff in cloud-queue): a push that timed
+ * out carrying photos has them removed here, so the retry sends the record alone
+ * and the record can land even when the photos cannot. The row keeps its attempt
+ * count on purpose — the split is not a fresh start, it is the same delivery
+ * carrying less.
+ */
+export function replaceSyncPayload(id: number, payload: Record<string, unknown>): void {
+	getDb()
+		.prepare(`UPDATE sync_queue SET payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+		.run(JSON.stringify(payload), id);
+}
+
 export function listDueSync(now = new Date().toISOString(), limit = 25): SyncQueueRow[] {
 	return (getDb().prepare(`SELECT * FROM sync_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id ASC LIMIT ?`).all(now, limit) as any[]).map(
 		rowToSync,

@@ -193,6 +193,61 @@ try {
   const stale = db.attachSessionCapture('CAPTURE02', 'exit', 'C:\\plates\\LATE.jpg', -1);
   check('a capture outside the attach window is refused', stale === null, String(stale?.exitImagePath));
 
+  // ── photos must never hold the parking record hostage ──────────────────
+  // A plate capture is ~500KB of base64 riding inside the record's own JSON, and
+  // the client timeout was one 10s constant for every call. On a slow link the
+  // body could not finish, the WHOLE thing was retried six times, and the record
+  // — the audit trail and the revenue — was abandoned along with the photo.
+  //
+  // Two changes, pinned here: the deadline now scales with what is being carried,
+  // and one timeout splits the photos off so the record goes on alone.
+  const T_BASE = 10_000;
+  check('a payload with no photo keeps the base 10s deadline',
+    queue.__test_timeoutForPayload({ plate_number: 'TMO0001' }) === T_BASE,
+    String(queue.__test_timeoutForPayload({ plate_number: 'TMO0001' })));
+  const small = queue.__test_timeoutForPayload({ plate_number: 'X', entry_image_base64: 'a'.repeat(500 * 1024) });
+  check('~500KB of photo earns a longer one', small > T_BASE && small <= 120_000, `${small}ms`);
+  const both = queue.__test_timeoutForPayload({
+    plate_number: 'X',
+    entry_image_base64: 'a'.repeat(500 * 1024),
+    exit_image_base64: 'b'.repeat(500 * 1024),
+  });
+  check('…and an exit carrying TWO photos earns more again', both > small, `${small}ms → ${both}ms`);
+  check('the deadline is capped, so one row cannot hold the drain open',
+    queue.__test_timeoutForPayload({ entry_image_base64: 'a'.repeat(50 * 1024 * 1024) }) === 120_000);
+
+  // The split. Needs a REAL file: readImageForUpload reads the photo off disk at
+  // enqueue time, so a fixture pointing at a path that does not exist queues a
+  // payload with no image at all and there is nothing to split.
+  const splitJpeg = path.join(tmpDir, 'SPLIT001-entry.jpg');
+  fs.writeFileSync(splitJpeg, Buffer.alloc(120 * 1024, 0x41));   // 120KB stand-in
+  const splitStay = db.createEntrySession('SPLIT001', null, null, splitJpeg);
+  queue.enqueueEntry(db.getSessionById(splitStay.id));
+  const beforeSplit = db.listDueSync(new Date(Date.now() + 60_000).toISOString(), 100)
+    .filter((r) => r.op === 'session.entry' && r.sessionId === splitStay.id);
+  check('precondition: the entry queued as ONE row', beforeSplit.length === 1, `rows=${beforeSplit.length}`);
+
+  const didSplit = queue.__test_splitImagesOff(beforeSplit[0]);
+  const afterSplit = db.listDueSync(new Date(Date.now() + 60_000).toISOString(), 100)
+    .filter((r) => r.sessionId === splitStay.id);
+  const recordRow = afterSplit.find((r) => r.op === 'session.entry');
+  const imageRow = afterSplit.find((r) => r.op === 'session.images');
+  check('a timed-out photo push is split in two', didSplit === true && afterSplit.length === 2,
+    `split=${didSplit} rows=${afterSplit.length}`);
+  check('…the record row keeps its id and loses the photo',
+    recordRow?.id === beforeSplit[0].id && recordRow?.payload.entry_image_base64 === undefined,
+    `id=${recordRow?.id} hasImage=${recordRow?.payload.entry_image_base64 !== undefined}`);
+  check('…the record row keeps what identifies the stay, so it can still land',
+    recordRow?.payload.plate_number === 'SPLIT001' && !!recordRow?.payload.entry_time);
+  check('…the photo row carries the image plus identity, and nothing that could rewrite the record',
+    typeof imageRow?.payload.entry_image_base64 === 'string'
+    && imageRow?.payload.plate_number === 'SPLIT001'
+    && imageRow?.payload.status === undefined
+    && imageRow?.payload.fee_amount === undefined,
+    JSON.stringify(Object.keys(imageRow?.payload ?? {})));
+  check('a payload with no photo is not split (nothing to take off)',
+    queue.__test_splitImagesOff({ ...beforeSplit[0], payload: { plate_number: 'NOPIC' } }) === false);
+
   out.ok = out.checks.every((c) => c.pass);
 } catch (error) {
   out.error = error?.stack ?? String(error);

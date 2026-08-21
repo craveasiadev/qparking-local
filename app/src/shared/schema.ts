@@ -562,6 +562,16 @@ export interface Site {
 
 export type SyncOp =
   | 'session.entry' | 'session.exit' | 'session.update' | 'session.delete'
+  // The PHOTOS for a stay, split off from the record that carries them.
+  //
+  // A plate capture is ~500KB of base64 riding inside the record's own JSON, and
+  // a slow link turned that into a record that could not land at all: the upload
+  // timed out, the whole body was retried, and the parking record — the part that
+  // actually matters — waited on the photo. This op exists so the two can fail
+  // independently. Same endpoint as the others (the cloud upsert matches on
+  // identity and only ever SETS an image path), so nothing new is needed
+  // server-side. See splitImagesOff in cloud-queue.
+  | 'session.images'
   | 'transaction.upsert';
 
 export interface SyncQueueRow {

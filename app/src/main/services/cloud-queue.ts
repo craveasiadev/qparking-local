@@ -13,6 +13,7 @@ import {
 	markSyncOk,
 	markSyncRetry,
 	markSyncFailed,
+	replaceSyncPayload,
 	syncQueueStats,
 	listSyncQueueIssues,
 	getLane,
@@ -22,8 +23,8 @@ import {
 	getCompanySetting,
 	type SyncOp,
 } from "./db";
-import { getCloudApi } from "./cloud-api";
-import type { ParkingSession, Transaction, SyncIssue } from "../../shared/types";
+import { getCloudApi, CLOUD_REQUEST_TIMEOUT_MS } from "./cloud-api";
+import type { ParkingSession, Transaction, SyncIssue, SyncQueueRow } from "../../shared/types";
 
 const BACKOFF_MS = [0, 10_000, 30_000, 120_000, 600_000];
 const MAX_ATTEMPTS = 6;
@@ -50,6 +51,83 @@ export interface SyncStatus {
 	lastSuccessAt: string | null;
 	lastError: string | null;
 	issues: SyncIssue[];
+}
+
+/** The base64 image fields a payload can carry. */
+const IMAGE_FIELDS = ["entry_image_base64", "exit_image_base64"] as const;
+
+/** Bytes of base64 image riding in this payload; 0 when it carries none. */
+function imageBytesIn(payload: Record<string, unknown>): number {
+	let bytes = 0;
+	for (const field of IMAGE_FIELDS) {
+		const value = payload[field];
+		if (typeof value === "string") bytes += value.length;
+	}
+	return bytes;
+}
+
+/**
+ * Deadline for ONE push, scaled to what it is actually carrying.
+ *
+ * The shared client timeout is 10s, which is right for a JSON GET and wrong for
+ * an upload: a plate capture is ~500KB of base64, an exit ships TWO of them, and
+ * on a slow link that body cannot finish inside 10s no matter how healthy both
+ * ends are. The queue then retried the whole megabyte six times and gave up —
+ * spending 6MB to deliver nothing.
+ *
+ * Images get 5s per 100KB on top of the base, capped: a push that cannot finish
+ * in two minutes is not going to, and holding the drain open longer just delays
+ * every row behind it.
+ */
+function timeoutForPayload(payload: Record<string, unknown>): number {
+	const bytes = imageBytesIn(payload);
+	if (bytes === 0) return CLOUD_REQUEST_TIMEOUT_MS;
+	return Math.min(120_000, CLOUD_REQUEST_TIMEOUT_MS + Math.ceil(bytes / 100_000) * 5_000);
+}
+
+/**
+ * Take the photos off a push that timed out carrying them, and queue them
+ * separately.
+ *
+ * The parking record and its photos have completely different worth: the record
+ * is the audit trail and the revenue, the photo is nice to have. Shipping them in
+ * one body meant a photo that could not be uploaded blocked the record too —
+ * retried whole, six times, and then both were abandoned together.
+ *
+ * After ONE timeout the images come off. The row keeps its id, its attempt count
+ * and its backoff, so the retry sends the record alone and it lands. The images
+ * are re-queued as `session.images` — the same endpoint and the same identity
+ * fields, so the cloud attaches them to the same stay whenever it can, and their
+ * own failures no longer cost the record anything.
+ *
+ * The new row carries a distinct op ON PURPOSE: enqueueSync collapses an
+ * identical (op, session, rev), so reusing the original op would have folded the
+ * image row straight back into the row we just stripped.
+ */
+function splitImagesOff(row: SyncQueueRow): boolean {
+	const images: Record<string, unknown> = {};
+	for (const field of IMAGE_FIELDS) {
+		if (typeof row.payload[field] === "string") images[field] = row.payload[field];
+	}
+	if (Object.keys(images).length === 0) return false;
+
+	const withoutImages = { ...row.payload };
+	for (const field of IMAGE_FIELDS) delete withoutImages[field];
+	replaceSyncPayload(row.id, withoutImages);
+
+	// Identity only — enough for the cloud to find the stay it belongs to. Never
+	// status/fee/exit_time: this row must not be able to rewrite the record, only
+	// to hang photos on it.
+	const identity: Record<string, unknown> = {};
+	for (const field of ["site_id", "external_id", "plate_number", "entry_time"]) {
+		if (row.payload[field] !== undefined) identity[field] = row.payload[field];
+	}
+	enqueueSync("session.images", { ...identity, ...images }, row.sessionId, row.sessionRev);
+	console.warn(
+		`[cloud-queue] row ${row.id} (${row.op}) timed out carrying ${Math.round(imageBytesIn(row.payload) / 1024)}KB of photos`
+		+ ` — retrying the record without them and queueing the photos separately`,
+	);
+	return true;
 }
 
 let inFlight = false;
@@ -329,6 +407,11 @@ async function drainOnce(): Promise<void> {
 				lastSuccessAt = new Date().toISOString();
 				lastError = null;
 			} else {
+				// A push that TIMED OUT while carrying photos gets them taken off
+				// before the next attempt, so the record is never held hostage by an
+				// upload. Only on a timeout: a 4xx/5xx is the server rejecting the
+				// record itself, and stripping images would not help it.
+				if (result.timedOut) splitImagesOff(row);
 				const nextAttempt = row.attempts + 1;
 				if (nextAttempt >= MAX_ATTEMPTS) {
 					markSyncFailed(row.id, result.error || "unknown_error");
@@ -349,7 +432,10 @@ async function drainOnce(): Promise<void> {
 	}
 }
 
-async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; status?: number }> {
+async function sendParkingRecord(
+	op: SyncOp,
+	payload: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string; status?: number; timedOut?: boolean }> {
 	const cloud = getCloudApi();
 	if (!cloud) return { ok: false, error: "qparking_not_configured" };
 	// Transactions have their own endpoint (the payment ledger). All session ops
@@ -359,7 +445,7 @@ async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): 
 	// recognises as "soft-delete this record".
 	if (op === "transaction.upsert") {
 		try {
-			const response = await cloud.post("/transactions/upsert", payload);
+			const response = await cloud.post("/transactions/upsert", payload, { timeout: timeoutForPayload(payload) });
 			return { ok: true, status: response.status };
 		} catch (error: any) {
 			if (axios.isAxiosError(error) && error.response) {
@@ -368,12 +454,12 @@ async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): 
 				return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
 			}
 			const isTimeout = axios.isAxiosError(error) && error.code === "ECONNABORTED";
-			return { ok: false, error: isTimeout ? "timeout (10s)" : (error?.message ?? String(error)) };
+			return { ok: false, timedOut: isTimeout, error: isTimeout ? `timeout (${Math.round(timeoutForPayload(payload) / 1000)}s)` : (error?.message ?? String(error)) };
 		}
 	}
 	const body = op === "session.delete" ? { ...payload, _delete: true } : payload;
 	try {
-		const response = await cloud.post("/parking-records/upsert", body);
+		const response = await cloud.post("/parking-records/upsert", body, { timeout: timeoutForPayload(body) });
 		return { ok: true, status: response.status };
 	} catch (error: any) {
 		if (axios.isAxiosError(error) && error.response) {
@@ -382,9 +468,15 @@ async function sendParkingRecord(op: SyncOp, payload: Record<string, unknown>): 
 			return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
 		}
 		const isTimeout = axios.isAxiosError(error) && error.code === "ECONNABORTED";
-		return { ok: false, error: isTimeout ? "timeout (10s)" : (error?.message ?? String(error)) };
+		return { ok: false, timedOut: isTimeout, error: isTimeout ? `timeout (${Math.round(timeoutForPayload(body) / 1000)}s)` : (error?.message ?? String(error)) };
 	}
 }
+
+// Exposed for tools/session-sync-check: both are pure decisions about a payload,
+// and the money-relevant half of this module is exactly those decisions. Prefixed
+// so nothing in the app is tempted to call them.
+export const __test_timeoutForPayload = timeoutForPayload;
+export const __test_splitImagesOff = splitImagesOff;
 
 /** Manual drain — called when operator hits "Retry now" on the dashboard. */
 export async function drainNow(): Promise<SyncStatus> {
