@@ -2271,6 +2271,46 @@ export function updateSessionFields(
 	return getSessionById(sessionId);
 }
 
+/**
+ * Today's figures, aggregated in SQL over the WHOLE table.
+ *
+ * The Dashboard used to derive these by filtering `listRecentSessions(20)` in
+ * React, which capped both at twenty and — because that list is ordered by
+ * entry_at — silently dropped a car that entered yesterday and paid on the way
+ * out this morning as soon as twenty newer cars arrived.
+ *
+ * Revenue comes from the TRANSACTIONS ledger, not sessions.fee_cents: the schema
+ * calls the ledger the authoritative record of whether money moved, and it is the
+ * only source that stays correct when a stay collected more than one payment or
+ * had an attempt voided. Keyed on when the money moved
+ * (payment_timestamp, falling back to created_at), not on the exit.
+ *
+ * `dayStartUtc` / `dayEndUtc` are the GMT+8 calendar day expressed as UTC
+ * instants — the caller owns the timezone, because the renderer already has the
+ * helpers for it (see renderer/lib/datetime appTzDayStartUtc).
+ */
+export function dayTotals(dayStartUtc: string, dayEndUtc: string): { entries: number; revenueCents: number; paidCount: number } {
+	const db = getDb();
+	const entries = (
+		db
+			.prepare(`SELECT COUNT(*) AS c FROM sessions WHERE datetime(entry_at) >= datetime(?) AND datetime(entry_at) < datetime(?)`)
+			.get(dayStartUtc, dayEndUtc) as any
+	).c as number;
+	// datetime() normalises the two stored shapes (ISO '…Z' on payment_timestamp,
+	// 'YYYY-MM-DD HH:MM:SS' on created_at) so both compare in the same UTC format
+	// — the same normalisation transactionFilter already uses.
+	const paid = db
+		.prepare(
+			`SELECT COALESCE(SUM(amount_cents), 0) AS total, COUNT(*) AS n
+         FROM transactions
+        WHERE status = 'paid'
+          AND datetime(COALESCE(payment_timestamp, created_at)) >= datetime(?)
+          AND datetime(COALESCE(payment_timestamp, created_at)) <  datetime(?)`,
+		)
+		.get(dayStartUtc, dayEndUtc) as any;
+	return { entries, revenueCents: Number(paid?.total ?? 0), paidCount: Number(paid?.n ?? 0) };
+}
+
 export function listOpenSessions(): ParkingSession[] {
 	return (getDb().prepare("SELECT * FROM sessions WHERE exit_at IS NULL ORDER BY entry_at DESC").all() as any[]).map(rowToSession);
 }
@@ -3611,7 +3651,17 @@ export function countPassPlatesInside(passId: string, excludePlate: string): num
     FROM sessions s
     WHERE s.status = 'entered'
       AND s.plate <> @excludePlate
-      AND s.plate IN (SELECT plate_number FROM season_passes WHERE pass_id = @passId)
+      AND (
+        -- The stay this box ADMITTED on the pass. Load-bearing for near-miss
+        -- admissions: those are stored under the plate the camera READ, not the
+        -- pass's plate (deliberately — the exit camera will misread it the same
+        -- way), so the plate test below cannot see them. Without this the quota
+        -- was bypassable exactly as parking-flow's comment feared: one dropped
+        -- character got a car in, the count came back 0, and the holder's next
+        -- car was admitted too — two cars inside on a one-bay pass.
+        s.pass_id = @passId
+        OR s.plate IN (SELECT plate_number FROM season_passes WHERE pass_id = @passId)
+      )
   `,
 		)
 		.get({ passId, excludePlate: canonicalPlate(excludePlate) }) as any;

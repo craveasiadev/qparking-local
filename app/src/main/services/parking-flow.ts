@@ -671,8 +671,6 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     feeCents = minCharge;
   }
 
-  parkingEvents.emit('exit-pending', { session, lane, policy, durationMinutes, feeCents, event });
-
   if (feeCents === 0) {
     // Genuinely free — no rate configured, OR duration within freeMinutes,
     // OR lane has no policy. Gate opens immediately; no terminal call is
@@ -731,6 +729,21 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
     parkingEvents.emit('warning', { kind: 'exit-busy', laneId: lane.id });
     return;
   }
+
+  // Put the fare on the lane's panel — AFTER both busy guards, never before.
+  //
+  // This used to fire the moment the fee was computed, which meant a second car
+  // pulling up behind one that was mid-charge repainted the glass with ITS plate
+  // and ITS fare, in front of a driver who was already being asked to tap. The
+  // read was then dropped by the guard below, but the damage was done: the LCD
+  // deliberately does NOT clear on 'exit-busy', on the grounds that "the fare on
+  // the glass belongs to that car" — and by then it didn't.
+  //
+  // A zero-fee exit no longer emits this at all, and doesn't need to: with no
+  // fare recorded as shown, lcd-display's exit-completed handler falls into
+  // showFreeThenThankYou, which paints FREE and then THANK YOU — the same two
+  // screens, in the same order, as when the fare was announced first.
+  parkingEvents.emit('exit-pending', { session, lane, policy, durationMinutes, feeCents, event });
 
   const markInFlight = () => exitsInFlight.set(lane.id, {
     sessionId: session.id, plate: event.plate, laneId: lane.id,
@@ -1419,6 +1432,87 @@ function priceBillingCycle(
 }
 
 /**
+ * A stored timestamp as an instant, honouring this schema's storage convention.
+ *
+ * Two shapes live in these columns: proper ISO with a zone ('…Z', written by
+ * createEntrySession and recordExit) and a bare 'YYYY-MM-DD HH:MM:SS' from an
+ * older CURRENT_TIMESTAMP default. The convention is that BOTH are UTC — but
+ * Date.parse reads the bare one as LOCAL time, which on this box (pinned to
+ * GMT+8, see tz.ts) puts it 8 hours out. Same normalisation the renderer already
+ * does in lib/datetime.toDate, so the two sides agree on what a row means.
+ */
+function parseStoredInstant(value: string | null | undefined): number {
+  if (!value) return NaN;
+  let text = value.trim();
+  const hasZone = /[zZ]$|[+-]\d\d:?\d\d$/.test(text);
+  if (!hasZone) {
+    text = text.replace(' ', 'T');
+    if (text.includes('T')) text += 'Z';
+  }
+  return Date.parse(text);
+}
+
+/**
+ * May an operator's session edit rewrite the FEE?
+ *
+ * The admin editor used to re-price on every edit that left an exit time in
+ * place, which meant adding a note to a pass-free exit turned RM 0.00 into a full
+ * transient fare — with payment_status still 'free' and free_reason still
+ * 'pass-resident' — and pushed that pair to the cloud as collected revenue. On a
+ * manual_release, whose fee_cents is NULL because nothing ever priced it, the same
+ * edit invented a charge on a car that was deliberately waived.
+ *
+ * Duration is NOT governed by this: it is a fact derived from the two timestamps
+ * and always follows them. Only money is gated.
+ *
+ * Two conditions, and both must hold:
+ *   - a time actually MOVED. Compared as instants, because entry_at exists in two
+ *     shapes across this schema's history (ISO '…Z' from createEntrySession,
+ *     'YYYY-MM-DD HH:MM:SS' from an older CURRENT_TIMESTAMP default) and a string
+ *     compare reads the same moment as a change.
+ *   - the stay is NOT settled. 'paid' (money taken), 'free' (a pass or the rate
+ *     covered it) and 'manual_release' are all closed questions. The operator rule
+ *     is explicit on the last one: a manual release is never a payment — if a fare
+ *     is owed, the retrigger collects it.
+ *
+ * `policyIdOverride` bypasses both, because it IS the editor's explicit
+ * "what would this cost under plan X" signal.
+ */
+export function shouldRepriceEditedSession(input: {
+  /** entryAt as supplied by the patch, or undefined when not being edited. */
+  patchEntryAt?: string;
+  /** exitAt as supplied by the patch; undefined = untouched, null = cleared. */
+  patchExitAt?: string | null;
+  patchPolicyIdOverride?: string | null;
+  /** The stay's values BEFORE this edit. */
+  entryAtBefore: string;
+  exitAtBefore: string | null;
+  /** payment_status as it will stand AFTER the edit. */
+  paymentStatusAfter: ParkingSession['paymentStatus'];
+}): boolean {
+  if (input.patchPolicyIdOverride) return true;
+
+  const movedInstant = (next: string | null | undefined, before: string | null): boolean => {
+    if (next === undefined) return false;
+    const after = parseStoredInstant(next);
+    const prior = parseStoredInstant(before);
+    // Either side unparseable (or absent) — fall back to a plain comparison
+    // rather than silently calling it "unchanged".
+    if (Number.isNaN(after) || Number.isNaN(prior)) return (next ?? null) !== before;
+    return after !== prior;
+  };
+
+  const timesMoved = movedInstant(input.patchEntryAt, input.entryAtBefore)
+    || movedInstant(input.patchExitAt, input.exitAtBefore);
+  if (!timesMoved) return false;
+
+  const settled = input.paymentStatusAfter === 'paid'
+    || input.paymentStatusAfter === 'free'
+    || input.paymentStatusAfter === 'manual_release';
+  return !settled;
+}
+
+/**
  * "Test price" — compute what a given rate plan (policy) would charge for an
  * explicit entry→exit window, without needing a live session. Mirrors the
  * qparking SaaS "Test a price" simulator so an operator can confirm the gate
@@ -1525,10 +1619,17 @@ export function retriggerSessionExit(sessionId: number, laneOverride?: number | 
     return { ok: false, error: `lane "${lane.name}" has no payment device wired — attach one in Lanes` };
   }
 
-  // Pick any enabled camera on that lane so laneForCamera() can resolve it
-  // back to the same lane during the synthesized event dispatch.
-  const cam = listCameras().find((c) => c.laneId === laneId && c.enabled);
-  if (!cam) return { ok: false, error: `no enabled camera on lane "${lane.name}" — the parking-flow uses the camera to look up the lane` };
+  // The EXIT-facing camera on that lane, and only that one.
+  //
+  // This used to take any enabled camera on the lane. Routing was still correct
+  // (the synthesized event forces direction 'exit'), but the cameraId rides along
+  // to pulseBarrierFor, which uses it to choose WHICH RELAY to pulse — and
+  // listCameras() is ordered by id, so on a lane holding both cameras it grabbed
+  // the entry one. A driver who had just paid on a retrigger sat at a closed exit
+  // boom while the entry boom lifted behind them. Same rule, same reason, as
+  // simulateExitAt: see laneCameraFacing.
+  const cam = laneCameraFacing(laneId, 'exit');
+  if (!cam) return { ok: false, error: laneCannotServe(laneId, lane.name, 'exit') };
 
   flog(`RETRIGGER: session=${sessionId} plate=${session.plate} lane=${lane.name} terminal=${lane.terminalId} — synthesizing exit LPR event`);
   const event: PlateEvent = {
@@ -1575,7 +1676,7 @@ export function retriggerSessionExitByPlate(plate: string, laneId?: number | nul
  * real exit through the entry camera, closing sessions and pulsing the entry boom
  * at a gate a car physically cannot leave through.
  */
-function laneCameraFacing(laneId: number, direction: 'entry' | 'exit') {
+export function laneCameraFacing(laneId: number, direction: 'entry' | 'exit') {
   return listCameras().find(
     (c) => c.laneId === laneId && c.enabled && c.direction === direction,
   ) ?? null;

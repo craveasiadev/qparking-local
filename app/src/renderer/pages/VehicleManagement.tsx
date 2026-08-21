@@ -25,9 +25,17 @@ const PAGE_SIZE = 20;
  * it blocked, is it paid for?" — and it is now answered in one row.
  *
  * This is also the operator-facing home of the BLACKLIST: the Blocked filter
- * lists every banned plate with its reason. Enforcement itself doesn't read this
- * table — the gate uses the leaner blocked_plates list, refreshed on the 60s
- * tick — but both derive from the same cloud `vehicles.is_blacklisted` column.
+ * lists every banned plate with its reason. Enforcement reads a DIFFERENT table —
+ * the leaner `blocked_plates` list — though both derive from the same cloud
+ * `vehicles.is_blacklisted` column.
+ *
+ * That split used to be a trap. `blocked_plates` is on no background tick (the
+ * "60s tick" this comment claimed does not exist), and this page's Sync button
+ * pulled only the vehicle registry and the pass roster — so pressing it
+ * refreshed the red Blocked badges you see here while leaving the list the
+ * BARRIER enforces on untouched. The UI showed a ban that was not being applied.
+ * The sync below now pulls all three together, so what this page shows and what
+ * the gate stops are always the same answer.
  *
  * A plate may appear with NO pass (registered, nothing bought) and a pass may
  * cover several plates, so each of its plates carries the same pass detail. The
@@ -69,24 +77,26 @@ export function VehicleManagement() {
 
   const today = todayInAppTz();
 
-  // These directories are deliberately NOT on the background sync tick (they
-  // feed lookups, never a gate decision), so the button is the main way to
-  // freshen them.
+  // The registry and the roster are lookup caches, not gate inputs, so neither is
+  // on the background tick and this button is the main way to freshen them. The
+  // DENY LIST is different — it IS a gate input — and it is pulled here too,
+  // because refreshing the badges without it is worse than not refreshing at all:
+  // the operator sees a ban applied that the barrier has never heard of.
   const [syncFromCloud, syncing] = useAsyncAction(async () => {
-    // Two caches feed this page and they are refreshed separately, so pull both
-    // — otherwise a freshened registry sits next to a stale pass roster.
-    const [vehicleResult, passResult] = await Promise.all([
+    const [vehicleResult, passResult, blockedResult] = await Promise.all([
       window.bridge.syncCloudVehiclesNow(),
       window.bridge.syncSeasonPassesNow(),
+      window.bridge.syncBlockedPlatesNow(),
     ]);
-    if (vehicleResult.ok && passResult.ok) {
-      toast({ tone: 'success', title: `Fetched ${vehicleResult.fetched} vehicle(s) and ${passResult.fetched} pass row(s)` });
-    } else {
+    const failure = [vehicleResult, passResult, blockedResult].find((r) => !r.ok);
+    if (!failure) {
       toast({
-        tone: 'error',
-        title: 'Sync failed',
-        detail: String(vehicleResult.error ?? passResult.error),
+        tone: 'success',
+        title: `Fetched ${vehicleResult.fetched} vehicle(s), ${passResult.fetched} pass row(s) and ${blockedResult.fetched} blocked plate(s)`,
+        detail: 'The gate is now enforcing this deny list.',
       });
+    } else {
+      toast({ tone: 'error', title: 'Sync failed', detail: String(failure.error) });
     }
     await load();
   });

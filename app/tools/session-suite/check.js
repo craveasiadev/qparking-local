@@ -581,9 +581,28 @@ async function main() {
     flow.retriggerSessionExit(noDevice.id).error);
 
   const noCamera = open('DDD0005', L.noCam.id, null, ENTRY);
-  check('D7 retrigger on a lane with no enabled camera is refused',
-    /no enabled camera/.test(flow.retriggerSessionExit(noCamera.id).error ?? ''),
+  // The refusal now comes from laneCannotServe, which distinguishes "no camera at
+  // all" from "wired the other way round" — different faults, different remedies.
+  check('D7 retrigger on a lane with no camera is refused, and says so',
+    /has no camera/.test(flow.retriggerSessionExit(noCamera.id).error ?? ''),
     flow.retriggerSessionExit(noCamera.id).error);
+
+  // ── D7b · the retrigger needs an EXIT-facing camera ───────────────────
+  // It used to take any enabled camera on the lane. Routing was fine (the
+  // synthesized event forces 'exit'), but the cameraId rides along to
+  // pulseBarrierFor and picks WHICH RELAY fires — and listCameras() is ordered by
+  // id, so on a lane holding both it grabbed the ENTRY one. A driver who had just
+  // paid sat at a closed exit boom while the entry boom lifted behind them.
+  const entryOnlyLane = db.upsertLane({ name: 'L-ENTRYONLY', policyId: 'charge', terminalId: terminal.id, enabled: true });
+  db.upsertCamera({
+    name: 'C-EO-IN', laneId: entryOnlyLane.id, direction: 'entry', host: '10.1.0.16',
+    deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
+  });
+  const entryOnlyStay = open('DDD0009', entryOnlyLane.id, null, RETRIGGER_ENTRY);
+  const entryOnlyRes = flow.retriggerSessionExit(entryOnlyStay.id, entryOnlyLane.id);
+  check('D7b retrigger on an ENTRY-only lane is refused, not run through the entry camera',
+    entryOnlyRes.ok === false && /wired for entry/.test(entryOnlyRes.error ?? ''),
+    JSON.stringify(entryOnlyRes));
 
   payScript = APPROVE();
   const retry = open('DDD0006', L.paid.id, C.paidIn.id, RETRIGGER_ENTRY);
@@ -596,6 +615,12 @@ async function main() {
   check('D8b …priced from the session entry to now (RM11 for a 3h stay)',
     retryRow.feeCents === RETRIGGER_FEE && retryRow.durationMinutes === 180,
     `${retryRow.feeCents}c/${retryRow.durationMinutes}min`);
+  // The camera recorded on the exit is the one whose relay was pulsed. L-PAID
+  // holds both, and the entry camera has the lower id, so pre-fix this was
+  // C-PAID-IN — the wrong boom for a car that has just paid to leave.
+  check('D8c …and the exit is recorded against the EXIT camera, so the right boom opens',
+    retryRow.exitCameraId === C.paidOut.id,
+    `exitCameraId=${retryRow.exitCameraId} (entry cam is ${C.paidIn.id}, exit cam is ${C.paidOut.id})`);
 
   check('D9 retriggerSessionExitByPlate with an unreadable plate → plate_required',
     flow.retriggerSessionExitByPlate('--').error === 'plate_required');
@@ -843,6 +868,34 @@ async function main() {
     sim.ok && sim.feeCents === FULL_FEE && sim.durationMinutes === 240, JSON.stringify(sim));
   check('H6 …and agrees with the gate on the duration',
     flow.stayDurationMinutes(ENTRY, EXIT) === sim.durationMinutes);
+  // ── H8-H13 · what an operator edit may do to the FEE ──────────────────
+  // The admin editor re-priced on ANY edit that left an exit time in place, so
+  // adding a note to a pass-free exit turned RM 0 into a full transient fare with
+  // free_reason still saying 'pass-resident' — and pushed that to the cloud as
+  // revenue. Duration still follows the timestamps; only money is gated.
+  const REPRICE = (over) => flow.shouldRepriceEditedSession({
+    entryAtBefore: ENTRY, exitAtBefore: EXIT, paymentStatusAfter: 'pending', ...over,
+  });
+  check('H8 a note-only edit never re-prices (nothing moved)',
+    REPRICE({}) === false);
+  check('H9 moving a time on an unsettled stay DOES re-price',
+    REPRICE({ patchEntryAt: '2026-08-10T01:00:00.000Z' }) === true);
+  check('H10 …but never on a pass-free exit — the pass decided the fare',
+    REPRICE({ patchEntryAt: '2026-08-10T01:00:00.000Z', paymentStatusAfter: 'free' }) === false);
+  check('H11 …nor on a manual release, which is never a payment',
+    REPRICE({ patchExitAt: '2026-08-10T07:00:00.000Z', paymentStatusAfter: 'manual_release' }) === false);
+  check('H12 …nor on a stay already paid for',
+    REPRICE({ patchExitAt: '2026-08-10T07:00:00.000Z', paymentStatusAfter: 'paid' }) === false);
+  check('H13 an explicit policy override re-prices whatever the status',
+    REPRICE({ patchPolicyIdOverride: 'charge', paymentStatusAfter: 'free' }) === true);
+  // The same instant in the two shapes this schema has stored over its life must
+  // not read as a change — a string compare said it did.
+  check('H14 the same moment in a different timestamp shape is not a move',
+    flow.shouldRepriceEditedSession({
+      patchEntryAt: '2026-08-10T02:00:00.000Z',
+      entryAtBefore: '2026-08-10 02:00:00', exitAtBefore: EXIT, paymentStatusAfter: 'pending',
+    }) === false);
+
   check('H7 the recorded duration on the paid exit matches that rule',
     db.getSessionById(paid.id).durationMinutes === 240, db.getSessionById(paid.id).durationMinutes);
 
@@ -930,6 +983,27 @@ async function main() {
     !!nearSession && nearSession.plate === 'NEAR123', `plate=${nearSession?.plate}`);
   check('I4g …and it records the pass that admitted it, so the exit need not re-guess',
     nearSession?.passId === 'p-near', `passId=${nearSession?.passId}`);
+
+  // ── the near-miss stay must CONSUME its pass's slot ────────────────────
+  // countPassPlatesInside used to match only on the pass's plate list, and a
+  // near-miss stay is stored under the plate the camera READ — so it was
+  // invisible to the quota. One dropped character got a car in, the count came
+  // back 0, and the holder's next car was admitted too: two cars inside on a
+  // one-bay pass, which is exactly what the quota exists to stop.
+  check('I4g2 a near-miss stay consumes the pass slot it was admitted on',
+    db.countPassPlatesInside('p-near', 'NEAR1234') === 1,
+    `inside=${db.countPassPlatesInside('p-near', 'NEAR1234')}`);
+  // concurrent_limit is 1 on this roster row, so the holder's REAL plate is now
+  // refused while the misread stay is still inside.
+  await flow.simulateEntryAt(simPassLane.id, 'NEAR1234', ENTRY);
+  await tick(12);
+  check('I4g3 …so the holder\'s exact plate is refused while it is inside',
+    !inside('NEAR1234') && ev.warning.some((w) => w.kind === 'entry-quota-full' && w.plate === 'NEAR1234'),
+    `inside=${inside('NEAR1234')}`);
+  // Rescan of the car that IS inside must never consume a second slot.
+  check('I4g4 …while a rescan of the car already inside still counts as one',
+    db.countPassPlatesInside('p-near', 'NEAR123') === 0,
+    `inside=${db.countPassPlatesInside('p-near', 'NEAR123')}`);
 
   // The exit honours the recorded entitlement even though the plate still matches
   // no pass — and must NOT charge the holder we already let in.

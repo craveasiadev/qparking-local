@@ -80,7 +80,11 @@ const PUSH_GROUP_LABELS: Record<string, string> = {
 };
 
 /** A downloadable build artifact offered by the update endpoint. */
-interface UpdateArtifact { filename: string; size: number | null; url: string }
+// `sha256` was missing from this mirror of app-update.ts's BuildVariantMeta,
+// which is a large part of why the digest went unused for so long: the cloud sent
+// it, downloadUpdate computed its own, and the UI type could not even see the
+// field to compare them.
+interface UpdateArtifact { filename: string; size: number | null; sha256: string | null; url: string }
 
 /** Result of the last "Check for updates" call, stamped with checkedAt. */
 interface UpdateCheckReport {
@@ -235,6 +239,11 @@ export function Settings() {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckReport | null>(null);
   const [downloadProgressPct, setDownloadProgressPct] = useState<number | null>(null);
   const [downloadedUpdatePath, setDownloadedUpdatePath] = useState<string | null>(null);
+  // The digest the cloud published for the build we downloaded, kept so apply
+  // can re-check the file that is actually on disk — and a flag for the case the
+  // cloud published nothing, which must be said out loud rather than assumed OK.
+  const [downloadedUpdateSha, setDownloadedUpdateSha] = useState<string | null>(null);
+  const [downloadedUpdateVerified, setDownloadedUpdateVerified] = useState(true);
 
   // Subscribe to streaming download-progress events from the main process.
   useEffect(() => {
@@ -253,16 +262,34 @@ export function Settings() {
 
   const [runUpdateDownload, downloadingUpdate] = useAsyncAction(async (variant: 'portable' | 'installer') => {
     setDownloadProgressPct(0);
-    const result = await window.bridge.appUpdateDownload({ variant });
-    if (result.ok && result.path) setDownloadedUpdatePath(result.path);
-    else setUpdateCheck((prev) => ({ ...(prev ?? {}), error: result.error ?? 'download_failed' }));
+    // The check step already handed us the digest the cloud published for this
+    // variant, so it rides along and the download is verified against it rather
+    // than trusted on arrival.
+    const expectedSha256 = (variant === 'portable' ? updateCheck?.portable : updateCheck?.installer)?.sha256 ?? null;
+    const result = await window.bridge.appUpdateDownload({ variant, expectedSha256 });
+    if (result.ok && result.path) {
+      setDownloadedUpdatePath(result.path);
+      setDownloadedUpdateSha(expectedSha256);
+      setDownloadedUpdateVerified(result.verified !== false);
+    } else {
+      setDownloadedUpdatePath(null);
+      setUpdateCheck((prev) => ({ ...(prev ?? {}), error: result.error ?? 'download_failed' }));
+    }
   });
 
   const [confirm, confirmDialog] = useConfirm();
   const [runUpdateInstall, installingUpdate] = useAsyncAction(async () => {
     if (!downloadedUpdatePath) return;
-    if (!(await confirm({ title: 'Install update', message: 'Install the update now?\n\nThis closes the app. For the installer variant, the NSIS wizard opens — accept its prompts. For the portable, the new exe launches in place.', confirmLabel: 'Install' }))) return;
-    await window.bridge.appUpdateApply({ path: downloadedUpdatePath });
+    const integrityNote = downloadedUpdateVerified
+      ? ''
+      : '\n\nWARNING: the cloud published no checksum for this build, so its integrity could not be verified.';
+    if (!(await confirm({ title: 'Install update', message: `Install the update now?\n\nThis closes the app. For the installer variant, the NSIS wizard opens — accept its prompts. For the portable, the new exe launches in place.${integrityNote}`, confirmLabel: 'Install' }))) return;
+    // Re-checked at apply time against the same digest: "verified on download"
+    // says nothing about the file still sitting on disk now.
+    const applied = await window.bridge.appUpdateApply({ path: downloadedUpdatePath, expectedSha256: downloadedUpdateSha });
+    if (!applied.ok) {
+      toast({ tone: 'error', title: 'Update not installed', detail: applied.error ?? 'apply_failed' });
+    }
   });
 
   // ─── Maintenance ───────────────────────────────────────────────────────────

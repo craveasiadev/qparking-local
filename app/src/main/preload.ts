@@ -103,6 +103,8 @@ const api: BridgeApi = {
   syncParkingSpacesNow: () => ipcRenderer.invoke('parking-spaces:sync'),
   listSeasonPasses: () => ipcRenderer.invoke('season-passes:list'),
   syncSeasonPassesNow: () => ipcRenderer.invoke('season-passes:sync'),
+  syncBlockedPlatesNow: () => ipcRenderer.invoke('blocked-plates:sync'),
+  dayTotals: (opts: { dayStartUtc: string; dayEndUtc: string }) => ipcRenderer.invoke('sessions:day-totals', opts),
   listCloudCustomers: () => ipcRenderer.invoke('cloud-customers:list'),
   syncCloudCustomersNow: () => ipcRenderer.invoke('cloud-customers:sync'),
   listCloudVehicles: () => ipcRenderer.invoke('cloud-vehicles:list'),
@@ -140,8 +142,8 @@ const api: BridgeApi = {
 
   // App self-update — check / download / apply against the qparking cloud.
   appUpdateCheck: () => ipcRenderer.invoke('app-update:check'),
-  appUpdateDownload: (opts: { variant: 'portable' | 'installer' }) => ipcRenderer.invoke('app-update:download', opts),
-  appUpdateApply: (opts: { path: string }) => ipcRenderer.invoke('app-update:apply', opts),
+  appUpdateDownload: (opts: { variant: 'portable' | 'installer'; expectedSha256?: string | null }) => ipcRenderer.invoke('app-update:download', opts),
+  appUpdateApply: (opts: { path: string; expectedSha256?: string | null }) => ipcRenderer.invoke('app-update:apply', opts),
 
   // Touch'n'Go W4G IO-controller bridge (test triggers + live status)
   tngLoopbackPayResult: (opts?: { orderId?: string; state?: string; payType?: number; cardNo?: string; balance?: number }) => ipcRenderer.invoke('tng:loopback', opts),

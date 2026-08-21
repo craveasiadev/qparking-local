@@ -66,15 +66,32 @@ export function Lanes() {
     if (!editing?.name) { setFormError('Name is required.'); return; }
     // A hidden field must never persist stale data: the rate plan only applies
     // to an entry lane (it governs the fee), the payment terminal only to an
-    // exit lane (that's where payment is collected). Null whichever the
-    // selected camera's direction doesn't use, so the DB can't carry a value
-    // the form wouldn't even show.
-    const camId = editing.cameraIds?.[0] ?? null;
-    const dir = cameras.find((c) => c.id === camId)?.direction ?? null;
+    // exit lane (that's where payment is collected). Null whichever the lane's
+    // cameras don't use, so the DB can't carry a value the form wouldn't show.
+    //
+    // Decided by the lane's WHOLE camera set, not by cameraIds[0].
+    //
+    // Keying it off the first camera silently destroyed working config on any
+    // lane that still holds two cameras — the shape the backend calls 'dual' and
+    // the one the README tells you to build for a shared barrier. The form shows
+    // only cameraIds[0], and listCameras() is ordered by id, so on such a lane
+    // the entry camera decided: `terminalId: null` on EVERY save. Renaming the
+    // gate took its payment device away, the terminal field was not even
+    // rendered so nobody could see it go, and every paid exit there then refused
+    // with exit-no-terminal. (Reversed if the exit camera had the lower id: the
+    // lane lost its RATE PLAN instead and started letting cars out free.)
+    //
+    // Testing the set means a lane covering both directions keeps both fields,
+    // and a genuinely single-direction lane still gets the unused one cleared.
+    const laneCameras = cameras.filter((c) => (editing.cameraIds ?? []).includes(c.id));
+    const hasEntry = laneCameras.some((c) => c.direction === 'entry');
+    const hasExit = laneCameras.some((c) => c.direction === 'exit');
     const payload = {
       ...editing,
-      policyId: dir === 'entry' ? (editing.policyId ?? null) : null,
-      terminalId: dir === 'exit' ? (editing.terminalId ?? null) : null,
+      // No cameras yet (mid-setup) keeps whatever the operator typed rather than
+      // wiping it — there is nothing to infer a direction from.
+      policyId: hasEntry || laneCameras.length === 0 ? (editing.policyId ?? null) : null,
+      terminalId: hasExit || laneCameras.length === 0 ? (editing.terminalId ?? null) : null,
     };
     
     const savedResult = await window.bridge.saveLane(payload as any);
@@ -87,18 +104,94 @@ export function Lanes() {
       outcome: 'ok',
       resourceType: 'local_lane',
       resourceId: String(savedResult.id),
-      description: `Lane ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${dir ?? 'unset'}`
+      description: `Lane ${(editing.id ? 'updated' : 'added')} · ${editing.name} · ${laneDirectionLabel(laneCameras)}`
     });
     setEditing(null);
     refresh();
   }
 
-  // Single camera per lane — its direction decides which of rate-plan /
-  // payment-terminal the form exposes (see the save() note above).
+  /**
+   * Split a legacy shared-barrier lane into an entry lane and an exit lane.
+   *
+   * This app models a lane as ONE camera — the form offers one, save() derives the
+   * rate plan / payment device from it, and the help text tells you to build a
+   * shared barrier as two lanes. Installs made before that still carry lanes with
+   * both cameras on them, and editing one was a minefield: the form showed only
+   * the first camera, so the other was invisible, and there was no way to reach a
+   * two-lane shape except by hand in the right order.
+   *
+   * The rate plan governs the fee and belongs to the ENTRY lane (parking-flow
+   * prices from session.entryLaneId); the payment device collects it and belongs
+   * to the EXIT lane. So the original keeps its name, entry camera and plan, and a
+   * new "<name> (exit)" lane takes the exit camera, the terminal and the panel.
+   *
+   * Order matters: creating the new lane with the exit camera detaches it from the
+   * old one (setLaneCameras steals), so the original is rewritten second.
+   */
+  async function splitDualLane(lane: ParkingLane) {
+    const laneCams = cameras.filter((c) => c.laneId === lane.id);
+    const entryCam = laneCams.find((c) => c.direction === 'entry');
+    const exitCam = laneCams.find((c) => c.direction === 'exit');
+    if (!entryCam || !exitCam) return;
+    if (!(await confirm({
+      title: 'Split this lane',
+      message: `"${lane.name}" covers both directions, which this app no longer models.
+
+`
+        + `It will become two lanes:
+`
+        + `  · "${lane.name}" — ${entryCam.name} (entry), keeping the rate plan
+`
+        + `  · "${lane.name} (exit)" — ${exitCam.name} (exit), taking the payment device
+
+`
+        + `Open sessions are unaffected; they are already recorded against lane ids that keep working.`,
+      confirmLabel: 'Split',
+    }))) return;
+
+    // New EXIT lane: takes the exit camera, the terminal and the panel. No rate
+    // plan — the exit never prices a stay (see parking-flow.handleExit).
+    await window.bridge.saveLane({
+      name: `${lane.name} (exit)`,
+      policyId: null,
+      terminalId: lane.terminalId ?? null,
+      lcdId: lane.lcdId ?? null,
+      enabled: lane.enabled,
+      cameraIds: [exitCam.id],
+    } as any);
+    // Original stays the ENTRY lane: entry camera + rate plan, no terminal.
+    await window.bridge.saveLane({
+      ...lane,
+      terminalId: null,
+      cameraIds: [entryCam.id],
+    } as any);
+    await window.bridge.insertActivityLog({
+      eventKey: 'equipment.lane.split',
+      action: 'edit',
+      category: 'config',
+      severity: 'high',
+      siteId: site?.id ?? null,
+      outcome: 'ok',
+      resourceType: 'local_lane',
+      resourceId: String(lane.id),
+      description: `Lane "${lane.name}" split into an entry lane (${entryCam.name}) and "${lane.name} (exit)" (${exitCam.name}),`
+        + ` which took the payment device. Shared-barrier lanes are modelled as two lanes.`,
+    });
+    setEditing(null);
+    await refresh();
+  }
+
+  // Which of rate-plan / payment-terminal the form exposes, from the lane's WHOLE
+  // camera set — same rule save() uses, so a field is never hidden while its
+  // value is still being kept (or shown while it is about to be cleared).
+  //
+  // On a lane that still covers both directions this shows BOTH. It used to key
+  // off cameraIds[0] alone, which meant a dual lane's payment device was
+  // un-editable and invisible while save() was quietly nulling it.
   const selectedCameraId = editing?.cameraIds?.[0] ?? null;
-  const selectedDir = cameras.find((c) => c.id === selectedCameraId)?.direction ?? null;
-  const showRatePlan = selectedDir === 'entry';
-  const showTerminal = selectedDir === 'exit';
+  const editingCameras = cameras.filter((c) => (editing?.cameraIds ?? []).includes(c.id));
+  const showRatePlan = editingCameras.length === 0 || editingCameras.some((c) => c.direction === 'entry');
+  const showTerminal = editingCameras.length === 0 || editingCameras.some((c) => c.direction === 'exit');
 
   const q = search.trim().toLowerCase();
   const filterActive = q !== '' || dirFilter !== 'all' || statusFilter !== 'all';
@@ -273,9 +366,47 @@ export function Lanes() {
                   camera sets its lane_id to this lane (stealing it off any
                   other). Direction itself is still set per-camera on the
                   Cameras page. */}
+              {/* A lane still covering BOTH directions is the legacy shape. The
+                  single-camera picker below cannot represent it — it shows only the
+                  first camera — so say what is really attached and offer the way
+                  out, rather than letting the operator edit around an invisible
+                  second camera. */}
+              {editing.id != null && editingCameras.length > 1 && (
+                <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-amber-800 mb-1">
+                    This lane covers both directions
+                  </p>
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    {editingCameras.map((c) => `${c.name} (${c.direction})`).join(' + ')} are both on this lane.
+                    A shared barrier is modelled as two lanes now — one per direction — so the picker below
+                    shows only the first camera. Split it and each gate gets its own rate plan and payment device.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => { const l = list.find((x) => x.id === editing.id); if (l) void splitDualLane(l); }}
+                    className="mt-2 inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-[11px] font-bold uppercase tracking-wide"
+                  >
+                    Split into two lanes
+                  </button>
+                </div>
+              )}
               <Field label="Camera">
                 <select className="input" value={selectedCameraId ?? ''}
-                  onChange={(e) => setEditing({ ...editing, cameraIds: e.target.value ? [Number(e.target.value)] : [] })}>
+                  onChange={(e) => {
+                    const picked = e.target.value ? [Number(e.target.value)] : [];
+                    // Changing the selection REPLACES the lane's camera set, so on a
+                    // lane that still holds two cameras this detaches the other one
+                    // (lane_id = NULL) and its reads stop resolving to any lane.
+                    // Worth saying out loud rather than doing quietly.
+                    const dropped = (editing.cameraIds ?? []).filter((id) => !picked.includes(id));
+                    if (dropped.length > 0) {
+                      const names = cameras.filter((c) => dropped.includes(c.id)).map((c) => c.name).join(', ');
+                      setFormError(`Saving will take ${names} off this lane. Reads from ${dropped.length > 1 ? 'those cameras' : 'that camera'} will no longer resolve to a lane until you attach ${dropped.length > 1 ? 'them' : 'it'} somewhere.`);
+                    } else {
+                      setFormError(null);
+                    }
+                    setEditing({ ...editing, cameraIds: picked });
+                  }}>
                   <option value="">— none —</option>
                   {(['entry', 'exit'] as const).map((group) => {
                     const groupCams = cameras.filter((c) => c.direction === group);

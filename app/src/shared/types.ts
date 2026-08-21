@@ -403,6 +403,20 @@ export interface BridgeApi {
 	 *  sync does this too — this is the operator's "I just issued a pass, get it
 	 *  down here NOW" button. */
 	syncSeasonPassesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+	/** Pull the deny list the GATE enforces on (blocked_plates). Separate from the
+	 *  vehicle registry the Vehicles page displays: refreshing the badges without
+	 *  this left the barrier working off a stale ban list. */
+	syncBlockedPlatesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
+	/** Today's entry count and takings, aggregated in SQL over the whole table.
+	 *  Bounds are the GMT+8 calendar day expressed as UTC instants — use
+	 *  appTzDayStartUtc / appTzDayEndUtc from renderer/lib/datetime. Revenue comes
+	 *  from the transactions ledger, so a stay that collected two payments counts
+	 *  both and a voided attempt counts neither. */
+	dayTotals(opts: { dayStartUtc: string; dayEndUtc: string }): Promise<{
+		entries: number;
+		revenueCents: number;
+		paidCount: number;
+	}>;
 	pushActivityLogsToCloudNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
 	/** Read-only customer + vehicle directories, so staff can look an owner up at
 	 *  the gate without opening the cloud portal. Not on the background tick —
@@ -529,17 +543,25 @@ export interface BridgeApi {
 	/** Download the chosen variant (portable | installer) to a temp file and
 	 *  return its absolute path. Streams progress via 'app-update-progress'
 	 *  event so the renderer can show a bar. */
-	appUpdateDownload(opts: { variant: "portable" | "installer" }): Promise<{
+	appUpdateDownload(opts: {
+		variant: "portable" | "installer";
+		/** The digest /latest-built published for this variant. Pass it and the
+		 *  download is refused on mismatch; omit it and nothing can be checked. */
+		expectedSha256?: string | null;
+	}): Promise<{
 		ok: boolean;
 		path?: string;
 		bytes?: number;
 		sha256?: string;
+		expectedSha256?: string | null;
+		/** false = the cloud published no digest, so integrity was NOT checked. */
+		verified?: boolean;
 		error?: string;
 	}>;
 	/** Launch the downloaded build via the OS and quit the current app so the
 	 *  installer/portable can replace it. For NSIS this triggers the standard
 	 *  Windows installer wizard; for portable it just opens the new exe. */
-	appUpdateApply(opts: { path: string }): Promise<{ ok: boolean; error?: string }>;
+	appUpdateApply(opts: { path: string; expectedSha256?: string | null }): Promise<{ ok: boolean; error?: string }>;
 
 	// Touch'n'Go W4G IO-controller bridge
 	/** POST a synthetic PayResult into our own listener to verify the receive

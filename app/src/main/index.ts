@@ -97,13 +97,13 @@ import {
   listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
   findSeasonPassByPlate,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind, closeDb,
-  listActivityLogs, insertActivityLog,
+  listActivityLogs, insertActivityLog, dayTotals,
 } from './services/db';
-import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents } from './services/parking-flow';
+import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents, laneCameraFacing, shouldRepriceEditedSession } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
 import { startLprServers, stopLprServers, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
-  syncRatePolicies, syncParkingSpaces, syncSeasonPasses,
+  syncRatePolicies, syncParkingSpaces, syncSeasonPasses, syncBlockedPlates,
   syncCloudCustomers, syncCloudVehicles,
   syncAll, fetchSiteWith,
   cloudPullEvents, getCloudPullState,
@@ -1086,6 +1086,11 @@ ipcMain.handle('lanes:save', (_e, input: any) => {
 ipcMain.handle('lanes:delete', (_e, id: number) => deleteLane(id));
 
 ipcMain.handle('sessions:open', () => listOpenSessions());
+// Today's headline figures, aggregated in SQL rather than filtered out of a
+// 20-row display list in the renderer. The caller passes the GMT+8 day as UTC
+// bounds — the renderer owns the timezone (see lib/datetime).
+ipcMain.handle('sessions:day-totals', (_e, opts: { dayStartUtc: string; dayEndUtc: string }) =>
+  dayTotals(opts.dayStartUtc, opts.dayEndUtc));
 ipcMain.handle('sessions:recent', (_e, limit: number) => listRecentSessions(limit));
 // Live "what does this car owe right now" preview for an OPEN session, using
 // the SAME rules-aware computeFee the exit flow uses (the entry lane's policy
@@ -1345,18 +1350,34 @@ ipcMain.handle('sessions:update', (_e, id: number, patch: {
   if (working.exitAt) {
     const durationMinutes = stayDurationMinutes(working.entryAt, working.exitAt);
 
-    let policy = patch.policyIdOverride ? getRatePolicy(patch.policyIdOverride) : null;
-    if (!policy) {
-      const entryLane = working.entryLaneId ? getLane(working.entryLaneId) : null;
-      const exitLane = working.exitLaneId ? getLane(working.exitLaneId) : null;
-      policy =
-        (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
-        ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
-        ?? getSiteDefaultRatePolicy();
-    }
-    const feeCents = computeFee(durationMinutes, policy, working.entryAt, working.exitAt);
+    // Duration always follows the timestamps — it is a fact about the stay, not
+    // money. Whether the FEE may be rewritten is a policy question with a history
+    // behind it, so it lives in one testable place: see
+    // shouldRepriceEditedSession in parking-flow.
+    const reprice = shouldRepriceEditedSession({
+      patchEntryAt: patch.entryAt,
+      patchExitAt: patch.exitAt,
+      patchPolicyIdOverride: patch.policyIdOverride,
+      entryAtBefore: session.entryAt,
+      exitAtBefore: session.exitAt,
+      paymentStatusAfter: working.paymentStatus,
+    });
 
-    working = updateSessionFields(id, { durationMinutes, feeCents });
+    if (!reprice) {
+      working = updateSessionFields(id, { durationMinutes }) ?? working;
+    } else {
+      let policy = patch.policyIdOverride ? getRatePolicy(patch.policyIdOverride) : null;
+      if (!policy) {
+        const entryLane = working.entryLaneId ? getLane(working.entryLaneId) : null;
+        const exitLane = working.exitLaneId ? getLane(working.exitLaneId) : null;
+        policy =
+          (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
+          ?? (exitLane?.policyId ? getRatePolicy(exitLane.policyId) : null)
+          ?? getSiteDefaultRatePolicy();
+      }
+      const feeCents = computeFee(durationMinutes, policy, working.entryAt, working.exitAt);
+      working = updateSessionFields(id, { durationMinutes, feeCents }) ?? working;
+    }
   }
 
   // Push the edit to qparking SaaS via the retry queue. The PRE-EDIT plate goes
@@ -1432,6 +1453,11 @@ ipcMain.handle('parking-spaces:list', () => listParkingSpaces());
 ipcMain.handle('parking-spaces:sync', () => syncParkingSpaces());
 ipcMain.handle('season-passes:list', () => listSeasonPasses());
 ipcMain.handle('season-passes:sync', () => syncSeasonPasses());
+// The deny list, on its own. It had no handler at all: the ONLY way to refresh
+// the list the gate enforces on was the global "Sync now", so the Vehicles page
+// could freshen the red Blocked badges it displays while leaving the barrier's
+// own copy stale — the UI showing a ban that was not being enforced.
+ipcMain.handle('blocked-plates:sync', () => syncBlockedPlates());
 ipcMain.handle('activity-logs:push', () => pushActivityLogsToCloud());
 // Read-only directories. Deliberately NOT on the 60s background tick (they
 // change rarely and only feed lookups, never a gate decision) — refreshed by
@@ -1691,13 +1717,39 @@ ipcMain.handle('tng:test-pay-request', async (_e, opts?: {
 // Settings page calls these to check the qparking cloud for a newer
 // build and download + apply it. Implementation lives in app-update.ts.
 ipcMain.handle('app-update:check', () => checkForUpdate());
-ipcMain.handle('app-update:download', async (_e, opts: { variant: 'portable' | 'installer' }) => {
-  return downloadUpdate({
+ipcMain.handle('app-update:download', async (_e, opts: { variant: 'portable' | 'installer'; expectedSha256?: string | null }) => {
+  // expectedSha256 is the digest /latest-built published for this variant. The
+  // renderer already has it from the check step, so it rides along rather than
+  // costing a second cloud round-trip. Absent (older SaaS) = nothing to verify
+  // against, which downloadUpdate reports as `verified: false`.
+  const result = await downloadUpdate({
     variant: opts.variant,
+    expectedSha256: opts.expectedSha256 ?? null,
     onProgress: (p) => sendToRenderer('app-update-progress', p),
   });
+  if (!result.ok) {
+    audit({
+      eventKey: 'app.update.download_failed',
+      action: 'edit', category: 'lifecycle', severity: 'high', outcome: 'failed',
+      resourceType: 'app_settings',
+      description: `Update download REJECTED — ${result.error ?? 'unknown error'}. Nothing was installed.`,
+      changes: { variant: opts.variant, expected: result.expectedSha256 ?? null, actual: result.sha256 ?? null },
+    });
+  } else if (!result.verified) {
+    // Not a failure, but it must not pass silently: this build is about to be
+    // executed with no integrity check at all, because the cloud published none.
+    audit({
+      eventKey: 'app.update.unverified',
+      action: 'edit', category: 'lifecycle', severity: 'high', outcome: 'ok',
+      resourceType: 'app_settings',
+      description: `Update downloaded but NOT verified — the cloud published no sha256 for the ${opts.variant} build,`
+        + ` so its integrity could not be checked. Upgrade the SaaS to get a digest.`,
+      changes: { variant: opts.variant, bytes: result.bytes ?? null, sha256: result.sha256 ?? null },
+    });
+  }
+  return result;
 });
-ipcMain.handle('app-update:apply', (_e, opts: { path: string }) => {
+ipcMain.handle('app-update:apply', (_e, opts: { path: string; expectedSha256?: string | null }) => {
   // Logged BEFORE applying: this call relaunches the app, so a row written after
   // it may never happen. Every parking-flow log line is stamped with the build
   // version, so knowing exactly when the build changed is what lets an operator
@@ -1711,7 +1763,11 @@ ipcMain.handle('app-update:apply', (_e, opts: { path: string }) => {
     resourceType: 'app_settings',
     description: `Applying a downloaded update from ${opts?.path ?? '?'} · leaving version ${app.getVersion()} — the app restarts now.`,
   });
-  return applyUpdate(opts);
+  // forceQuit, not app.quit(): the installer is about to replace this binary, so
+  // the services must stop and the DB must checkpoint first — and once the VzLPR
+  // SDK is loaded the ordinary quit path hangs in native teardown, which would
+  // leave the wizard fighting a live process. See forceQuit.
+  return applyUpdate({ ...opts, onQuit: forceQuit });
 });
 
 ipcMain.handle('tng:test-pay-cancel', async (_e, orderId: string, target?: { host?: string; port?: number }) => {
@@ -1747,9 +1803,27 @@ ipcMain.handle('diagnose:lpr', () => require('./services/lpr-webhook').diagnose(
 async function openBarrier(opts: { cameraId?: number | null; laneId?: number | null; reason?: string } = {}) {
   let camera = opts.cameraId ? (listCameras().find((c) => c.id === opts.cameraId) ?? null) : null;
   const lane = opts.laneId ? getLane(opts.laneId) : (camera?.laneId ? getLane(camera.laneId) : null);
-  // Given only a lane, resolve one of its enabled cameras so we can pulse the
-  // relay wired to it.
-  if (!camera && lane) camera = listCameras().find((c) => c.laneId === lane.id && c.enabled) ?? null;
+  // Given only a lane, resolve the camera whose relay is the boom we mean.
+  //
+  // This used to take `listCameras().find(c => c.laneId === lane.id && c.enabled)`
+  // — any enabled camera — and listCameras() is ordered by id, so on a lane
+  // holding both cameras it pulsed the ENTRY relay. The only caller that reaches
+  // this branch is the manual release (both UI buttons pass an explicit
+  // cameraId), and a release always means "let this car OUT", so the exit-facing
+  // camera is the boom the operator is standing at.
+  //
+  // Falls back to any enabled camera rather than refusing: the operator has
+  // already decided the car should go, and a lane wired entry-only still has a
+  // relay worth pulsing. The fallback is named in the note and the audit row, so
+  // "we opened a different boom than you meant" is never silent.
+  let facingFallback = false;
+  if (!camera && lane) {
+    camera = laneCameraFacing(lane.id, 'exit');
+    if (!camera) {
+      camera = listCameras().find((c) => c.laneId === lane.id && c.enabled) ?? null;
+      facingFallback = !!camera;
+    }
+  }
   const laneName = lane?.name ?? camera?.name ?? 'MANUAL OPEN';
   const reason = opts.reason ?? 'manual-operator-open';
   const relay = camera ? await pulseBarrier(camera.id) : { ok: false, error: 'no_camera' };
@@ -1770,14 +1844,16 @@ async function openBarrier(opts: { cameraId?: number | null; laneId?: number | n
       resourceType: 'local_lane',
       resourceId: lane?.id != null ? String(lane.id) : null,
       description: `Barrier opened by hand · ${laneName}${camera ? ` · ${camera.name}` : ' · no camera resolved'}`
+        + (facingFallback ? ` (no exit-facing camera on this lane — pulsed the ${camera?.direction} relay instead)` : '')
         + (relay.ok ? ' — relay pulsed' : ` — relay FAILED: ${relay.error ?? 'unknown'}`),
-      changes: { laneId: lane?.id ?? null, cameraId: camera?.id ?? null, reason, relayError: relay.ok ? null : relay.error ?? null },
+      changes: { laneId: lane?.id ?? null, cameraId: camera?.id ?? null, reason, facingFallback, relayError: relay.ok ? null : relay.error ?? null },
     });
   }
   return {
     ok: relay.ok,
     note: relay.ok
       ? `Barrier opened for ${laneName} · camera-relay pulsed`
+        + (facingFallback ? ` (no exit camera on this lane — pulsed "${camera?.name}", which faces ${camera?.direction})` : '')
       : `Barrier did NOT open for ${laneName} · ${camera ? `relay ${relay.error}` : 'no camera resolved for this lane'}`,
   };
 }

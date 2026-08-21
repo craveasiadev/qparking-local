@@ -7,7 +7,7 @@ import type { ParkingSession, SyncStatus, DeviceHealth, DeviceHealthKind } from 
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useCurrentSite } from '../context/SiteContext';
 import { InfoTip } from '../components/InfoTip';
-import { fmtTime, fmtTimeSeconds, fmtSince, todayInAppTz, dateInAppTz } from '../lib/datetime';
+import { fmtTime, fmtTimeSeconds, fmtSince, todayInAppTz, appTzDayStartUtc, appTzDayEndUtc } from '../lib/datetime';
 
 /** How many rows the recent-activity feeds show. */
 const RECENT_LIMIT = 10;
@@ -21,6 +21,10 @@ export function Dashboard() {
   const [recent, setRecent] = useState<ParkingSession[]>([]);
   const [txns, setTxns] = useState<TxnRow[]>([]);
   const [sync, setSync] = useState<SyncStatus | null>(null);
+  // Today's entries + takings, aggregated in the main process over the whole
+  // table. `recent` below is a DISPLAY list (20 rows) and must never be used to
+  // compute a total again.
+  const [totals, setTotals] = useState<{ entries: number; revenueCents: number; paidCount: number } | null>(null);
   // Reachability as computed by the main process (services/device-health.ts).
   // This page does NOT probe: it used to, which meant health froze the moment the
   // operator navigated away, and the verdict existed nowhere the cloud could see.
@@ -30,14 +34,22 @@ export function Dashboard() {
   const site = useCurrentSite();
 
   async function refresh() {
-    const [o, r, tx, devices, syncStatus] = await Promise.all([
+    // The GMT+8 calendar day as UTC bounds — resolved here because the renderer
+    // owns the timezone convention (see lib/datetime), not the database.
+    const day = todayInAppTz();
+    const [o, r, tx, devices, syncStatus, dayFigures] = await Promise.all([
       window.bridge.listOpenSessions(),
       window.bridge.listRecentSessions(20),
       window.bridge.listTransactionsPage({ limit: RECENT_LIMIT, offset: 0 }),
       window.bridge.getDeviceHealth(),
       window.bridge.getSyncStatus(),
+      window.bridge.dayTotals({
+        dayStartUtc: appTzDayStartUtc(day)!,
+        dayEndUtc: appTzDayEndUtc(day)!,
+      }),
     ]);
     setOpen(o); setRecent(r); setTxns(tx.rows); setHealth(devices); setSync(syncStatus);
+    setTotals(dayFigures);
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -78,24 +90,19 @@ export function Dashboard() {
   const onlineCount = enabledRows.filter((d) => d.status === 'online').length;
   const offlineCount = enabledRows.filter((d) => d.status === 'offline').length;
 
-  const today = todayInAppTz();
-  const entriesToday = recent.filter((s) => dateInAppTz(new Date(s.entryAt)) === today).length;
 
   // Most recent completed exits (car has left) — the durable, meaningful feed
   // that replaced the transient "live plate events" tail.
   const recentExits = recent.filter((s) => s.exitAt).slice(0, RECENT_LIMIT);
 
-  // Sum what we collected locally today. This used to prefer the synced
-  // `site.revenueToday`, but that mirrors a cloud column nothing ever writes —
-  // so a LINKED site showed RM 0.00 while this perfectly good local figure sat
-  // unused. Our own sessions are the authority for gate takings at this site.
-  const revenueCents = recent
-    .filter((s) => {
-      if (s.paymentStatus !== 'paid') return false;
-      const paidTs = s.paymentTimestamp ?? s.exitAt;
-      return !!paidTs && dateInAppTz(new Date(paidTs)) === today;
-    })
-    .reduce((sum, s) => sum + (s.feeCents ?? 0), 0);
+  // Today's entries and takings come from SQL over the WHOLE table (see
+  // db.dayTotals), not from filtering `recent` — that list is capped at 20 and
+  // ordered by entry_at, so both figures were silently truncated, and a car that
+  // entered yesterday and paid this morning dropped out of the takings entirely
+  // once twenty newer cars arrived. Revenue is summed from the transactions
+  // ledger, the authoritative record of money actually moving.
+  const entriesToday = totals?.entries ?? 0;
+  const revenueCents = totals?.revenueCents ?? 0;
 
   // Occupancy from our OWN open sessions, the same figure the "Cars inside"
   // tile shows. The synced `site.occupiedSpaces` is an event counter that
@@ -132,7 +139,7 @@ export function Dashboard() {
         <Tile icon={Car} label="Cars inside" value={String(open.length)}
           sub={occupancyPct !== null ? `${occupancyPct}% of ${site!.totalSpaces} spaces` : 'open sessions'} />
         <Tile icon={DollarSign} label="Revenue today" value={formatCents(revenueCents)}
-          sub="collected on this site" />
+          sub={totals ? `${totals.paidCount} payment${totals.paidCount === 1 ? '' : 's'} collected` : 'collected on this site'} />
         <Tile icon={Activity} label="Entries today" value={String(entriesToday)} sub="new sessions today" />
         <Tile icon={offlineCount > 0 ? WifiOff : Wifi} label="Devices online"
           value={enabledRows.length === 0 ? '0/0' : `${onlineCount}/${enabledRows.length}`}

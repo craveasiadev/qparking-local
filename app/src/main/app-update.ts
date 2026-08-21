@@ -95,8 +95,15 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
  */
 export async function downloadUpdate(opts: {
   variant: 'portable' | 'installer';
+  /** The digest /latest-built published for this variant, when it published one.
+   *  Passed straight back out as `expectedSha256` so applyUpdate can verify
+   *  without a second round-trip to the cloud. */
+  expectedSha256?: string | null;
   onProgress?: (progress: { bytes: number; totalBytes: number; pct: number }) => void;
-}): Promise<{ ok: boolean; path?: string; bytes?: number; sha256?: string; error?: string }> {
+}): Promise<{
+  ok: boolean; path?: string; bytes?: number; sha256?: string;
+  expectedSha256?: string | null; verified?: boolean; error?: string;
+}> {
   const cloud = getCloudApi();
   if (!cloud) return { ok: false, error: 'qparking_not_configured' };
   try {
@@ -111,7 +118,10 @@ export async function downloadUpdate(opts: {
     // with their proper version-stamped name. Fall back to a generic one.
     const contentDisposition = String(response.headers['content-disposition'] ?? '');
     const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/);
-    const filename = filenameMatch?.[1] || `qparking-local-update-${opts.variant}.exe`;
+    // basename, always: this string comes off the wire, and the result is passed
+    // to shell.openPath. A Content-Disposition of `filename="..\..\evil.exe"`
+    // would otherwise write and execute outside the updates directory.
+    const filename = path.basename(filenameMatch?.[1] || '') || `qparking-local-update-${opts.variant}.exe`;
     const updatesDir = path.join(app.getPath('userData'), 'updates');
     fs.mkdirSync(updatesDir, { recursive: true });
     const downloadPath = path.join(updatesDir, filename);
@@ -134,7 +144,39 @@ export async function downloadUpdate(opts: {
     } finally {
       await fileHandle.close();
     }
-    return { ok: true, path: downloadPath, bytes, sha256: sha256.digest('hex') };
+    const digest = sha256.digest('hex');
+    const expected = opts.expectedSha256 ? opts.expectedSha256.trim().toLowerCase() : null;
+
+    // The digest was computed here and published by the cloud all along, and
+    // nothing ever compared the two — so a truncated or tampered .exe was
+    // executed with the one integrity check the design already had sitting
+    // unused. Compare now, and refuse rather than hand back a path.
+    if (expected && digest !== expected) {
+      try { fs.unlinkSync(downloadPath); } catch { /* best-effort */ }
+      return {
+        ok: false,
+        expectedSha256: expected,
+        sha256: digest,
+        error: `checksum_mismatch — the download does not match the digest the cloud published`
+          + ` (expected ${expected.slice(0, 12)}…, got ${digest.slice(0, 12)}…).`
+          + ` The file has been deleted; try the download again.`,
+      };
+    }
+    if (totalBytes > 0 && bytes !== totalBytes) {
+      try { fs.unlinkSync(downloadPath); } catch { /* best-effort */ }
+      return {
+        ok: false,
+        error: `truncated_download — got ${bytes} of ${totalBytes} bytes. The file has been deleted; try again.`,
+      };
+    }
+    return {
+      ok: true, path: downloadPath, bytes, sha256: digest,
+      expectedSha256: expected,
+      // false = the CLOUD published no digest, so there was nothing to check
+      // against. Older SaaS builds don't send one, and refusing outright would
+      // brick updates against them — so this is surfaced instead of assumed.
+      verified: !!expected,
+    };
   } catch (error) {
     return { ok: false, error: describeRequestError(error) };
   }
@@ -149,10 +191,37 @@ export async function downloadUpdate(opts: {
  * We delay the quit by a beat so the renderer's "Restarting…" toast renders
  * before we tear the window down — without it the operator just sees the
  * app vanish, which looks like a crash.
+ *
+ * The teardown is DELEGATED, not hand-rolled here. This used to close the
+ * windows and call app.quit(), which is the exact route forceQuit() exists to
+ * avoid: once the VzLPR SDK is loaded — every site with a credentialed camera —
+ * the native teardown hangs, so the process sat there with the NSIS wizard
+ * already running against a live executable. It also skipped closeDb(), leaving
+ * SQLite un-checkpointed while the binary was replaced. `onQuit` is index.ts's
+ * forceQuit, which stops the services, checkpoints the DB and then exits in the
+ * SDK-aware way.
  */
-export async function applyUpdate(opts: { path: string }): Promise<{ ok: boolean; error?: string }> {
+export async function applyUpdate(opts: {
+  path: string;
+  /** Optional integrity gate. When the caller knows what the cloud published,
+   *  pass it: the file is re-hashed here, because "verified at download time"
+   *  says nothing about the file still on disk at APPLY time. */
+  expectedSha256?: string | null;
+  onQuit: () => void;
+}): Promise<{ ok: boolean; error?: string }> {
   if (!opts.path || !fs.existsSync(opts.path)) {
     return { ok: false, error: 'downloaded_file_missing' };
+  }
+  if (opts.expectedSha256) {
+    const expected = opts.expectedSha256.trim().toLowerCase();
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(opts.path)).digest('hex');
+    if (actual !== expected) {
+      return {
+        ok: false,
+        error: `checksum_mismatch — the file on disk no longer matches the digest the cloud published`
+          + ` (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…). Nothing was launched.`,
+      };
+    }
   }
   const openError = await shell.openPath(opts.path);
   if (openError) return { ok: false, error: openError };
@@ -160,7 +229,7 @@ export async function applyUpdate(opts: { path: string }): Promise<{ ok: boolean
     for (const window of BrowserWindow.getAllWindows()) {
       try { window.close(); } catch { /* ignore */ }
     }
-    app.quit();
+    opts.onQuit();
   }, 1_200);
   return { ok: true };
 }
