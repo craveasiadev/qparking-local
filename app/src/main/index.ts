@@ -97,10 +97,10 @@ import {
   listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
   findSeasonPassByPlate, findSeasonPassById,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind, closeDb,
-  listActivityLogs, countActivityLogs, insertActivityLog, dayTotals,
+  listActivityLogs, countActivityLogs, insertActivityLog, dayTotals, reconcileOrphanedTransactions,
   pruneTerminalLog, pruneActivityLogs, pruneOldPlateImages,
 } from './services/db';
-import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents, laneCameraFacing, shouldRepriceEditedSession } from './services/parking-flow';
+import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents, laneCameraFacing, shouldRepriceEditedSession, findExitInFlightBySession } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
 import { startLprServers, stopLprServers, lprEvents, getLatestFrame } from './services/lpr-webhook';
 import {
@@ -177,6 +177,27 @@ app.whenReady().then(async () => {
   // a camera works the same either way — and if a packaged install is already
   // running when you start `npm run dev`, the dev bind fails with EADDRINUSE,
   // which startLprServers() reports and survives rather than crashing.
+  // Close out payment attempts a dead process left 'pending' — after a crash or
+  // restart mid-charge, the awaiting promise is gone and no PayResult can ever
+  // settle them. Done BEFORE the flow starts so the ledger is honest from the
+  // first car. Same caveat as a timeout: if the tap actually went through, the
+  // callback was lost and the device is the authority.
+  const orphanedTxns = reconcileOrphanedTransactions();
+  if (orphanedTxns.length > 0) {
+    audit({
+      eventKey: 'payment.orphans_reconciled',
+      action: 'payment',
+      category: 'payment',
+      severity: 'high',
+      outcome: 'failed',
+      resourceType: 'transaction',
+      description: `${orphanedTxns.length} payment attempt(s) were still 'pending' from before this restart — marked failed. `
+        + `The charges cannot still be in flight (the process awaiting them is gone). `
+        + `⚠️ If a driver DID tap during the outage, the money moved without a record here — check the device log. `
+        + `Attempts: ${orphanedTxns.map((t) => `#${t.id} session ${t.sessionId} ${rm(t.amountCents)}${t.orderId ? ` order ${t.orderId.slice(0, 8)}…` : ''}`).join(' · ')}`,
+      changes: { count: orphanedTxns.length, transactionIds: orphanedTxns.map((t) => t.id) },
+    });
+  }
   const lprPorts = startLprServers();
   console.log(`[boot] mode=${IS_DEV_MODE ? 'dev' : 'packaged'} · LPR listeners → :${lprPorts.join(', :')}`);
   startParkingFlow();
@@ -1268,6 +1289,21 @@ ipcMain.handle('sessions:retrigger-by-plate', (_e, plate: string, laneId?: numbe
   return result;
 });
 ipcMain.handle('sessions:delete', (_e, id: number) => {
+  // Refuse while this stay is being CHARGED. The release path cancels the charge
+  // first (cancelExitInFlight); this path did neither — deleting a mid-tap stay
+  // left the PayRequest live, and if the driver then tapped, the deduction
+  // settled against a session that no longer existed: the paid ledger row could
+  // never reach the cloud (the push needs the session's plate), so real money
+  // existed only in the local Transactions page. Deleting a stay mid-payment is
+  // almost certainly a mis-click; make the operator wait or release instead.
+  const charging = findExitInFlightBySession(id);
+  if (charging) {
+    throw new Error(
+      `${charging.plate} is being charged at lane ${getLane(charging.laneId)?.name ?? charging.laneId} right now `
+      + `(RM ${(charging.feeCents / 100).toFixed(2)}). Wait for the tap to settle, or release the car instead — `
+      + `deleting the stay mid-payment would leave the money with no record to land on.`,
+    );
+  }
   // Capture session BEFORE deleting so we have lane/plate/entryAt for the
   // qparking sync payload — otherwise the row is gone before we enqueue.
   const session = getSessionById(id);

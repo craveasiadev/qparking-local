@@ -693,6 +693,9 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
 
   const [runDeleteOne, deletingOne] = useAsyncAction(async (id: number) => {
     const row = rows.find((r) => r.id === id);
+    // Throws when the stay is mid-charge (see sessions:delete) — the onError
+    // toast below carries that refusal to the operator. The audit row is only
+    // written on the path where the delete actually happened.
     await window.bridge.deleteSession(id);
     await window.bridge.insertActivityLog({
       eventKey: 'session.delete',
@@ -707,7 +710,7 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
     });
     setViewing(null);
     await fetchPage();
-  });
+  }, { onError: (e: unknown) => toast({ tone: 'error', title: "Couldn't delete", detail: bridgeErrorMessage(e) }) });
 
   const [runRetrigger, retriggering] = useAsyncAction(async (id: number, plate: string, laneId: number | null) => {
     const r = await window.bridge.retriggerSessionPayment(id, laneId);

@@ -472,7 +472,13 @@ function applySchema(db: Database.Database) {
       -- Status of the same pass holder_type came from, for the live/lapsed chip.
       -- Its DATES are deliberately not mirrored here: the Vehicles page already
       -- carries the term against the plate, and one fact in two places drifts.
-      pass_status TEXT,
+      --
+      -- Declared under its CURRENT name. It was pass_status until the cloud's
+      -- 2026-08-18 rename; declaring the old name here meant every FRESH install
+      -- created a column only for the rename migration below to move it in the
+      -- same boot — the exact create-then-undo anti-pattern the sites-table note
+      -- above warns about. The rename still runs for old installs and no-ops here.
+      season_pass_status TEXT,
       is_enabled INTEGER NOT NULL DEFAULT 1,
       vehicles_count INTEGER NOT NULL DEFAULT 0,
       active_passes_count INTEGER NOT NULL DEFAULT 0,
@@ -1576,10 +1582,14 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 	const db = getDb();
 	if (camera.id) {
 		// external_id is immutable device identity — never rewritten on edit.
+		// lane_external_id follows lane_id, same rule as setLaneCameras: that column
+		// is what relinkDevices() resolves lane_id back FROM after any equipment
+		// pull, so leaving it stale silently reverts this edit on the next pull.
 		db.prepare(
-			`UPDATE cameras SET name=?, lane_id=?, direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE cameras SET name=?, lane_id=?, lane_external_id=(SELECT l.external_id FROM lanes l WHERE l.id = ?), direction=?, access_mode=?, host=?, device_user=?, device_password=?, device_port=?, webhook_port=?, webhook_secret=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		).run(
 			camera.name,
+			camera.laneId,
 			camera.laneId,
 			camera.direction,
 			camera.accessMode === "pass_only" ? "pass_only" : "open",
@@ -1595,13 +1605,20 @@ export function upsertCamera(camera: Omit<LprCamera, "id" | "externalId" | "crea
 		return getCamera(camera.id)!;
 	}
 	const externalId = camera.externalId ?? `dev-${randomUUID()}`;
+	// lane_external_id stamped at birth, same rule as the update arm above. The
+	// boot-time backfill only covers rows that exist AT boot — a camera created
+	// now and wired to a lane carried NULL until the next restart, and the first
+	// relinkDevices() (any equipment pull) read that NULL as "no lane" and
+	// silently detached it.
 	const info = db
 		.prepare(
-			`INSERT INTO cameras (external_id, name, lane_id, direction, access_mode, host, device_user, device_password, device_port, webhook_port, webhook_secret, enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO cameras (external_id, name, lane_id, lane_external_id, direction, access_mode, host, device_user, device_password, device_port, webhook_port, webhook_secret, enabled)
+			 VALUES (?,?,?,(SELECT l.external_id FROM lanes l WHERE l.id = ?),?,?,?,?,?,?,?,?,?)`,
 		)
 		.run(
 			externalId,
 			camera.name,
+			camera.laneId,
 			camera.laneId,
 			camera.direction,
 			camera.accessMode === "pass_only" ? "pass_only" : "open",
@@ -1716,18 +1733,30 @@ export function deleteLane(id: number) {
 export function setLaneCameras(laneId: number, cameraIds: number[]): void {
 	const d = getDb();
 	const tx = d.transaction(() => {
+		// lane_external_id moves WITH lane_id, every time. The lane→terminal and
+		// lane→panel links have always been kept in step (syncLaneLinkExternalIds
+		// runs on every lane upsert); the camera→lane link was not — this wrote
+		// lane_id alone and left lane_external_id holding whatever it said when the
+		// row was last pulled or migrated. That column is not decoration: it is what
+		// relinkDevices() rewrites EVERY camera's lane_id from, and relinkDevices
+		// runs after any equipment pull of any type. So rewiring a camera here and
+		// later pulling, say, TERMINALS from the cloud silently snapped the camera
+		// back to its old lane — wrong rate plan on entry, wrong boom on exit, and
+		// nothing anywhere saying it happened.
 		if (cameraIds.length > 0) {
 			const placeholders = cameraIds.map(() => "?").join(",");
 			// Detach cameras that used to be on this lane but were deselected.
-			d.prepare(`UPDATE cameras SET lane_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ? AND id NOT IN (${placeholders})`).run(
+			d.prepare(`UPDATE cameras SET lane_id = NULL, lane_external_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ? AND id NOT IN (${placeholders})`).run(
 				laneId,
 				...cameraIds,
 			);
 			// Attach the selected set (also steals any that were on another lane).
-			d.prepare(`UPDATE cameras SET lane_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`).run(laneId, ...cameraIds);
+			d.prepare(
+				`UPDATE cameras SET lane_id = ?, lane_external_id = (SELECT l.external_id FROM lanes l WHERE l.id = ?), updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
+			).run(laneId, laneId, ...cameraIds);
 		} else {
 			// Nothing selected → this lane covers no cameras.
-			d.prepare(`UPDATE cameras SET lane_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ?`).run(laneId);
+			d.prepare(`UPDATE cameras SET lane_id = NULL, lane_external_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ?`).run(laneId);
 		}
 	});
 	tx();
@@ -2527,6 +2556,34 @@ export function updateTransaction(
 		.prepare(`UPDATE transactions SET ${sets.join(", ")} WHERE id = ?`)
 		.run(...vals);
 	return getTransactionById(id);
+}
+
+/**
+ * Close out payment attempts stranded 'pending' by a dead process.
+ *
+ * A charge lives as an awaited promise in parking-flow; the ledger row is opened
+ * 'pending' BEFORE the device is driven (deliberately, so a crash mid-charge
+ * still leaves a record of the attempt). But nothing ever picked those records
+ * back up: after a crash, a restart, or a Windows update mid-charge, the promise
+ * was gone, no PayResult could ever settle the row, and it sat 'pending' forever
+ * — polluting the Transactions page's Pending filter and never reaching the
+ * cloud ledger, because attempts are only enqueued when they resolve.
+ *
+ * Runs at BOOT, where the ambiguity that makes 'pending' untouchable at runtime
+ * does not exist: any pending row now predates this process, so the charge it
+ * describes cannot still be in flight. Marked 'failed', which is exactly what the
+ * timeout path records for an attempt with no answer — and carries the same
+ * caveat: if the driver's tap actually went through, the callback was lost and
+ * the device is the authority. Returns the rows closed so the caller can audit.
+ */
+export function reconcileOrphanedTransactions(): { id: number; sessionId: number; orderId: string | null; amountCents: number }[] {
+	const db = getDb();
+	const rows = db
+		.prepare(`SELECT id, session_id, order_id, amount_cents FROM transactions WHERE status = 'pending'`)
+		.all() as { id: number; session_id: number; order_id: string | null; amount_cents: number }[];
+	if (rows.length === 0) return [];
+	db.prepare(`UPDATE transactions SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE status = 'pending'`).run();
+	return rows.map((r) => ({ id: r.id, sessionId: r.session_id, orderId: r.order_id, amountCents: r.amount_cents }));
 }
 
 export function getTransactionById(id: number): Transaction | null {

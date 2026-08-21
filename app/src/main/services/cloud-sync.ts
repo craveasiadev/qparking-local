@@ -57,7 +57,7 @@ interface CloudListBody {
 const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: "qparking_not_configured" };
 
 /**
- * Refuse to wipe a gate-critical mirror on an EMPTY successful response.
+ * Refuse to wipe a gate-critical mirror on the FIRST empty successful response.
  *
  * Every pull guards the 404 case carefully — "an older SaaS without the endpoint,
  * keep what we have". None guarded a 200 carrying `{"data":[]}`, and
@@ -68,20 +68,44 @@ const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: "qparking_not
  * lane's policy binding, so it does not come back on the next good sync. That
  * undoes the entire reason this cache exists.
  *
- * "Had rows, now zero" is the signal. A genuinely empty site has nothing to lose
- * (0 → 0 never trips this), and a roster that legitimately empties out is a rare,
- * deliberate act that is worth one confirmation — so the cache is kept, the pull
- * reports a warning rather than silent success, and a critical row is written for
- * the Activity Log. The operator can still force it through with "Sync now" on a
- * second pull, because by then `suspicious` is comparing 0 against 0.
+ * "Had rows, now zero" is the signal, and the confirmation is a SECOND
+ * CONSECUTIVE empty pull for the same mirror. Any non-empty pull resets the
+ * streak. The streak is deliberately what carries the confirmation, not the row
+ * count: the first version of this guard compared the count alone, and since the
+ * refusal KEEPS the rows, the count never dropped — a roster that had genuinely
+ * emptied was refused forever, and the guard's own message ("sync again to
+ * confirm") promised an exit that did not exist. Its test passed only because the
+ * harness emptied the table by hand.
+ *
+ * In-memory on purpose: these mirrors are pulled by syncAll() only (boot,
+ * "Sync now", rebind), so two consecutive empties are two deliberate pulls — or
+ * a restart plus one, since the streak resets with the process, which only makes
+ * the guard more cautious, never less.
  */
+const emptyPullStreak: Record<"passes" | "blockedPlates" | "ratePolicies", number> = {
+	passes: 0,
+	blockedPlates: 0,
+	ratePolicies: 0,
+};
+
 export function refuseEmptyWipe(
 	mirror: "passes" | "blockedPlates" | "ratePolicies",
 	incoming: number,
 ): SyncResult | null {
-	if (incoming > 0) return null;
+	if (incoming > 0) {
+		emptyPullStreak[mirror] = 0;
+		return null;
+	}
 	const held = mirrorRowCounts()[mirror];
 	if (held === 0) return null;
+	emptyPullStreak[mirror] += 1;
+	if (emptyPullStreak[mirror] >= 2) {
+		// Second consecutive empty pull — the operator (or two boots in a row)
+		// has confirmed it. Let the wipe through and start the next watch fresh.
+		emptyPullStreak[mirror] = 0;
+		console.warn(`[cloud-sync] empty ${mirror} pull CONFIRMED by a second consecutive pull — applying the wipe (was holding ${held} row(s))`);
+		return null;
+	}
 	const label = {
 		passes: "season passes",
 		blockedPlates: "blocked plates",

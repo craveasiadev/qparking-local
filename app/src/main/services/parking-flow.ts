@@ -85,7 +85,7 @@ const exitsInFlight = new Map<number, ActiveExit>(); // keyed by laneId — one 
  * A linear scan is right here: the map holds one entry per exit lane, so it is a
  * handful of rows at the largest site.
  */
-function findExitInFlightBySession(sessionId: number): ActiveExit | null {
+export function findExitInFlightBySession(sessionId: number): ActiveExit | null {
   for (const exit of exitsInFlight.values()) {
     if (exit.sessionId === sessionId) return exit;
   }

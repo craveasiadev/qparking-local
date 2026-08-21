@@ -870,13 +870,24 @@ async function main() {
   check('G8 the box is holding a roster and a deny list to protect',
     heldBefore.passes === 1 && heldBefore.blockedPlates === 1, JSON.stringify(heldBefore));
   // Simulating the pull's own decision, since the HTTP layer is not in scope here.
-  check('G9 an empty roster is REFUSED while the box holds one',
-    !!sync.refuseEmptyWipe('passes', 0), 'expected a refusal');
-  check('G9b …naming what it is protecting, so the operator can confirm on a second pull',
-    /holds 1/.test(sync.refuseEmptyWipe('passes', 0)?.error ?? ''),
-    sync.refuseEmptyWipe('passes', 0)?.error);
-  check('G9c …and the same for the deny list',
-    !!sync.refuseEmptyWipe('blockedPlates', 0));
+  const firstRefusal = sync.refuseEmptyWipe('passes', 0);
+  check('G9 the FIRST empty roster pull is refused while the box holds one',
+    !!firstRefusal, 'expected a refusal');
+  check('G9b …naming what it is protecting, so the operator knows what to check',
+    /holds 1/.test(firstRefusal?.error ?? ''), firstRefusal?.error);
+  // The refusal KEEPS the rows, so the row count can never confirm the wipe —
+  // the first version of this guard compared the count alone and deadlocked: a
+  // roster that had genuinely emptied was refused forever, while its own message
+  // promised "sync again to confirm". The streak is what makes that promise true.
+  check('G9c a SECOND consecutive empty pull is the confirmation — the wipe goes through',
+    sync.refuseEmptyWipe('passes', 0) === null, 'second empty pull should be allowed');
+  check('G9d …and the streak restarts afterwards, so the next empty is refused again',
+    !!sync.refuseEmptyWipe('passes', 0));
+  check('G9e a NON-empty pull between two empties resets the streak',
+    (sync.refuseEmptyWipe('passes', 7), !!sync.refuseEmptyWipe('passes', 0)),
+    'the empty after a non-empty must be refusal #1 again');
+  check('G9f …and the deny list runs its own streak, independent of the roster',
+    !!sync.refuseEmptyWipe('blockedPlates', 0) && sync.refuseEmptyWipe('blockedPlates', 0) === null);
   check('G10 a NON-empty payload is never refused',
     sync.refuseEmptyWipe('passes', 5) === null);
   check('G10b …nor an empty one on a box that holds nothing (a genuinely empty site)',
@@ -928,6 +939,75 @@ async function main() {
 
   check('H7 the recorded duration on the paid exit matches that rule',
     db.getSessionById(paid.id).durationMinutes === 240, db.getSessionById(paid.id).durationMinutes);
+
+  // ══════════════════════════════════════════════════════════════════════
+  G('J · wiring integrity & crash recovery');
+  // ══════════════════════════════════════════════════════════════════════
+
+  // ── J1 · camera→lane rewiring must survive relinkDevices ───────────────
+  // relinkDevices() rewrites EVERY camera's lane_id from lane_external_id, and
+  // it runs after any equipment pull of any type. setLaneCameras used to write
+  // lane_id alone, so a locally rewired camera silently snapped back to its old
+  // lane the next time anyone pulled, say, terminals from the cloud — wrong rate
+  // plan on entry, wrong boom on exit, no trace.
+  const relLaneA = db.upsertLane({ name: 'L-RELINK-A', policyId: 'charge', terminalId: null, enabled: true });
+  const relLaneB = db.upsertLane({ name: 'L-RELINK-B', policyId: 'zero', terminalId: null, enabled: true });
+  const relCam = db.upsertCamera({
+    name: 'C-RELINK', laneId: relLaneA.id, direction: 'entry', host: '10.1.0.30',
+    deviceUser: null, devicePassword: null, devicePort: null, webhookSecret: null, enabled: true,
+  });
+  db.setLaneCameras(relLaneB.id, [relCam.id]);   // rewire A → B, the Lanes-form path
+  db.relinkDevices();                             // what any equipment pull runs next
+  check('J1 a camera rewired via the Lanes form stays on its new lane through relinkDevices',
+    db.getCamera(relCam.id).laneId === relLaneB.id,
+    `laneId=${db.getCamera(relCam.id).laneId} (rewired to ${relLaneB.id}, old lane ${relLaneA.id})`);
+  db.upsertCamera({ ...db.getCamera(relCam.id), laneId: relLaneA.id });  // the Cameras-form path
+  db.relinkDevices();
+  check('J1b …and the same through a camera-form save',
+    db.getCamera(relCam.id).laneId === relLaneA.id,
+    `laneId=${db.getCamera(relCam.id).laneId}`);
+  db.setLaneCameras(relLaneA.id, []);            // detach entirely
+  db.relinkDevices();
+  check('J1c …and a detached camera stays detached',
+    db.getCamera(relCam.id).laneId === null, `laneId=${db.getCamera(relCam.id).laneId}`);
+
+  // ── J2 · a dead process's 'pending' payment attempts are closed at boot ──
+  // The ledger row opens 'pending' before the device is driven; a crash mid-
+  // charge orphaned it forever, because attempts are only enqueued/settled when
+  // the awaiting promise resolves — and that promise died with the process.
+  const orphanStay = open('JJJ0001', L.paid.id, C.paidIn.id, ENTRY);
+  const orphanTxn = db.createTransaction({
+    sessionId: orphanStay.id, status: 'pending', amountCents: 700,
+    orderId: 'deadbeef00000000deadbeef00000000', terminalId: terminal.id, terminalName: 'W4G-1',
+  });
+  const reconciled = db.reconcileOrphanedTransactions();
+  check('J2 a pending attempt from "before this boot" is closed as failed',
+    reconciled.some((t) => t.id === orphanTxn.id)
+    && db.getTransactionById(orphanTxn.id).status === 'failed',
+    `status=${db.getTransactionById(orphanTxn.id).status}`);
+  check('J2b …reporting what it closed, so the boot audit can name the money at risk',
+    reconciled.find((t) => t.id === orphanTxn.id)?.amountCents === 700);
+  check('J2c …and a settled attempt is never touched',
+    db.reconcileOrphanedTransactions().length === 0, 'second run should find nothing');
+  check('J2d …nor the session — it stays open for the operator to settle',
+    inside('JJJ0001'));
+
+  // ── J3 · the flow refuses to lose a stay that is mid-charge ─────────────
+  // sessions:delete now refuses while findExitInFlightBySession() hits; the IPC
+  // handler itself is out of harness reach, so pin the primitive it gates on.
+  payScript = HANG();
+  const midCharge = await drive('JJJ0002', ENTRY, EXIT, L.paid.id, C.paidIn.id, C.paidOut.id);
+  await tick(12);
+  const liveExit = flow.findExitInFlightBySession(midCharge.id);
+  check('J3 a mid-charge stay is visible to the delete guard, naming its gate and fare',
+    !!liveExit && liveExit.laneId === L.paid.id && liveExit.feeCents === FULL_FEE,
+    JSON.stringify(liveExit));
+  flow.cancelExitInFlight(midCharge.id);
+  await tick(12);
+  check('J3b …and invisible once the charge is cancelled, so the delete may proceed',
+    flow.findExitInFlightBySession(midCharge.id) === null);
+  // The device seam is shared state — put it back the way the I-group expects.
+  payScript = APPROVE();
 
   // ══════════════════════════════════════════════════════════════════════
   G('I · dev simulator & open-session restore');
