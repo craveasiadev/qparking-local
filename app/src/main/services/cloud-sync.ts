@@ -36,6 +36,7 @@ import {
 	listActivityLogs,
 	getCompanySetting,
 	isBoundToCurrentSite,
+	mirrorRowCounts,
 } from "./db";
 import { EventEmitter } from "node:events";
 import { getCloudApi, buildCloudApi, isHttpStatus, describeRequestError } from "./cloud-api";
@@ -54,6 +55,45 @@ interface CloudListBody {
 }
 
 const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: "qparking_not_configured" };
+
+/**
+ * Refuse to wipe a gate-critical mirror on an EMPTY successful response.
+ *
+ * Every pull guards the 404 case carefully — "an older SaaS without the endpoint,
+ * keep what we have". None guarded a 200 carrying `{"data":[]}`, and
+ * replaceAllSeasonPasses([]) / replaceAllBlockedPlates([]) / prune([]) all do
+ * exactly what they say. So one bad cloud deploy that returned an empty list
+ * instead of a 5xx would, at the barrier: stop honouring every resident's pass,
+ * stop enforcing every ban, and drop every rate plan — which also clears each
+ * lane's policy binding, so it does not come back on the next good sync. That
+ * undoes the entire reason this cache exists.
+ *
+ * "Had rows, now zero" is the signal. A genuinely empty site has nothing to lose
+ * (0 → 0 never trips this), and a roster that legitimately empties out is a rare,
+ * deliberate act that is worth one confirmation — so the cache is kept, the pull
+ * reports a warning rather than silent success, and a critical row is written for
+ * the Activity Log. The operator can still force it through with "Sync now" on a
+ * second pull, because by then `suspicious` is comparing 0 against 0.
+ */
+export function refuseEmptyWipe(
+	mirror: "passes" | "blockedPlates" | "ratePolicies",
+	incoming: number,
+): SyncResult | null {
+	if (incoming > 0) return null;
+	const held = mirrorRowCounts()[mirror];
+	if (held === 0) return null;
+	const label = {
+		passes: "season passes",
+		blockedPlates: "blocked plates",
+		ratePolicies: "rate plans",
+	}[mirror];
+	const error =
+		`refused_empty_wipe — the cloud returned NO ${label} while this box holds ${held}. ` +
+		`Keeping the cached copy: applying it would stop the gate honouring passes / enforcing bans / pricing stays. ` +
+		`If the list really is empty now, press Sync now again to confirm.`;
+	console.warn(`[cloud-sync] ${error}`);
+	return { ok: false, fetched: 0, error };
+}
 
 /** Outcome of a full pull, for the header's "last synced" stamp. In-memory only
  *  — doesn't need to survive a restart, since syncAll() runs again at boot. */
@@ -169,6 +209,8 @@ export async function syncRatePolicies(): Promise<SyncResult> {
 		// The backend flags one policy as is_site_default (RatePolicyController
 		// marks the first by name), so isSiteDefault comes straight from the payload.
 		const ratePolicies = ratePolicyRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt));
+		const refused = refuseEmptyWipe("ratePolicies", ratePolicies.length);
+		if (refused) return refused;
 
 		let savedCount = 0;
 		for (const ratePolicy of ratePolicies) {
@@ -263,6 +305,8 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const { data: v2Body } = await cloud.get<CloudListBody>("/season-passes/v2");
 		const v2Rows = v2Body.data ?? [];
 		const seasonPasses = v2Rows.flatMap((row: any) => mapV2RowToSeasonPasses(row, fetchedAt));
+		const refusedV2 = refuseEmptyWipe("passes", seasonPasses.length);
+		if (refusedV2) return refusedV2;
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
 	} catch (error) {
@@ -276,6 +320,8 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const seasonPasses = seasonPassRows
 			.filter((seasonPassRow: any) => seasonPassRow.vehicle?.plate_number)
 			.map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
+		const refused = refuseEmptyWipe("passes", seasonPasses.length);
+		if (refused) return refused;
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
 	} catch (error) {
@@ -425,6 +471,8 @@ export async function syncBlockedPlates(): Promise<SyncResult> {
 				reason: row.reason ?? null,
 				fetchedAt,
 			}));
+		const refused = refuseEmptyWipe("blockedPlates", blockedPlates.length);
+		if (refused) return refused;
 		replaceAllBlockedPlates(blockedPlates);
 		return { ok: true, fetched: blockedPlates.length };
 	} catch (error) {

@@ -681,12 +681,20 @@ export interface AppSettings {
   // which is also what makes the lane derive as 'dual' (see deriveLaneDirection).
   // Camera direction is therefore the ONLY thing that decides entry-vs-exit
   // routing — there is no global override any more.
-  /** Override for the computed fee — if the policy-based calculation would
-   *  return less than this value (in cents), use this instead. 0 disables
-   *  the override. Useful when testing the EMV terminal flow without having
-   *  to wait for duration > freeMinutes, OR for sites with a flat minimum
-   *  charge regardless of how briefly the car was parked. */
-  minimumChargeCents: number;
+  // REMOVED 2026-08-21: `minimumChargeCents`. A floor on the computed fee, meant
+  // both as a QA aid (exercise the EMV flow without waiting out the grace window)
+  // and as a flat minimum for sites that wanted one. It never had a field on the
+  // Settings page, so the only way to set it was to edit the database — and the
+  // pricing model this app actually implements is the plain one: nothing is
+  // charged until the grace window is exceeded, then the rate plan decides.
+  //
+  // It was also a live hazard while it existed. Applied ahead of the zero-fee
+  // branch, it charged a stay that finished INSIDE the grace window — a
+  // two-minute drop-off billed on a thirty-minute free period — because a floor
+  // on a chargeable fare had been turned into a fee for arriving.
+  //
+  // Settings are key-value and getSettings() only reads keys present in
+  // DEFAULT_SETTINGS, so any row left in an existing DB is simply ignored.
 
   /** Dev/QA mode — unlocks hidden testing tools (currently the Sessions lane
    *  simulator). Off by default; toggled by tapping the sidebar build version

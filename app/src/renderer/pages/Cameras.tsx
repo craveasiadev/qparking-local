@@ -598,7 +598,13 @@ function CameraForm({
 	error: string | null;
 }) {
 	const set = (k: keyof LprCamera, v: any) => onChange({ ...value, [k]: v });
-	const generateSecret = () => set("webhookSecret", Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
+	// crypto.getRandomValues, not Math.random: this is a shared secret, and
+	// Math.random is not a suitable source for one.
+	const generateSecret = () => {
+		const bytes = new Uint8Array(16);
+		crypto.getRandomValues(bytes);
+		set("webhookSecret", Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(""));
+	};
 	const [pingResult, setPingResult] = useState<string | null>(null);
 
 	useEffect(() => {
@@ -780,6 +786,23 @@ function CameraForm({
 								Generate
 							</button>
 						</div>
+						{/* This field had no guidance at all, and setting it on a real ANPR
+						    camera silently 401s every plate read — the only symptom being one
+						    throttled Activity Log row per ten minutes. Leave it EMPTY unless
+						    something you control is doing the POSTing. */}
+						{value.webhookSecret ? (
+							<p className="mt-1.5 text-[11px] text-amber-700 leading-relaxed">
+								Only set this if a script or app you control does the POSTing. ANPR camera
+								firmware cannot send a custom header, so a real camera will have every
+								plate read rejected (401) — with no symptom except a throttled warning
+								in the Activity Log. Clear it to accept reads from the camera itself.
+							</p>
+						) : (
+							<p className="mt-1.5 text-[11px] text-gray-500 leading-relaxed">
+								Leave empty for a real ANPR camera — its firmware cannot send the header.
+								Set one only for a custom integration that POSTs to this box.
+							</p>
+						)}
 					</Field>
 					<Field label="Enabled">
 						<label className="inline-flex items-center gap-2 mt-2 text-sm">

@@ -265,7 +265,13 @@ function handleEntry(event: PlateEvent, lane: ParkingLane | null) {
   // govern; it existed but was wired to nothing. 0 disables the guard. A window
   // this long is safe because re-entering within it is physically implausible at a
   // barrier — and it's operator-tunable for sites where it isn't.
-  const graceSeconds = getSettings().exitGracePeriodSeconds ?? 0;
+  // Waived for a staff admit. The guard exists to swallow a departing car's
+  // duplicate camera reads; a member of staff typing a plate into Admit Vehicle
+  // has LOOKED at the car, so there is no duplicate to collapse. Leaving it in
+  // their way made the admit fail silently — the flow dropped the read without
+  // emitting a refusal, so awaitEntryOutcome timed out and the UI reported
+  // "admitted, barrier pulsed" for a car that never got a session.
+  const graceSeconds = event.operatorAdmit ? 0 : (getSettings().exitGracePeriodSeconds ?? 0);
   if (graceSeconds > 0) {
     const lastClosed = findLastClosedSessionByPlate(event.plate);
     const exitedAtMs = lastClosed?.exitAt ? Date.parse(lastClosed.exitAt) : NaN;
@@ -636,10 +642,18 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // A pass valid at the EXIT instant already took the free-exit path above, so
   // reaching here means no pass covers this car right now. It may still have
   // held one at ENTRY and lost it mid-stay — ask for that window specifically.
+  // Falls back to the pass this stay was ADMITTED on. The plate lookup is exact,
+  // and for a near-miss admission the plate is exactly what we already know to be
+  // misread — so without this fallback a holder whose pass lapsed mid-stay was
+  // billed the WHOLE stay as a transient, while a holder admitted on a correct
+  // reading paid only the uncovered tail. Same shape as the recordedPass fallback
+  // on the free-exit path above, and re-validated over the same entry window.
   const seasonPass = findSeasonPassByPlate(event.plate, {
     entryAt: session.entryAt,
     exitAt: session.entryAt,
-  });
+  }) ?? (session.passId
+    ? findSeasonPassById(session.passId, { entryAt: session.entryAt, exitAt: session.entryAt })
+    : null);
   if (seasonPass?.endDate) {
     // The pass paid for the stay up to the end of its last valid day; the tail
     // is a normal transient stay. Re-price ONLY the uncovered window — from
@@ -661,15 +675,11 @@ async function handleExit(event: PlateEvent, lane: ParkingLane | null) {
   // didn't fire", which is exactly the support ticket we keep getting.
   flog(`FEE MATH: plate=${event.plate} no valid pass → priced as a transient · stay=${durationMinutes}min · plan="${policy?.policyName ?? 'NONE ATTACHED'}" (grace=${policy?.freeMinutes ?? '-'}min, firstBlock=${policy?.firstBlockCents ?? '-'}c, perBlock=${policy?.perBlockCents ?? '-'}c) → fee=RM ${(feeCents / 100).toFixed(2)}`);
 
-  // Operator-set minimum charge — forces the terminal flow even when the
-  // computed fee is 0 (useful for testing the EMV flow without waiting
-  // for duration > freeMinutes). Defaults to 0 (no override).
-  const settings = getSettings();
-  const minCharge = settings.minimumChargeCents ?? 0;
-  if (minCharge > 0 && feeCents < minCharge) {
-    flog(`minimumChargeCents=${minCharge} overrides computed ${feeCents}`);
-    feeCents = minCharge;
-  }
+  // No minimum-charge override any more — `minimumChargeCents` was removed
+  // 2026-08-21 (see AppSettings). The fee the rate plan computes IS the fee:
+  // nothing is charged until the grace window is exceeded, then the plan decides.
+  // The override could bill a stay that finished inside the grace window, which
+  // is the opposite of what a grace window means.
 
   if (feeCents === 0) {
     // Genuinely free — no rate configured, OR duration within freeMinutes,
@@ -1847,7 +1857,17 @@ function awaitEntryOutcome(plate: string, timeoutMs = 3_000): Promise<{ sessionI
       clearTimeout(timer);
       parkingEvents.off('entry', onEntry);
       parkingEvents.off('warning', onWarning);
+      parkingEvents.off('rescan-ignored', onDropped);
+      parkingEvents.off('entry-ignored-recent-exit', onDropped);
       resolve(result);
+    };
+    // The two guards that drop a read WITHOUT emitting a 'warning'. They are
+    // legitimate outcomes, not silence — and treating them as silence is what let
+    // a caller wait out the timeout and then report success for a car that never
+    // got a session.
+    const onDropped = (payload: any) => {
+      if (normalisePlate(String(payload?.plate ?? '')) !== plate) return;
+      finish({ refused: payload?.secondsSinceExit != null ? 'duplicate-read-after-exit' : 'already-inside' });
     };
     const onEntry = (payload: any) => {
       if (normalisePlate(String(payload?.session?.plate ?? '')) !== plate) return;
@@ -1864,6 +1884,8 @@ function awaitEntryOutcome(plate: string, timeoutMs = 3_000): Promise<{ sessionI
     const timer = setTimeout(() => finish({}), timeoutMs);
     parkingEvents.on('entry', onEntry);
     parkingEvents.on('warning', onWarning);
+    parkingEvents.on('rescan-ignored', onDropped);
+    parkingEvents.on('entry-ignored-recent-exit', onDropped);
   });
 }
 

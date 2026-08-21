@@ -111,6 +111,11 @@ export const w4gEvents = new EventEmitter();
 const pendingByOrderId = new Map<string, PendingOrder>();
 let servers: http.Server[] = [];
 let activePorts: number[] = [];
+/** Ports the operator CONFIGURED, whether or not each one bound. The gap between
+ *  this and activePorts is the diagnostic: the device's notify URL lives on the
+ *  device, so this app cannot know which port it actually posts to — but it can
+ *  say "you asked for 80 and 120, and 80 is not listening". */
+let wantedPorts: number[] = [];
 let lastError: string | null = null;
 let lastResult: { orderId: string; status: string; payType?: number; at: string } | null = null;
 
@@ -223,6 +228,7 @@ export function startW4gServer(): void {
   const s = getSettings();
   const list = parseCallbackPorts(s.tngCallbackPorts);
   const ports = list.length > 0 ? list : [s.tngCallbackPort || DEVICE_HARDCODED_CALLBACK_PORT];
+  wantedPorts = [...ports];
   const alternate = ports.find((p) => p !== DEVICE_HARDCODED_CALLBACK_PORT);
   for (const port of ports) {
     const srv = http.createServer(buildListenerHandler());
@@ -236,6 +242,11 @@ export function startW4gServer(): void {
     });
     srv.on('error', (e: any) => {
       lastError = e.message;
+      // A socket can also die AFTER a successful bind, and activePorts was only
+      // ever emptied by stopW4gServer() — so a dead port stayed listed as active
+      // for the life of the process, and payResultListenerReady() kept reporting
+      // a callback path that no longer existed.
+      activePorts = activePorts.filter((bound) => bound !== port);
       console.error(`[payment-tng] server error on :${port}: ${e.message}`);
       const isPort80 = port === DEVICE_HARDCODED_CALLBACK_PORT;
       const hint = e.code === 'EADDRINUSE'
@@ -259,6 +270,7 @@ export function stopW4gServer(): void {
   }
   servers = [];
   activePorts = [];
+  wantedPorts = [];
 }
 
 async function handlePayResult(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -677,12 +689,33 @@ export function loopbackPayResult(opts: {
  * timeout path would then retry — asking for the SAME fare again. Callers must
  * refuse the charge BEFORE sending PayRequest, not discover this afterwards.
  */
-export function payResultListenerReady(): { ok: boolean; reason?: string } {
+export function payResultListenerReady(): { ok: boolean; reason?: string; missingPorts?: number[] } {
   if (!getSettings().tngEnabled) {
     return { ok: false, reason: 'TNG payments are switched off in Settings, so no PayResult listener is running' };
   }
+  const missingPorts = wantedPorts.filter((port) => !activePorts.includes(port));
   if (activePorts.length === 0) {
-    return { ok: false, reason: 'the PayResult callback listener bound no ports — another service may be holding port 80 (check Settings → callback ports)' };
+    return {
+      ok: false,
+      missingPorts,
+      reason: `the PayResult callback listener bound no ports`
+        + (missingPorts.length > 0 ? ` (configured: ${missingPorts.join(', ')})` : '')
+        + ` — another service may be holding port 80 (check Settings → callback ports)`,
+    };
+  }
+  // Some bound, some didn't. Deliberately still OK: refusing every paid exit
+  // because one configured port is taken would be worse than the risk, and an
+  // operator who lists 80 alongside 120 may well intend the device to use 120.
+  // But it CANNOT pass silently — if the device posts to a port in this gap, its
+  // taps are money we never record, and that is the whole reason this check
+  // exists. Callers surface `missingPorts`; w4gStatus reports it too.
+  if (missingPorts.length > 0) {
+    return {
+      ok: true,
+      missingPorts,
+      reason: `listening on ${activePorts.join(', ')} but NOT on ${missingPorts.join(', ')}`
+        + ` — if the device posts its PayResult to a port in that gap, the tap will never reach this app`,
+    };
   }
   return { ok: true };
 }
@@ -694,6 +727,8 @@ export function w4gStatus(): {
   listening: boolean;
   listenPort: number;          // backwards-compat (first active port)
   listenPorts: number[];       // every port we successfully bound
+  configuredPorts: number[];   // every port the operator asked for
+  missingPorts: number[];      // configured but NOT listening — see payResultListenerReady
   listenAddresses: string[];
   host: string;
   port: number;
@@ -708,6 +743,8 @@ export function w4gStatus(): {
     listening: activePorts.length > 0,
     listenPort: activePorts[0] ?? 0,
     listenPorts: [...activePorts],
+    configuredPorts: [...wantedPorts],
+    missingPorts: wantedPorts.filter((port) => !activePorts.includes(port)),
     listenAddresses: addresses,
     host: setting.tngHost,
     port: setting.tngPort,

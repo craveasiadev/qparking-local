@@ -5,6 +5,7 @@
  * because the operator may delete a terminal while sessions still reference it
  * and we'd rather keep the audit trail than ON DELETE CASCADE.
  */
+import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import Database from "better-sqlite3";
@@ -1300,7 +1301,6 @@ const DEFAULT_SETTINGS: AppSettings = {
 	// duplicate reads, short enough that a genuine quick return isn't refused.
 	// Operator-tunable on the Settings page.
 	exitGracePeriodSeconds: 60,
-	minimumChargeCents: 0,
 	devMode: false,
 	tngEnabled: false,
 	tngHost: "192.168.1.105",
@@ -1391,7 +1391,16 @@ export function upsertTerminal(
 }
 
 export function deleteTerminal(id: number) {
-	getDb().prepare("DELETE FROM terminals WHERE id = ?").run(id);
+	const db = getDb();
+	const tx = db.transaction(() => {
+		// Clear the FK first, as deleteLcd has always done. A lane left pointing at
+		// a deleted terminal refuses every paid exit with 'exit-no-terminal' — a car
+		// held at the boom — while the Lanes page shows a blank device and gives no
+		// clue why.
+		db.prepare("UPDATE lanes SET terminal_id = NULL WHERE terminal_id = ?").run(id);
+		db.prepare("DELETE FROM terminals WHERE id = ?").run(id);
+	});
+	tx();
 }
 
 // ─── LCD displays ──────────────────────────────────────────────────────────
@@ -1682,7 +1691,16 @@ export function upsertLane(lane: Omit<ParkingLane, "id" | "externalId"> & { id?:
 }
 
 export function deleteLane(id: number) {
-	getDb().prepare("DELETE FROM lanes WHERE id = ?").run(id);
+	const db = getDb();
+	const tx = db.transaction(() => {
+		// Detach the cameras. One left pointing at a deleted lane resolves to no
+		// lane at all: its entries record with entry_lane_id NULL (so pricing
+		// silently falls back to the site default) and its exits refuse with
+		// 'exit-no-lane'. The camera looks perfectly healthy on its own page.
+		db.prepare("UPDATE cameras SET lane_id = NULL, lane_external_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE lane_id = ?").run(id);
+		db.prepare("DELETE FROM lanes WHERE id = ?").run(id);
+	});
+	tx();
 }
 
 /**
@@ -3018,6 +3036,11 @@ export function resetLocalDataForRebind(opts: { wipeEquipment: boolean }): void 
 		db.exec("DELETE FROM terminal_log");
 		db.exec("DELETE FROM sync_queue");
 		// Cloud mirrors — re-pulled fresh for the new site on the next sync.
+		// Unbind before deleting, exactly as pruneStaleRatePolicies does when a
+		// single plan disappears. Without this, a rebind that KEEPS the equipment
+		// left every lane pointing at a plan that no longer exists, and pricing
+		// quietly fell through to the new site's default with nothing to show why.
+		db.exec("UPDATE lanes SET policy_id = NULL WHERE policy_id IS NOT NULL");
 		db.exec("DELETE FROM tariff_rules");
 		db.exec("DELETE FROM rate_policies");
 		db.exec("DELETE FROM season_passes");
@@ -3383,6 +3406,24 @@ export function findSeasonPassById(
  * Every active pass the gate currently recognises (cached from
  * `/api/v1/local-server/passes`). Backs the Passes page.
  */
+/**
+ * How many rows each gate-critical mirror currently holds.
+ *
+ * Backs the "had rows, now zero" guard in cloud-sync: a replace-all that arrives
+ * empty is indistinguishable, at the call site, from a site that genuinely has no
+ * passes — and the difference decides whether every resident starts getting
+ * charged and every ban stops being enforced.
+ */
+export function mirrorRowCounts(): { passes: number; blockedPlates: number; ratePolicies: number } {
+	const db = getDb();
+	const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as any).c as number;
+	return {
+		passes: count("season_passes"),
+		blockedPlates: count("blocked_plates"),
+		ratePolicies: count("rate_policies"),
+	};
+}
+
 export function listSeasonPasses(): SeasonPass[] {
 	const rows = getDb().prepare("SELECT * FROM season_passes ORDER BY plate_number").all() as any[];
 	return rows.map(rowToSeasonPass);
@@ -3729,12 +3770,27 @@ function rowToActivityLog(activityLogRow: any): ActivityLog {
 	};
 }
 
-export function listActivityLogs(): ActivityLog[] {
+/** Default cap on the activity-log read. It had NO limit, and the table is filled
+ *  by an unbounded /activity-logs replace-all from the cloud — so on an aged site
+ *  this serialised the site's entire audit trail across IPC into the renderer on
+ *  every visit to the page. Every other list in the app moved to a bounded read
+ *  (sessions:page, transactions:list-page); this one had not. */
+const ACTIVITY_LOG_PAGE_LIMIT = 2_000;
+
+export function listActivityLogs(limit = ACTIVITY_LOG_PAGE_LIMIT): ActivityLog[] {
 	// Newest first — occurred_at is when the event actually happened (ISO 8601
 	// text, so lexicographic DESC is chronological); created_at breaks ties for
 	// rows logged in the same instant.
-	const rows = getDb().prepare("SELECT * FROM activity_logs ORDER BY occurred_at DESC, created_at DESC").all() as any[];
+	const rows = getDb()
+		.prepare("SELECT * FROM activity_logs ORDER BY occurred_at DESC, created_at DESC LIMIT ?")
+		.all(limit) as any[];
 	return rows.map(rowToActivityLog);
+}
+
+/** Total rows held, so the page can say when its view is truncated instead of
+ *  quietly showing the newest slice as if it were everything. */
+export function countActivityLogs(): number {
+	return (getDb().prepare("SELECT COUNT(*) AS c FROM activity_logs").get() as any).c as number;
 }
 
 /**
@@ -3853,6 +3909,93 @@ export function insertActivityLog(payload: ActivityLogPayload): void {
 		new Date().toISOString(),
 		new Date().toISOString(),
 	);
+}
+
+// ─── retention ───────────────────────────────────────────────────────────────
+// Nothing on this box was ever pruned. sessions / transactions / activity_logs /
+// terminal_log only shrank on a site rebind, and the plate-image folders never
+// shrank at all — so a gate PC running unattended for a year accumulated
+// gigabytes with no floor, and a full disk stops the barrier working.
+//
+// Horizons chosen by the site (leaner preset): device logs 7d, plate images 30d,
+// audit trail 90d. Sessions and transactions are NEVER pruned here — they are the
+// revenue record.
+
+/** Delete terminal_log rows older than `days`. It is pure diagnostics, and the
+ *  chattiest table in the schema: httpPost writes a row per socket stage per
+ *  request, so a single PayRequest leaves ~10 rows with JSON payloads. */
+export function pruneTerminalLog(days: number): number {
+	const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+	return getDb()
+		.prepare(`DELETE FROM terminal_log WHERE datetime(COALESCE(created_at, CURRENT_TIMESTAMP)) < datetime(?)`)
+		.run(cutoff).changes;
+}
+
+/** Delete activity_logs rows older than `days`, EXCEPT local rows the cloud has
+ *  not acknowledged — those exist nowhere else, exactly as replaceAllActivityLogs
+ *  already reasons. */
+export function pruneActivityLogs(days: number): number {
+	const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+	return getDb()
+		.prepare(
+			`DELETE FROM activity_logs
+        WHERE datetime(occurred_at) < datetime(?)
+          AND NOT (source = 'local' AND pushed_to_cloud = 0)`,
+		)
+		.run(cutoff).changes;
+}
+
+/** Plate-image paths still worth keeping on disk regardless of age: any image
+ *  belonging to a session the cloud has not got the current version of, because
+ *  that upload has not happened yet and the file is the only copy. */
+function imagePathsPendingUpload(): Set<string> {
+	const rows = getDb()
+		.prepare(`SELECT entry_image_path, exit_image_path FROM sessions WHERE ${NEEDS_CLOUD_PUSH_SQL}`)
+		.all() as { entry_image_path: string | null; exit_image_path: string | null }[];
+	const keep = new Set<string>();
+	for (const row of rows) {
+		if (row.entry_image_path) keep.add(path.resolve(row.entry_image_path));
+		if (row.exit_image_path) keep.add(path.resolve(row.exit_image_path));
+	}
+	return keep;
+}
+
+/**
+ * Delete captured plate JPEGs older than `days` from userData/plates/<date>/.
+ *
+ * Skips anything still waiting to reach the cloud (see imagePathsPendingUpload) —
+ * deleting those would lose the only copy. Empty date folders are removed after.
+ * Best-effort per file: a locked or vanished file must not abort the sweep.
+ */
+export function pruneOldPlateImages(days: number): { deleted: number; keptPendingUpload: number; bytesFreed: number } {
+	const root = path.join(app.getPath("userData"), "plates");
+	let deleted = 0, keptPendingUpload = 0, bytesFreed = 0;
+	if (!fs.existsSync(root)) return { deleted, keptPendingUpload, bytesFreed };
+	const cutoffMs = Date.now() - days * 86_400_000;
+	const pending = imagePathsPendingUpload();
+	for (const folder of fs.readdirSync(root)) {
+		const dir = path.join(root, folder);
+		let entries: string[];
+		try {
+			if (!fs.statSync(dir).isDirectory()) continue;
+			entries = fs.readdirSync(dir);
+		} catch { continue; }
+		for (const name of entries) {
+			const file = path.join(dir, name);
+			try {
+				const stat = fs.statSync(file);
+				if (stat.mtimeMs >= cutoffMs) continue;
+				if (pending.has(path.resolve(file))) { keptPendingUpload++; continue; }
+				fs.unlinkSync(file);
+				deleted++;
+				bytesFreed += stat.size;
+			} catch { /* locked or already gone — leave it for the next sweep */ }
+		}
+		// Drop the folder once it is empty; rmdir refuses a non-empty one, which is
+		// exactly the guard we want.
+		try { fs.rmdirSync(dir); } catch { /* not empty, or in use */ }
+	}
+	return { deleted, keptPendingUpload, bytesFreed };
 }
 
 // ─── device health ───────────────────────────────────────────────────────────

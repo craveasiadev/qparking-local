@@ -102,9 +102,15 @@ export function ActivityLogs() {
 		source: "" as string,
 		pushed: "" as "" | "pushed" | "unpushed",
 	});
+	const [totalHeld, setTotalHeld] = useState(0);
 
 	const [loadActivityLogs, loading] = useAsyncAction(async () => {
-		setActivityLogs(await window.bridge.listActivityLogs());
+		// Bounded read (see db.listActivityLogs). `total` is what the box actually
+		// holds, so a truncated view can say so rather than passing the newest
+		// slice off as the whole trail.
+		const page = await window.bridge.listActivityLogs();
+		setActivityLogs(page.rows);
+		setTotalHeld(page.total);
 	});
 
 	const pushToCloudActivityLogs = useMemo(() => activityLogs.filter((activityLog: ActivityLog) => !activityLog.pushedToCloud), [activityLogs]);
@@ -171,6 +177,12 @@ export function ActivityLogs() {
 						</InfoTip>
 					</h1>
 					<p className="text-xs sm:text-sm text-gray-500 mt-1">Every local server action and event — gate opens, payments, config edits, sync runs — newest first.</p>
+					{totalHeld > activityLogs.length && (
+						<p className="text-[11px] text-amber-700 mt-1">
+							Showing the newest {activityLogs.length.toLocaleString()} of {totalHeld.toLocaleString()} rows.
+							Older entries are still on the box — search the cloud audit trail for anything further back.
+						</p>
+					)}
 				</div>
 				<div className="flex items-center gap-2 self-start sm:self-auto">
 					<button

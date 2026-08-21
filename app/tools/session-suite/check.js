@@ -55,6 +55,7 @@ async function main() {
   const tng = require('../../dist/main/services/payment-tng');
   const flow = require('../../dist/main/services/parking-flow');
   const { lprEvents } = require('../../dist/main/services/lpr-webhook');
+  const sync = require('../../dist/main/services/cloud-sync');
 
   // ─── payment-device seam ────────────────────────────────────────────────
   // tsc emits cross-module calls as `payment_tng_1.payRequest(...)`, so
@@ -89,7 +90,6 @@ async function main() {
     qparkingBaseUrl: '', qparkingApiKey: '',       // keep the cloud queue inert
     tngEnabled: true,
     exitGracePeriodSeconds: 90,
-    minimumChargeCents: 0,
     tngAutoRetrigger: false,
   });
 
@@ -360,15 +360,6 @@ async function main() {
   check('B8c …and the car waits inside for a manual release', inside('BBB0008'));
   listenerReady = { ok: true };
 
-  db.saveSettings({ minimumChargeCents: 100 });
-  payScript = APPROVE();
-  const minChg = await drive('BBB0009', ENTRY, EXIT, L.zero.id, C.zeroIn.id, C.zeroOut.id);
-  await tick(12);
-  const minChgRow = db.getSessionById(minChg.id);
-  check('B9 minimumChargeCents forces the terminal flow on a RM 0 plan',
-    minChgRow.paymentStatus === 'paid' && minChgRow.feeCents === 100,
-    `${minChgRow.paymentStatus}/${minChgRow.feeCents}`);
-  db.saveSettings({ minimumChargeCents: 0 });
 
   // Entered on the RM 0 lane, leaving through the charging lane: the ENTRY
   // lane's plan must govern, so this is still free.
@@ -810,6 +801,20 @@ async function main() {
     lapsedQuote?.durationMinutes === 1560, `duration=${lapsedQuote?.durationMinutes}`);
   check('G2b …and the exit is not free', db.getSessionById(lapsed.id).status === 'entered' && inside('GLA0001'));
 
+  // ── G1b · the same lapse, but the plate was MISREAD on the way in ─────
+  // PASS PARTIAL asked findSeasonPassByPlate with the exact plate — the very
+  // thing already known to be wrong for a near-miss admission — so a holder whose
+  // pass lapsed mid-stay was billed the WHOLE stay while a holder admitted on a
+  // correct reading paid only the tail. Same fixture as G1, entered one character
+  // short and carrying the pass id the entry recorded.
+  const lapsedMisread = open('GLA000', L.noTerm.id, C.noTermIn.id, '2026-07-31T02:00:00.000Z');
+  db.updateSessionFields(lapsedMisread.id, { passId: 'g-lapsed' });
+  read(C.noTermOut.id, 'GLA000', 'exit', '2026-08-01T04:00:00.000Z');
+  await tick(14);
+  const misreadQuote = pendingFor('GLA000');
+  check('G1b a lapsed pass is honoured through a MISREAD plate — tail only, not the full stay',
+    misreadQuote?.feeCents === 3800, `feeCents=${misreadQuote?.feeCents} (full stay would be 8000)`);
+
   // Renewed mid-stay: the lapsed free_access row outranks the renewal in the
   // broad lookup, so the exit-day re-query is what must save this driver.
   const renewed = await drive('GRE0002', '2026-07-31T02:00:00.000Z', '2026-08-01T04:00:00.000Z',
@@ -851,6 +856,31 @@ async function main() {
     `before=${beforeRevoke.session.passId} after=${afterRevoke.quoted}`);
   check('G7b …and it is gone from the local roster',
     !db.listSeasonPasses().some((p) => p.passId === 'f-revocable'));
+
+  // ── G8-G10 · an EMPTY cloud response must not disarm the gate ──────────
+  // Every pull guarded the 404 case; none guarded a 200 carrying {"data":[]}.
+  // replaceAllSeasonPasses([]) and replaceAllBlockedPlates([]) do exactly what
+  // they say, so one bad cloud deploy would stop every pass being honoured and
+  // every ban being enforced — and the rate-plan prune would clear each lane's
+  // policy binding too, so it would not come back on the next good sync.
+  // "Had rows, now zero" is the signal; 0 -> 0 is a legitimately empty site.
+  db.replaceAllSeasonPasses([pass('g-keep', 'KEEP0001', { startDate: null, endDate: null })]);
+  db.replaceAllBlockedPlates([{ plateNumber: 'BAN0009', vehicleId: null, reason: 'test', fetchedAt: nowIso }]);
+  const heldBefore = db.mirrorRowCounts();
+  check('G8 the box is holding a roster and a deny list to protect',
+    heldBefore.passes === 1 && heldBefore.blockedPlates === 1, JSON.stringify(heldBefore));
+  // Simulating the pull's own decision, since the HTTP layer is not in scope here.
+  check('G9 an empty roster is REFUSED while the box holds one',
+    !!sync.refuseEmptyWipe('passes', 0), 'expected a refusal');
+  check('G9b …naming what it is protecting, so the operator can confirm on a second pull',
+    /holds 1/.test(sync.refuseEmptyWipe('passes', 0)?.error ?? ''),
+    sync.refuseEmptyWipe('passes', 0)?.error);
+  check('G9c …and the same for the deny list',
+    !!sync.refuseEmptyWipe('blockedPlates', 0));
+  check('G10 a NON-empty payload is never refused',
+    sync.refuseEmptyWipe('passes', 5) === null);
+  check('G10b …nor an empty one on a box that holds nothing (a genuinely empty site)',
+    (db.replaceAllSeasonPasses([]), sync.refuseEmptyWipe('passes', 0)) === null);
 
   // ══════════════════════════════════════════════════════════════════════
   G('H · duration & fee integrity');
@@ -1071,6 +1101,33 @@ async function main() {
   db.replaceAllBlockedPlates([]);
 
   const admitDup = await flow.admitVehicleByOperator(simPassLane.id, 'STAFF001');
+  // ── I4o2 · a staff admit is a human decision, not a duplicate read ────
+  // The exit-grace guard exists to swallow a departing car's extra camera reads.
+  // It was swallowing staff admits too — silently, because that guard emits
+  // 'entry-ignored-recent-exit' rather than a 'warning', so awaitEntryOutcome
+  // heard nothing, timed out, and the modal reported "admitted, barrier pulsed"
+  // for a car that never got a session.
+  db.saveSettings({ exitGracePeriodSeconds: 90 });
+  const justLeft = db.createEntrySession('ADMIT911', L.zero.id, C.zeroIn.id, null);
+  db.recordExit(justLeft.id, {
+    exitAt: new Date(Date.now() - 5_000).toISOString(),
+    exitLaneId: L.zero.id, exitCameraId: C.zeroOut.id, exitImagePath: null,
+    durationMinutes: 5, feeCents: 0, paymentStatus: 'free', terminalTxnId: null,
+    freeReason: 'rate-zero',
+  });
+  const admitAfterExit = await flow.admitVehicleByOperator(simPassLane.id, 'ADMIT911');
+  await tick(12);
+  check('I4o2 staff can admit a car that left seconds ago — the grace guard is waived by hand',
+    admitAfterExit.ok === true && !!admitAfterExit.sessionId && inside('ADMIT911'),
+    JSON.stringify(admitAfterExit));
+  // And the honesty half: a read the flow DROPS quietly must never come back as
+  // success. Re-admitting the car now hits the already-inside guard, which also
+  // emits no 'warning'.
+  const admitTwice = await flow.admitVehicleByOperator(simPassLane.id, 'ADMIT911');
+  check('I4o3 …and a dropped read is reported as refused, never as a silent success',
+    admitTwice.ok === false || !!admitTwice.refused,
+    JSON.stringify(admitTwice));
+
   check('I4o …and refuses a plate that is already inside, naming the stay',
     admitDup.ok === false && /already inside/.test(admitDup.error ?? ''),
     `ok=${admitDup.ok} error=${admitDup.error}`);

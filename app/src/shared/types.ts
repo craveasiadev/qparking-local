@@ -523,7 +523,10 @@ export interface BridgeApi {
 	 */
 	admitVehicle(input: { laneId: number; plate: string }): Promise<{ ok: boolean; error?: string; cameraId?: number; sessionId?: number; refused?: string }>;
 
-	listActivityLogs(): Promise<ActivityLog[]>;
+	/** The newest slice of the audit trail plus the total held, so the page can say
+	 *  when its view is truncated. Bounded on purpose: the table is filled by an
+	 *  unbounded cloud replace-all. */
+	listActivityLogs(): Promise<{ rows: ActivityLog[]; total: number }>;
 	insertActivityLog(payload: ActivityLogPayload): Promise<void>;
 
 	// App self-update — checks qparking cloud /latest-built endpoint.

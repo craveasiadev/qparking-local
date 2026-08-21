@@ -95,9 +95,10 @@ import {
   listTransactionsPage, countTransactions,
   listRatePolicies, getRatePolicy, getSiteDefaultRatePolicy,
   listParkingSpaces, listSeasonPasses, listCloudCustomers, listCloudVehicles,
-  findSeasonPassByPlate,
+  findSeasonPassByPlate, findSeasonPassById,
   getCurrentSite, getSite, getBoundSiteId, resetLocalDataForRebind, closeDb,
-  listActivityLogs, insertActivityLog, dayTotals,
+  listActivityLogs, countActivityLogs, insertActivityLog, dayTotals,
+  pruneTerminalLog, pruneActivityLogs, pruneOldPlateImages,
 } from './services/db';
 import { computeFee, stayDurationMinutes, retriggerSessionExit, retriggerSessionExitByPlate, simulateRatePolicyFee, simulateEntryAt, simulateExitAt, admitVehicleByOperator, cancelExitInFlight, startParkingFlow, parkingEvents, laneCameraFacing, shouldRepriceEditedSession } from './services/parking-flow';
 import { canonicalPlate } from '../shared/plate';
@@ -213,6 +214,9 @@ app.whenReady().then(async () => {
   // Report that health up to the cloud. Started after the monitor so its first
   // post carries a real snapshot rather than an empty one.
   startHealthHeartbeat();
+  // Housekeeping last: it only reads and deletes, and its first pass should see
+  // whatever the boot pull has already written.
+  startRetentionSweep();
 
   createWindow();
   createTray();
@@ -231,6 +235,7 @@ function stopBackgroundServices() {
   try { stopLcdDisplays(); } catch { /* ignore */ }
   try { stopDeviceHealth(); } catch { /* ignore */ }
   try { stopHealthHeartbeat(); } catch { /* ignore */ }
+  try { stopRetentionSweep(); } catch { /* ignore */ }
 }
 
 /** Any quit route that isn't the tray's — Windows shutdown, a task-manager close,
@@ -373,6 +378,66 @@ async function pulseBarrierFor(payload: any, side: 'entry' | 'exit'): Promise<vo
       + " Check the camera's host / username / password.",
     changes: { cameraId, side, relayError: relay.error ?? null },
   });
+}
+
+// ─── retention sweep ───────────────────────────────────────────────────────
+// Horizons agreed with the site (leaner preset). Sessions and transactions are
+// deliberately absent: they are the revenue record and are never pruned here.
+const RETENTION = {
+  /** terminal_log — pure diagnostics, and the chattiest table in the schema. */
+  deviceLogDays: 7,
+  /** Captured plate JPEGs. Anything still awaiting a cloud push is kept
+   *  regardless of age — see pruneOldPlateImages. */
+  plateImageDays: 30,
+  /** activity_logs. Local rows the cloud has not acked are kept regardless. */
+  auditDays: 90,
+};
+const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60_000;
+let retentionTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Reclaim disk. Runs once at boot and daily after.
+ *
+ * Best-effort and never allowed to throw: a housekeeping failure must not be able
+ * to stop a barrier. Only reported when it actually removed something, so a quiet
+ * box does not write a row a day saying "nothing to do".
+ */
+function sweepRetention(): void {
+  try {
+    const logRows = pruneTerminalLog(RETENTION.deviceLogDays);
+    const auditRows = pruneActivityLogs(RETENTION.auditDays);
+    const images = pruneOldPlateImages(RETENTION.plateImageDays);
+    const total = logRows + auditRows + images.deleted;
+    if (total === 0) return;
+    const mb = (images.bytesFreed / (1024 * 1024)).toFixed(1);
+    console.log(`[retention] pruned ${logRows} device-log row(s), ${auditRows} audit row(s), ${images.deleted} plate image(s) (${mb} MB)`);
+    audit({
+      eventKey: 'app.retention.swept',
+      action: 'edit',
+      category: 'lifecycle',
+      severity: 'low',
+      outcome: 'ok',
+      resourceType: 'app_settings',
+      description: `Housekeeping · removed ${logRows} device-log row(s) over ${RETENTION.deviceLogDays}d,`
+        + ` ${auditRows} audit row(s) over ${RETENTION.auditDays}d,`
+        + ` and ${images.deleted} plate image(s) over ${RETENTION.plateImageDays}d (${mb} MB freed)`
+        + (images.keptPendingUpload > 0 ? ` · ${images.keptPendingUpload} image(s) kept: still awaiting a cloud push` : ''),
+      changes: { ...RETENTION, logRows, auditRows, ...images },
+    });
+  } catch (err) {
+    console.error('[retention] sweep failed', err);
+  }
+}
+
+function startRetentionSweep(): void {
+  if (retentionTimer) return;
+  sweepRetention();
+  retentionTimer = setInterval(sweepRetention, RETENTION_SWEEP_INTERVAL_MS);
+  retentionTimer.unref?.();
+}
+
+function stopRetentionSweep(): void {
+  if (retentionTimer) { clearInterval(retentionTimer); retentionTimer = null; }
 }
 
 /** Camera name for an audit description, falling back to its id. */
@@ -1105,7 +1170,18 @@ function previewFeeForOpenSession(s: ReturnType<typeof listSessionsPage>[number]
   // wrong — it's what prompts "why is this VIP being charged?". Mirror the exit
   // flow's own pass shortcut (handleExit checks this BEFORE pricing) using the
   // same entry-or-exit-instant validity window.
-  if (findSeasonPassByPlate(s.plate, { entryAt: s.entryAt, exitAt: nowIso })) return 0;
+  // Asked at THIS instant on both sides, exactly as handleExit's free-exit
+  // shortcut does. It used to pass { entryAt: s.entryAt, exitAt: nowIso }, and
+  // because findSeasonPassByPlate matches a pass covering EITHER end, a pass that
+  // covered the entry and has since lapsed still returned a hit — so the panel
+  // showed RM 0.00 for a car the barrier is about to bill for its uncovered tail.
+  //
+  // The recorded pass is honoured too, mirroring the same fallback the exit uses:
+  // a near-miss holder WILL exit free, and showing them a running fare is the
+  // same lie in the other direction.
+  const passNow = findSeasonPassByPlate(s.plate, { entryAt: nowIso, exitAt: nowIso })
+    ?? (s.passId ? findSeasonPassById(s.passId, { entryAt: nowIso, exitAt: nowIso }) : null);
+  if (passNow) return 0;
   const entryLane = s.entryLaneId ? getLane(s.entryLaneId) : null;
   const exitLane = s.exitLaneId ? getLane(s.exitLaneId) : null;
   const policy = (entryLane?.policyId ? getRatePolicy(entryLane.policyId) : null)
@@ -1113,9 +1189,9 @@ function previewFeeForOpenSession(s: ReturnType<typeof listSessionsPage>[number]
     ?? getSiteDefaultRatePolicy();
   if (!policy) return 0;
   const durationMinutes = stayDurationMinutes(s.entryAt, nowIso);
-  let fee = computeFee(durationMinutes, policy, s.entryAt, nowIso);
-  const minCharge = getSettings().minimumChargeCents ?? 0;
-  if (minCharge > 0 && fee < minCharge) fee = minCharge;
+  const fee = computeFee(durationMinutes, policy, s.entryAt, nowIso);
+  // No minimum-charge override — removed with the setting (see AppSettings), so
+  // this preview and the gate compute the same number from the same plan.
   return fee;
 }
 
@@ -1466,7 +1542,7 @@ ipcMain.handle('cloud-customers:list', () => listCloudCustomers());
 ipcMain.handle('cloud-customers:sync', () => syncCloudCustomers());
 ipcMain.handle('cloud-vehicles:list', () => listCloudVehicles());
 ipcMain.handle('cloud-vehicles:sync', () => syncCloudVehicles());
-ipcMain.handle('activity-logs:list', () => listActivityLogs());
+ipcMain.handle('activity-logs:list', () => ({ rows: listActivityLogs(), total: countActivityLogs() }));
 ipcMain.handle('activity-logs:insert', (_e, payload: ActivityLogPayload) => insertActivityLog(payload));
 // "Test price" — simulate the fee a rate plan charges for an entry→exit window.
 ipcMain.handle('policies:simulate', (_e, input: { policyId: string; entry: string; exit: string }) =>
