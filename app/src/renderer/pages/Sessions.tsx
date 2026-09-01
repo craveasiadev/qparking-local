@@ -19,7 +19,6 @@ import {
 } from '../lib/datetime';
 import { bridgeErrorMessage } from '../lib/errors';
 import { toast } from '../toast';
-import { useCurrentSite } from '../context/SiteContext';
 
 const PAGE_SIZE = 20;
 
@@ -598,7 +597,6 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   // Sessions qparking cloud is missing or holding an out-of-date copy of.
   const [unsyncedCount, setUnsyncedCount] = useState(0);
   const [pushResult, setPushResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const site = useCurrentSite();
   const [, setTick] = useState(0);
   useEffect(() => { const h = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(h); }, []);
 
@@ -704,7 +702,6 @@ export function Sessions({ devMode = false }: { devMode?: boolean }) {
   }
 
   const [runDeleteOne, deletingOne] = useAsyncAction(async (id: number) => {
-    const row = rows.find((r) => r.id === id);
     // Throws when the stay is mid-charge (see sessions:delete) — the onError
     // toast below carries that refusal to the operator. The audit row is only
     // written on the path where the delete actually happened.
@@ -1424,7 +1421,6 @@ function ReleaseSessionModal({
   session, lanes, defaultLaneId, onClose, onReleased,
 }: { session: ParkingSession; lanes: ParkingLane[]; defaultLaneId: number | null; onClose: () => void; onReleased: () => void }) {
   useEscapeToClose(onClose);
-  const site = useCurrentSite();
   const [reason, setReason] = useState('');
   // Default to a lane that's actually in the (exit-only) list: the lane the
   // operator triggered from, else the session's own exit lane, else the first
@@ -1500,7 +1496,6 @@ function EditSessionModal({
   session, policies, defaultPolicy, onClose, onSaved,
 }: { session: ParkingSession; policies: RatePolicy[]; defaultPolicy: RatePolicy | null; onClose: () => void; onSaved: () => void }) {
   useEscapeToClose(onClose);
-  const site = useCurrentSite();
   const [plate, setPlate] = useState(session.plate);
   const [entryAt, setEntryAt] = useState(toLocalInput(session.entryAt));
   // Default exit BLANK when the session is still open — so an operator can't
