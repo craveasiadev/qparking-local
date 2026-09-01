@@ -1,7 +1,7 @@
 {
   "name": "qparking-local",
   "productName": "QParking Local Server",
-  "version": "0.20.1",
+  "version": "0.20.2",
   "description": "On-prem parking controller: LPR camera ingest, ECPI payment-terminal driver, parking-session state machine, rate sync from qparking SaaS.",
   "main": "dist/main/index.js",
   "author": "QParking",
@@ -22,7 +22,7 @@
     "lint": "tsc -p src/main/tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.json --noEmit",
     "test:migration": "npm run build:main && node tools/migration-check/run.mjs",
     "test:fees": "npm run build:main && node tools/fee-gap-check/run.mjs",
-    "test": "npm run test:migration && npm run test:fees && npm run test:gate && npm run test:parity && npm run test:sessions && npm run test:activity && npm run test:session-sync && npm run test:gate-sync && npm run test:relay-latency && npm run test:lcd",
+    "test": "npm run test:migration && npm run test:fees && npm run test:gate && npm run test:parity && npm run test:sessions && npm run test:activity && npm run test:session-sync && npm run test:gate-sync && npm run test:device-health && npm run test:relay-latency && npm run test:lcd",
     "find:cameras": "node tools/find-cameras/run.mjs",
     "test:gate": "npm run build:main && node tools/gate-guard-check/run.mjs",
     "test:sessions": "npm run build:main && node tools/session-suite/run.mjs",
@@ -31,6 +31,7 @@
     "test:relay-latency": "npm run build:main && node tools/relay-latency-check/run.mjs",
     "test:parity": "npm run build:main && node tools/gate-parity-check/run.mjs",
     "test:gate-sync": "npm run build:main && node tools/gate-sync-check/run.mjs",
+    "test:device-health": "npm run build:main && node tools/device-health-check/run.mjs",
     "test:lcd": "npm run build:main && node tools/lcd-check/run.mjs"
   },
   "dependencies": {

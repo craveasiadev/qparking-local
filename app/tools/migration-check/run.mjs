@@ -25,6 +25,7 @@ const CASES = [
   ['dual-only', "retiring camera 'dual' — every entry cam was dual → setting flipped, behaviour preserved"],
   ['dual-mixed', "retiring camera 'dual' — dual + plain entry cams → global setting NOT flipped"],
   ['webhook-port', 'the box-wide LPR port moves onto each camera, carrying the value already in use'],
+  ['column-lists', 'hand-written INSERT column lists match their positional arguments (upsertSite round-trip)'],
 ];
 
 async function runCase(name) {

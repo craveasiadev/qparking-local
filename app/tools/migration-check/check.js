@@ -244,6 +244,68 @@ try {
     // by re-checking the invariant after a fresh statement round-trip.
     const stillNoDual = db.prepare("SELECT COUNT(*) AS n FROM cameras WHERE direction='dual'").get().n;
     check('re-check: still no dual rows', stillNoDual === 0, String(stillNoDual));
+  } else if (testCase === 'column-lists') {
+    // Hand-written INSERT column lists vs their positional arguments.
+    //
+    // THE GAP THIS CLOSES: `upsertSite()` is on the boot path — syncSite() calls
+    // it on every full pull — and nothing exercised it. TypeScript cannot help
+    // here: the columns live in a SQL string and the values in a separate
+    // `.run(...)` list, so dropping a column from one and not the other is a
+    // pure runtime error ("column index out of range", or worse, every value
+    // after the gap silently shifted one column left). Exactly the drift the
+    // sessions-rebuild bug above was, in a different disguise.
+    const dbmod = require(DIST_DB);
+    dbmod.getDb(); // create the schema for this fresh temp DB
+
+    // 1. STATIC: every multi-column INSERT in db.js must balance.
+    const sql = fs.readFileSync(DIST_DB, 'utf8');
+    const inserts = [...sql.matchAll(/INSERT(?:\s+OR\s+\w+)?\s+INTO\s+(\w+)\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)/gi)];
+    check('found INSERT statements to audit', inserts.length > 0, String(inserts.length));
+    const unbalanced = [];
+    for (const [, table, cols, vals] of inserts) {
+      const nCols = cols.split(',').map((c) => c.trim()).filter(Boolean).length;
+      const nVals = vals.split(',').map((v) => v.trim()).filter(Boolean).length;
+      // Only positional-placeholder inserts are comparable; ones built from
+      // expressions or named params are skipped rather than guessed at.
+      if (!/^[?,\s]+$/.test(vals)) continue;
+      if (nCols !== nVals) unbalanced.push(`${table}: ${nCols} cols vs ${nVals} placeholders`);
+    }
+    check('every positional INSERT has as many placeholders as columns',
+      unbalanced.length === 0, unbalanced.join(' | '));
+
+    // 2. RUNTIME: upsertSite actually round-trips, insert AND conflict-update.
+    const site = {
+      id: 'site-uuid-1', companyId: 'co-1', name: 'QA Site', address: 'somewhere',
+      totalSpaces: 42, occupiedSpaces: 7, status: 'active', contactPerson: 'Ana',
+      telephone: '0100000000', fax: null, country: 'MY', email: 'qa@example.test',
+      parkingSiteType: 'mall', logoUrl: null,
+    };
+    let insertErr = null;
+    let stored = null;
+    try { stored = dbmod.upsertSite(site); } catch (e) { insertErr = e.message; }
+    check('upsertSite() inserts without throwing', insertErr === null, insertErr);
+    check('...and every value lands in its OWN column (no left-shift)',
+      !!stored && stored.name === 'QA Site' && stored.totalSpaces === 42
+        && stored.occupiedSpaces === 7 && stored.country === 'MY'
+        && stored.email === 'qa@example.test' && stored.parkingSiteType === 'mall',
+      JSON.stringify(stored));
+
+    let updateErr = null;
+    let updated = null;
+    try { updated = dbmod.upsertSite({ ...site, name: 'QA Site Renamed', totalSpaces: 50 }); }
+    catch (e) { updateErr = e.message; }
+    check('...and the ON CONFLICT update path works too', updateErr === null, updateErr);
+    check('...carrying the new values', updated?.name === 'QA Site Renamed' && updated?.totalSpaces === 50,
+      JSON.stringify(updated));
+
+    // The two never-written cloud columns were removed from the mapper, the type
+    // and this INSERT on 2026-09-01; the SQLite columns stay and must still
+    // default cleanly rather than violating NOT NULL.
+    const raw = safeGet(new Database(dbPath), "SELECT revenue_today, alarm_count FROM sites WHERE id='site-uuid-1'");
+    check('the dropped revenue_today / alarm_count columns still default to 0',
+      raw.row?.revenue_today === 0 && raw.row?.alarm_count === 0,
+      raw.error ?? JSON.stringify(raw.row));
+
   } else if (testCase === 'webhook-port') {
     // ─── 2026-08-11: the LPR webhook port moves onto the camera ─────────────
     // It used to be ONE box-wide setting. Cameras turned out to differ in what
