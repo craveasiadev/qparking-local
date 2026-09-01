@@ -21,8 +21,9 @@ export function ParkingPolicies() {
 
   async function refresh() { setList(await window.bridge.listRatePolicies()); }
   useEffect(() => { void refresh(); }, []);
-  // Rates only come down on a FULL pull (boot / "Sync now" / rebind), so this
-  // is the one moment the list can change under the operator's feet.
+  // Rates come down on the 5-minute gate-critical tick as well as on a full
+  // pull (boot / "Sync now" / rebind), so this list can change under the
+  // operator's feet at any time — not just when they press something.
   useReloadOnCloudSync(['policies'], refresh);
 
   const [sync, syncing] = useAsyncAction(async () => {

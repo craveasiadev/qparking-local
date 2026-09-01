@@ -110,6 +110,7 @@ import {
   cloudPullEvents, getCloudPullState,
   pushActivityLogsToCloud,
   autoSync, stopAutoSync,
+  autoSyncGateCritical, stopAutoSyncGateCritical,
 } from './services/cloud-sync';
 import { describeRequestError } from './services/cloud-api';
 import {
@@ -205,13 +206,19 @@ app.whenReady().then(async () => {
   // subscribes to that module's events; it opens its own outbound TCP links and
   // never blocks anything the flow does.
   startLcdDisplays();
-  // Cloud pull at boot, then hand over to autoSync()'s recurring pull (cadence
-  // from company_settings.sync_interval_minutes, which this first pull is what
-  // fetches — hence boot-pull-then-arm rather than arming straight away). The
-  // local SQLite cache persists across restarts, so a failed boot pull just
-  // leaves the gate pricing and gating from the last successful sync until the
-  // next tick or a manual "Sync now".
-  void syncAll().catch(() => null).then(() => autoSync());
+  // Cloud pull at boot, then hand over to the two recurring ticks:
+  //   autoSyncGateCritical()  every 5 min — passes, bans, rates
+  //   autoSync()              every company_settings.sync_interval_minutes
+  //                           (60 default) — customers, vehicles, bays + push
+  // Armed AFTER the boot pull, not straight away, because that pull is what
+  // fetches the cadence autoSync() reads. The gate tick's interval is fixed and
+  // needs nothing from the pull, but it is armed here too so the two can never
+  // race the same replace-all tables against a still-running boot sync.
+  // `.catch(() => null)` before `.then` on purpose: a box with no network or no
+  // key yet must still end up with both timers running. The local SQLite cache
+  // persists across restarts, so a failed boot pull just leaves the gate pricing
+  // and gating from the last successful sync until the next tick.
+  void syncAll().catch(() => null).then(() => { autoSync(); autoSyncGateCritical(); });
   startSyncDrain();
   // W4G PayResult callback listener — only start when the operator has
   // enabled the TNG integration. Toggling it on/off in Settings restarts
@@ -250,6 +257,7 @@ app.whenReady().then(async () => {
  */
 function stopBackgroundServices() {
   try { stopAutoSync(); } catch { /* ignore */ }
+  try { stopAutoSyncGateCritical(); } catch { /* ignore */ }
   try { stopRtspGrabbers(); } catch { /* ignore */ }
   try { stopCameraRelay(); } catch { /* ignore */ }
   try { stopLprServers(); } catch { /* ignore */ }
@@ -894,8 +902,9 @@ function wireRendererEvents() {
   deviceHealthEvents.on('health', (rows) => sendToRenderer('device-health', rows));
 
   // Cloud PULL outcome → renderer. Drives the header's "last synced" stamp.
-  // Event-driven rather than polled: with the 60s tick gone this only changes
-  // on boot, a manual "Sync now", or a rebind.
+  // Event-driven rather than polled: it changes on boot, a manual "Sync now", a
+  // rebind, and every clean 5-minute gate-critical tick (those three mirrors are
+  // what the stamp vouches for — see stampPullOutcome).
   cloudPullEvents.on('pulled', (state) => sendToRenderer('cloud-pull', state));
 
   // Which mirrors that pull actually refreshed → renderer, so the page the

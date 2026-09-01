@@ -188,7 +188,7 @@ export type ActivityLogCategory =
 
 export type ActivityLogResourceType =
 	| "adjustment" | "refund" | "role" | "impersonation"
-	| "gate_open_command" | "camera_device" | "local_lane" | "local_terminal" | "local_lcd"
+	| "camera_device" | "local_lane" | "local_terminal" | "local_lcd"
 	| "parking_record" | "rate_policy" | "transaction" | "vehicle" | "app_settings";
 
 /** Free-text on the wire (a plain 16-char column), but keep to this set so the
@@ -403,13 +403,14 @@ export interface BridgeApi {
 	/** Read every active pass cached from the cloud. Already populated by the
 	 *  periodic syncSeasonPasses(); this just lets the UI display them. */
 	listSeasonPasses(): Promise<SeasonPass[]>;
-	/** Force a fresh pull of the pass roster from the cloud. The 60s background
-	 *  sync does this too — this is the operator's "I just issued a pass, get it
-	 *  down here NOW" button. */
+	/** Force a fresh pull of the pass roster from the cloud. The 5-minute
+	 *  gate-critical tick does this too — this is the operator's "I just issued a
+	 *  pass and the holder is AT the barrier, get it down here now" button. */
 	syncSeasonPassesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
 	/** Pull the deny list the GATE enforces on (blocked_plates). Separate from the
 	 *  vehicle registry the Vehicles page displays: refreshing the badges without
-	 *  this left the barrier working off a stale ban list. */
+	 *  this left the barrier working off a stale ban list. The 5-minute
+	 *  gate-critical tick pulls it too; this forces it immediately. */
 	syncBlockedPlatesNow(): Promise<{ ok: boolean; fetched: number; error?: string }>;
 	/** All banned plates cached locally — the Admit box reads this to show a
 	 *  plate's ban state before staff press Admit. */

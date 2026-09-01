@@ -196,11 +196,11 @@ export function Sites() {
 
       {/* ─── Live numbers ──────────────────────────────────────────────────
           Capacity and identity are the cloud's to own, but the live figures
-          are ours. `revenueToday` and `alarmCount` on the synced row mirror
-          cloud columns that nothing ever writes, so tiles reading them showed
-          a permanent RM 0.00 / 0 — they are gone rather than lying. Occupancy
-          is counted from our own open sessions instead of the drifting
-          `occupiedSpaces` counter. */}
+          are ours. There used to be revenue and alarm tiles here, fed by cloud
+          columns nothing ever wrote — a permanent RM 0.00 / 0. The tiles went
+          first, and the cloud has since stopped sending the fields at all.
+          Occupancy is counted from our own open sessions instead of the
+          drifting `occupiedSpaces` counter. */}
       <section className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
         <StatTile icon={Car} label="Total spaces" value={currentSite.totalSpaces.toLocaleString()} />
         <StatTile icon={Layers} label="Occupied now" value={`${openCount.toLocaleString()} (${occupancyPct}%)`} />

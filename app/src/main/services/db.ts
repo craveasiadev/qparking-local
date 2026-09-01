@@ -2182,8 +2182,10 @@ export function getSessionById(id: number): ParkingSession | null {
  *    entry_at within ±5 minutes of the cloud's entry time, open OR closed) is
  *    skipped — this is the guard against a STALE cloud record re-opening a stay
  *    the box just closed while its exit push is still in the outbound queue.
- *    That guard is also why this import runs on manual "Sync now" only, never
- *    the 60s tick;
+ *    That guard is also why this import runs on the deliberate pulls only
+ *    (boot / "Sync now" / rebind) and on no recurring tick — including the
+ *    5-minute gate-critical one, which carries passes, bans and rates but
+ *    deliberately not this;
  *  - everything else becomes a normal open session (no lane/camera/image — the
  *    exit flow doesn't need them; pricing falls back exit-lane → site default),
  *    stamped in notes as restored so the operator can tell it apart.
@@ -3084,9 +3086,7 @@ function rowToSite(row: any): Site {
 		address: row.address ?? null,
 		totalSpaces: row.total_spaces,
 		occupiedSpaces: row.occupied_spaces,
-		revenueToday: row.revenue_today,
 		status: row.status,
-		alarmCount: row.alarm_count,
 		contactPerson: row.contact_person ?? null,
 		telephone: row.telephone ?? null,
 		fax: row.fax ?? null,
@@ -3119,18 +3119,16 @@ export function upsertSite(site: Site): Site {
 		.prepare(
 			`INSERT INTO sites (
       id, company_id, name, address, total_spaces, occupied_spaces,
-      revenue_today, status, alarm_count, contact_person, telephone, fax,
+      status, contact_person, telephone, fax,
       country, email, parking_site_type, logo_url
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       company_id=excluded.company_id,
       name=excluded.name,
       address=excluded.address,
       total_spaces=excluded.total_spaces,
       occupied_spaces=excluded.occupied_spaces,
-      revenue_today=excluded.revenue_today,
       status=excluded.status,
-      alarm_count=excluded.alarm_count,
       contact_person=excluded.contact_person,
       telephone=excluded.telephone,
       fax=excluded.fax,
@@ -3147,9 +3145,7 @@ export function upsertSite(site: Site): Site {
 			site.address,
 			site.totalSpaces,
 			site.occupiedSpaces,
-			site.revenueToday,
 			site.status,
-			site.alarmCount,
 			site.contactPerson,
 			site.telephone,
 			site.fax,

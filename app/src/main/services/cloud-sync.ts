@@ -70,6 +70,28 @@ function readCloudTotal(body: CloudListBody | any): number | null {
 const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: "qparking_not_configured" };
 
 /**
+ * Which pull is running, and how much authority it carries.
+ *
+ *  - `full`      syncAll(), or a page's own refresh button — boot, "Sync now",
+ *                site rebind, `policies:sync`. DELIBERATE: a human or a restart
+ *                asked for it, and someone is looking at the outcome.
+ *  - `gate`      syncGateCritical() — the 5-minute unattended tick that keeps
+ *                passes, bans and rates current at the barrier.
+ *  - `essential` syncEssentials() — the hourly unattended tick (directories
+ *                down, outbound queue up).
+ *
+ * Two things read it: the header stamp (a tick must never clear an error it did
+ * not re-try) and refuseEmptyWipe, which will not let an unattended tick be the
+ * pull that confirms a destructive wipe.
+ */
+export type PullScope = "full" | "gate" | "essential";
+
+/** A pull nobody asked for, whose outcome nobody is watching. */
+function isUnattended(scope: PullScope): boolean {
+	return scope !== "full";
+}
+
+/**
  * Refuse to wipe a gate-critical mirror on the FIRST empty successful response.
  *
  * Every pull guards the 404 case carefully — "an older SaaS without the endpoint,
@@ -90,10 +112,12 @@ const NOT_CONFIGURED: SyncResult = { ok: false, fetched: 0, error: "qparking_not
  * confirm") promised an exit that did not exist. Its test passed only because the
  * harness emptied the table by hand.
  *
- * In-memory on purpose: these mirrors are pulled by syncAll() only (boot,
- * "Sync now", rebind), so two consecutive empties are two deliberate pulls — or
- * a restart plus one, since the streak resets with the process, which only makes
- * the guard more cautious, never less.
+ * In-memory on purpose: two consecutive empties are two DELIBERATE pulls — or a
+ * restart plus one, since the streak resets with the process, which only makes
+ * the guard more cautious, never less. autoSyncGateCritical() now pulls these
+ * same mirrors unattended every 5 minutes, so the streak explicitly ignores
+ * ticks (see isUnattended below); otherwise the confirmation this guard exists
+ * to demand would be supplied by a timer.
  */
 const emptyPullStreak: Record<"passes" | "blockedPlates" | "ratePolicies", number> = {
 	passes: 0,
@@ -105,6 +129,7 @@ export function refuseEmptyWipe(
 	mirror: "passes" | "blockedPlates" | "ratePolicies",
 	incoming: number,
 	cloudTotal: number | null = null,
+	scope: PullScope = "full",
 ): SyncResult | null {
 	if (incoming > 0) {
 		emptyPullStreak[mirror] = 0;
@@ -131,19 +156,48 @@ export function refuseEmptyWipe(
 		return { ok: false, fetched: 0, error: inconsistent };
 	}
 
+	const label = {
+		passes: "season passes",
+		blockedPlates: "blocked plates",
+		ratePolicies: "rate plans",
+	}[mirror];
+
 	// No count field (older backend): fall back to the two-consecutive-empty
 	// streak so a real emptying can still land, just not on a single blip.
+	//
+	// An UNATTENDED pull is never allowed to be either half of that pair. The
+	// streak was written when these mirrors came down on deliberate pulls only,
+	// so "two consecutive empties" meant two human decisions. The 5-minute
+	// gate-critical tick broke that assumption: two empties became ten minutes of
+	// nobody watching, and the guard would have cleared the entire pass roster on
+	// its own schedule. A tick therefore refuses WITHOUT touching the streak — it
+	// can neither confirm a wipe nor bring one closer — and a genuine emptying
+	// still lands on the next deliberate pull.
+	//
+	// Legacy path only, but it did not start out that way. Until 2026-09-01 the
+	// live SaaS returned a bare `{"data":[...]}` on all three of these endpoints,
+	// so readCloudTotal() was null EVERY time and this branch was the only one
+	// that ran — which, once the tick went unattended, meant a genuinely emptied
+	// roster could never be applied at all. The cloud now sends `meta.total`
+	// (qparking: RatePolicyController / SeasonPassController / VehicleController
+	// ::blacklisted, pinned by tests/Feature/LocalMirrorCountTest), so the
+	// corroborated branch above handles it and this is reached only by a SaaS
+	// older than that. Keep it: an older cloud must still be safe to talk to.
+	if (isUnattended(scope)) {
+		const ticked =
+			`refused_empty_wipe — the cloud returned NO ${label} while this box holds ${held}, and sent no count to confirm it. ` +
+			`Keeping the cached copy. A background sync is never allowed to apply a wipe this large: press "Sync now" once ` +
+			`you have verified in the cloud that the list is genuinely empty.`;
+		console.warn(`[cloud-sync] ${ticked}`);
+		return { ok: false, fetched: 0, error: ticked };
+	}
+
 	emptyPullStreak[mirror] += 1;
 	if (emptyPullStreak[mirror] >= 2) {
 		emptyPullStreak[mirror] = 0;
 		console.warn(`[cloud-sync] empty ${mirror} pull CONFIRMED by a second consecutive pull — applying the wipe (was holding ${held} row(s))`);
 		return null;
 	}
-	const label = {
-		passes: "season passes",
-		blockedPlates: "blocked plates",
-		ratePolicies: "rate plans",
-	}[mirror];
 	const error =
 		`refused_empty_wipe — the cloud returned NO ${label} while this box holds ${held}, and sent no count to confirm it. ` +
 		`Keeping the cached copy: applying it would stop the gate honouring passes / enforcing bans / pricing stays. ` +
@@ -255,7 +309,7 @@ function mapApiRowToRatePolicy(policyRow: any, fetchedAt: string): RatePolicy {
 // ─── pull sync: policies / passes / spaces ─────────────────────────────────────
 
 /** Pull policy+rate config from the cloud and upsert into the local cache. */
-export async function syncRatePolicies(): Promise<SyncResult> {
+export async function syncRatePolicies(scope: PullScope = "full"): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
 	try {
@@ -266,7 +320,7 @@ export async function syncRatePolicies(): Promise<SyncResult> {
 		// The backend flags one policy as is_site_default (RatePolicyController
 		// marks the first by name), so isSiteDefault comes straight from the payload.
 		const ratePolicies = ratePolicyRows.map((policyRow: any) => mapApiRowToRatePolicy(policyRow, fetchedAt));
-		const refused = refuseEmptyWipe("ratePolicies", ratePolicies.length, readCloudTotal(responseBody));
+		const refused = refuseEmptyWipe("ratePolicies", ratePolicies.length, readCloudTotal(responseBody), scope);
 		if (refused) return refused;
 
 		let savedCount = 0;
@@ -349,7 +403,7 @@ function mapV2RowToSeasonPasses(row: any, fetchedAt: string): SeasonPass[] {
  * keyed by plate — replace-all, so a pass revoked on the cloud disappears
  * locally on the next sync. An empty roster is legitimate, not a failure.
  */
-export async function syncSeasonPasses(): Promise<SyncResult> {
+export async function syncSeasonPasses(scope: PullScope = "full"): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
 	const fetchedAt = new Date().toISOString();
@@ -362,7 +416,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const { data: v2Body } = await cloud.get<CloudListBody>("/season-passes/v2");
 		const v2Rows = v2Body.data ?? [];
 		const seasonPasses = v2Rows.flatMap((row: any) => mapV2RowToSeasonPasses(row, fetchedAt));
-		const refusedV2 = refuseEmptyWipe("passes", seasonPasses.length, readCloudTotal(v2Body));
+		const refusedV2 = refuseEmptyWipe("passes", seasonPasses.length, readCloudTotal(v2Body), scope);
 		if (refusedV2) return refusedV2;
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
@@ -377,7 +431,7 @@ export async function syncSeasonPasses(): Promise<SyncResult> {
 		const seasonPasses = seasonPassRows
 			.filter((seasonPassRow: any) => seasonPassRow.vehicle?.plate_number)
 			.map((seasonPassRow: any) => mapApiRowToSeasonPass(seasonPassRow, fetchedAt));
-		const refused = refuseEmptyWipe("passes", seasonPasses.length, readCloudTotal(responseBody));
+		const refused = refuseEmptyWipe("passes", seasonPasses.length, readCloudTotal(responseBody), scope);
 		if (refused) return refused;
 		replaceAllSeasonPasses(seasonPasses);
 		return { ok: true, fetched: seasonPasses.length };
@@ -513,7 +567,7 @@ async function pushActivityLogsOnce(): Promise<SyncResult> {
  * failed pull deliberately leaves the previous list in place — going offline
  * must not silently un-ban everyone.
  */
-export async function syncBlockedPlates(): Promise<SyncResult> {
+export async function syncBlockedPlates(scope: PullScope = "full"): Promise<SyncResult> {
 	const cloud = getCloudApi();
 	if (!cloud) return NOT_CONFIGURED;
 	try {
@@ -528,7 +582,7 @@ export async function syncBlockedPlates(): Promise<SyncResult> {
 				reason: row.reason ?? null,
 				fetchedAt,
 			}));
-		const refused = refuseEmptyWipe("blockedPlates", blockedPlates.length, readCloudTotal(responseBody));
+		const refused = refuseEmptyWipe("blockedPlates", blockedPlates.length, readCloudTotal(responseBody), scope);
 		if (refused) return refused;
 		replaceAllBlockedPlates(blockedPlates);
 		return { ok: true, fetched: blockedPlates.length };
@@ -546,9 +600,10 @@ export async function syncBlockedPlates(): Promise<SyncResult> {
  * that entered before the reset can still exit. Import guards live in
  * importOpenSessionsFromCloud; `fetched` reports how many were actually
  * IMPORTED (already-known stays are skipped, which is the normal case on a
- * healthy box). Deliberately NOT on the 60s tick: a stale cloud record (its
- * exit push still in our outbound queue) must never re-open a stay the box
- * just closed — manual "Sync now" / post-rebind only.
+ * healthy box). Deliberately on NO recurring tick — not the 5-minute
+ * gate-critical one either: a stale cloud record (its exit push still in our
+ * outbound queue) must never re-open a stay the box just closed. Boot, manual
+ * "Sync now" and post-rebind only.
  */
 export async function syncOpenSessions(): Promise<SyncResult> {
 	const cloud = getCloudApi();
@@ -653,9 +708,11 @@ function mapApiRowToSite(siteRow: any): Site {
 		address: siteRow.address ?? null,
 		totalSpaces: Number(siteRow.total_spaces ?? 0),
 		occupiedSpaces: Number(siteRow.occupied_spaces ?? 0),
-		revenueToday: Number(siteRow.revenue_today ?? 0),
+		// revenue_today / alarm_count are NOT mapped: the cloud stopped sending
+		// them (nothing ever wrote those columns, so they were always 0) and no
+		// page here reads them — the Sites tiles that did were removed for
+		// showing a permanent RM 0.00. The SQLite columns stay, defaulted.
 		status: (siteRow.status ?? "active") as Site["status"],
-		alarmCount: Number(siteRow.alarm_count ?? 0),
 		contactPerson: siteRow.contact_person ?? null,
 		telephone: siteRow.telephone ?? null,
 		fax: siteRow.fax ?? null,
@@ -849,6 +906,44 @@ async function pushQueuedRecordsToCloud(): Promise<SyncResult> {
 	return { ok: true, fetched: pushed };
 }
 
+/** What one syncGateCritical() tick did — the three mirrors the barrier reads. */
+export interface GateCriticalSyncResults {
+	policies: SyncResult;
+	passes: SyncResult;
+	blockedPlates: SyncResult;
+}
+
+/**
+ * The three mirrors a barrier decision actually reads: who parks free, who is
+ * banned, and what a stay costs.
+ *
+ * WHY THIS EXISTS. These used to come down on syncAll() only — boot, "Sync now",
+ * a rebind — so a pass issued or a plate banned in the SaaS did not reach the
+ * gate until somebody walked over to the box and pressed a button. Staff were
+ * the sync mechanism, and a driver at the barrier paid for anyone forgetting.
+ *
+ * It is deliberately NOT syncAll(). The old 60-second tick was deleted because
+ * it dragged `/activity-logs` — an unbounded replace-all of the whole audit
+ * trail — down with it, and that request grows without limit as a site ages.
+ * This one is three small, bounded list endpoints and nothing else; the site
+ * record, company settings, the activity mirror and open-session recovery all
+ * stay on the deliberate pulls where they were.
+ *
+ * Everything runs in parallel with its own `.catch`, same as syncAll(): a dead
+ * rate-policies endpoint must not stop a ban from landing.
+ */
+export async function syncGateCritical(): Promise<GateCriticalSyncResults> {
+	const [policies, passes, blockedPlates] = await Promise.all([
+		syncRatePolicies("gate").catch(toFailedSyncResult),
+		syncSeasonPasses("gate").catch(toFailedSyncResult),
+		syncBlockedPlates("gate").catch(toFailedSyncResult),
+	]);
+	const results = { policies, passes, blockedPlates };
+	stampPullOutcome(results, "gate");
+	announceRefreshedMirrors(results);
+	return results;
+}
+
 /** What one syncEssentials() tick did — three pulls down, one push up. */
 export interface EssentialSyncResults {
 	customers: SyncResult;
@@ -966,9 +1061,61 @@ export function stopAutoSync(): void {
 	}
 }
 
-/** Which sync produced the error currently on display. A light tick must never
- *  clear a full pull's error — it didn't re-try those mirrors. */
-type PullScope = "full" | "essential";
+/**
+ * Cadence for the gate-critical tick — FIXED, not operator-configurable.
+ *
+ * It is deliberately not `company_settings.sync_interval_minutes` (60 default,
+ * and an operator may raise it further): that setting governs how fresh the
+ * office directories are, which is a cost/convenience trade. How long a paying
+ * customer sits at a barrier holding a pass this box has never heard of is not
+ * the same question, and must not be tunable into "an hour".
+ *
+ * Five minutes × 3 small list endpoints ≈ 36 requests/hour/site — roughly a
+ * seventh of the 240/hour the deleted 60-second tick cost, and none of them is
+ * the unbounded activity mirror.
+ */
+const GATE_SYNC_INTERVAL_MIN = 5;
+
+let gateSyncTimer: NodeJS.Timeout | null = null;
+let gateSyncInFlight = false;
+
+/**
+ * Keep passes, bans and rates current at the barrier without anyone pressing a
+ * button. Same shape as autoSync(): idempotent, in-flight guard so a slow tick
+ * cannot stack, and a skip while unconfigured or bound elsewhere.
+ *
+ * Runs on its OWN timer rather than inside syncEssentials() so the two cadences
+ * stay independent — an operator lengthening sync_interval_minutes to spare a
+ * thin WAN must not silently make the gate stale as a side effect.
+ */
+export function autoSyncGateCritical(): void {
+	if (gateSyncTimer) return;
+	gateSyncTimer = setInterval(async () => {
+		if (gateSyncInFlight) return;
+		// Unconfigured, or bound to another site: skip outright. Same reasoning as
+		// autoSync() — the requests would all fail identically and stampPullOutcome
+		// would paper over the last real pull's outcome with that error.
+		if (!getCloudApi() || !isBoundToCurrentSite()) return;
+		gateSyncInFlight = true;
+		try {
+			await syncGateCritical();
+		} catch {
+			// swallow — each pull already carries its own catch
+		} finally {
+			gateSyncInFlight = false;
+		}
+	}, GATE_SYNC_INTERVAL_MIN * 60_000);
+}
+
+export function stopAutoSyncGateCritical(): void {
+	if (gateSyncTimer) {
+		clearInterval(gateSyncTimer);
+		gateSyncTimer = null;
+	}
+}
+
+/** Which sync produced the error currently on display. A tick must never clear
+ *  a full pull's error — it didn't re-try those mirrors. See PullScope above. */
 let pullErrorOwner: PullScope | null = null;
 
 /**
@@ -985,25 +1132,38 @@ let pullErrorOwner: PullScope | null = null;
  * 10:42" after one would claim something that didn't happen. It still REPORTS
  * its own failures (the operator has to see a dead link), and clears the error
  * again once it recovers — but only when the error was its own.
+ *
+ * A `gate` tick DOES refresh it, by that same rule read forwards: those three
+ * mirrors are the entire thing the stamp vouches for, so a clean tick is exactly
+ * the claim "Synced 10:47" makes. Leaving the stamp frozen at the last full pull
+ * would have staff pressing "Sync now" against an already-current cache — the
+ * habit this tick exists to retire. It does NOT clear an error it didn't cause:
+ * a gate tick succeeding while /activity-logs is still failing shows a fresh
+ * time AND the full pull's error, which is the honest reading of both.
  */
 function stampPullOutcome(results: Record<string, SyncResult>, scope: PullScope): void {
 	const failed = Object.entries(results).filter(([, result]) => !result.ok);
-	if (failed.length === 0) {
-		if (scope === "full") {
-			cloudPullState = { lastCloudPullAt: new Date().toISOString(), lastCloudPullError: "" };
-			pullErrorOwner = null;
-		} else if (pullErrorOwner === "essential") {
-			cloudPullState = { ...cloudPullState, lastCloudPullError: "" };
-			pullErrorOwner = null;
-		} else {
-			return; // clean light tick, nothing on display changed — don't re-emit
-		}
-	} else {
+	if (failed.length > 0) {
 		const [mirror, first] = failed[0];
 		const suffix = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
 		cloudPullState = { ...cloudPullState, lastCloudPullError: `${mirror}: ${first.error ?? "failed"}${suffix}` };
 		pullErrorOwner = scope;
+		cloudPullEvents.emit("pulled", cloudPullState);
+		return;
 	}
+
+	// A clean pull answers two independent questions: may it move the clock, and
+	// may it clear the error currently on display? Only a pull that actually
+	// re-tried the failing mirrors can do the second.
+	const refreshesStamp = scope === "full" || scope === "gate";
+	const clearsError = scope === "full" || pullErrorOwner === scope;
+	if (!refreshesStamp && !clearsError) return; // clean light tick, display unchanged
+
+	cloudPullState = {
+		lastCloudPullAt: refreshesStamp ? new Date().toISOString() : cloudPullState.lastCloudPullAt,
+		lastCloudPullError: clearsError ? "" : cloudPullState.lastCloudPullError,
+	};
+	if (clearsError) pullErrorOwner = null;
 	cloudPullEvents.emit("pulled", cloudPullState);
 }
 
@@ -1045,15 +1205,27 @@ function announceRefreshedMirrors(results: Record<string, SyncResult>): void {
 //   2. manual "Sync now"   — header / Settings page → ipc 'sync:all-tables'
 //   3. site rebind         — ipc 'site:rebind'
 //
-// The recurring autoSync() tick runs syncEssentials() instead — every
-// company_settings.sync_interval_minutes (60 default):
-//   down: customers, vehicles, bays
-//   up:   parking activity + transactions (one cloud-queue drain)
+// TWO recurring ticks then run between them, on independent timers:
+//
+//   autoSyncGateCritical() — every 5 min, FIXED (GATE_SYNC_INTERVAL_MIN)
+//     down: season passes, blocked plates, rate policies
+//
+//   autoSync() → syncEssentials() — every
+//   company_settings.sync_interval_minutes (60 default, operator-tunable)
+//     down: customers, vehicles, bays
+//     up:   parking activity + transactions (one cloud-queue drain)
+//
+// The split is the point. The gate tick carries only what a barrier decision
+// reads, so it can run often; the essentials tick carries the office
+// directories, so an operator may stretch it over a thin WAN without making the
+// gate stale. Neither ever carries /activity-logs — that mirror is an unbounded
+// replace-all of the whole audit trail and grows for the life of the site, which
+// is why the old 60-second everything tick had to go.
 //
 // Operational consequence, by design: a ban or season pass issued in the cloud
-// reaches the barrier only at boot, on a rebind, or when staff press "Sync now"
-// — the hourly tick no longer brings them down. Staff press the button when they
-// need a cloud-side gating change enforced immediately.
+// now reaches the barrier within 5 minutes on its own. "Sync now" remains the
+// way to force it immediately, and the only way to refresh the site record,
+// company settings, the activity mirror and open-session recovery.
 //
 // The session/transaction push queue still runs its OWN 30s drain in
 // cloud-queue's startSyncDrain(), with per-row backoff — the tick's push is a

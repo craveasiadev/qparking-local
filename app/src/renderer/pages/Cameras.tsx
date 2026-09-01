@@ -710,8 +710,9 @@ function CameraForm({
 										will keep opening for everyone and this setting does nothing.
 										<br />
 										<br />
-										A pass created in the cloud only reaches this box on <strong>Sync now</strong> — sync
-										after issuing one, or the holder will be turned away.
+										A pass created in the cloud reaches this box on its own within 5 minutes.
+										Press <strong>Sync now</strong> if a holder is already at the barrier —
+										until it lands they are turned away.
 									</InfoTip>
 								</span>
 								<span className="block text-[11px] text-gray-500 mt-0.5">

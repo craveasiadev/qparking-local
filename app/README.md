@@ -9,10 +9,15 @@ It sits between the physical parking hardware and the qparking cloud:
   2026-07-14; see `migrateTerminalsToW4g` in `db.ts`. Nothing speaks it any more.)
 - **qparking SaaS** over HTTPS — a **Laravel REST API** we pull rate-policy config
   from (so fees can be calculated even when the WAN is down) and push session
-  records up to. Cadence: `company_settings.sync_interval_minutes`, default **60
-  minutes**, and the recurring tick pulls only a SUBSET — rate policies, season
-  passes and the deny list arrive at boot, on a site rebind, or when someone
-  presses "Sync now" (see `syncEssentials` vs `syncAll` in `cloud-sync.ts`). All of these calls go through **one shared axios
+  records up to. Two recurring ticks, on independent timers:
+  **`syncGateCritical()` every 5 minutes** (fixed) pulls the three mirrors a
+  barrier decision reads — season passes, the deny list, rate policies — so a
+  pass issued in the cloud reaches the gate on its own; **`syncEssentials()`
+  every `company_settings.sync_interval_minutes`** (default 60, operator-tunable)
+  pulls the office directories and drains the outbound queue. Everything else —
+  the site record, company settings, the unbounded `/activity-logs` mirror,
+  open-session recovery — comes down only on a FULL `syncAll()`: boot, "Sync
+  now", or a site rebind. All of these calls go through **one shared axios
   client** (`services/cloud-api.ts`).
 
 State lives in a local SQLite DB at `%APPDATA%\qparking-local\qparking-local.db`.
@@ -551,10 +556,10 @@ Worked example — the cloud has policy `abc-123` named **"Weekend Rate"**:
 | Sync tick | What happens |
 |---|---|
 | First ever | No row with `policy_id = 'abc-123'` → plain **insert** |
-| Operator renames it in the cloud to "Weekend & Holiday Rate" | Next 60s sync sends the same id → insert **conflicts** on the primary key → `DO UPDATE` overwrites the cached name with `excluded.policy_name` |
+| Operator renames it in the cloud to "Weekend & Holiday Rate" | The next gate-critical tick sends the same id → insert **conflicts** on the primary key → `DO UPDATE` overwrites the cached name with `excluded.policy_name` |
 | Every tick after | Same id, same values → conflict + update to identical values (harmless) |
 
-Same id in, one row out, always fresh — that's why the 60-second sync can run
+Same id in, one row out, always fresh — that's why the 5-minute tick can run
 forever without ever creating duplicate rows.
 
 ### Recipe — add your own bridge call

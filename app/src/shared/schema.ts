@@ -561,9 +561,7 @@ export interface Site {
   address: string | null;
   totalSpaces: number;
   occupiedSpaces: number;
-  revenueToday: number;
   status: 'active' | 'maintenance' | 'offline';
-  alarmCount: number;
   contactPerson: string | null;
   telephone: string | null;
   fax: string | null;

@@ -228,7 +228,7 @@ function describeWarning(kind: string, d: any): { title: string; detail: string;
     case 'entry-not-authorised':
       return {
         title: `No valid pass — ${d?.plate ?? 'unknown plate'}`,
-        detail: `${d?.cameraName ? `"${d.cameraName}"` : 'This camera'} only admits pass holders, and this plate holds none — entry refused, no session opened and the barrier stayed down. Issue a pass in the cloud and press Sync now, or admit the car by hand from Parking Activity.`,
+        detail: `${d?.cameraName ? `"${d.cameraName}"` : 'This camera'} only admits pass holders, and this plate holds none — entry refused, no session opened and the barrier stayed down. A pass issued in the cloud reaches this box within 5 minutes on its own — press Sync now to pull it straight away, or admit the car by hand from Parking Activity.`,
       };
     case 'entry-quota-full':
       return {
@@ -428,9 +428,10 @@ export function App() {
       </aside>
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* App-wide header. Present on every page so the cloud-pull stamp and
-            "Sync now" are always one glance / one click away — the recurring
-            60s pull was removed, so this is the operator's only routine way to
-            refresh passes and the barrier deny list. */}
+            "Sync now" are always one glance / one click away. Passes, bans and
+            rates now come down on their own 5-minute tick, so this is the way
+            to force them IMMEDIATELY — and still the only way to refresh the
+            site record, company settings and the activity-log mirror. */}
         <header className="flex-shrink-0 h-11 bg-white border-b border-gray-200 flex items-center justify-between gap-4 px-5 sm:px-8">
           <div className="flex items-center gap-1.5 min-w-0">
             <MapPin size={12} className="text-gray-400 flex-shrink-0" />

@@ -29,13 +29,13 @@ const PAGE_SIZE = 20;
  * the leaner `blocked_plates` list — though both derive from the same cloud
  * `vehicles.is_blacklisted` column.
  *
- * That split used to be a trap. `blocked_plates` is on no background tick (the
- * "60s tick" this comment claimed does not exist), and this page's Sync button
- * pulled only the vehicle registry and the pass roster — so pressing it
- * refreshed the red Blocked badges you see here while leaving the list the
- * BARRIER enforces on untouched. The UI showed a ban that was not being applied.
- * The sync below now pulls all three together, so what this page shows and what
- * the gate stops are always the same answer.
+ * That split used to be a trap: this page's Sync button pulled only the vehicle
+ * registry and the pass roster, so pressing it refreshed the red Blocked badges
+ * you see here while leaving the list the BARRIER enforces on untouched. The UI
+ * showed a ban that was not being applied. The sync below now pulls all three
+ * together, so what this page shows and what the gate stops are always the same
+ * answer. (`blocked_plates` is also on the 5-minute gate-critical tick now, so
+ * the two can no longer drift far even if nobody presses anything.)
  *
  * A plate may appear with NO pass (registered, nothing bought) and a pass may
  * cover several plates, so each of its plates carries the same pass detail. The
@@ -77,11 +77,13 @@ export function VehicleManagement() {
 
   const today = todayInAppTz();
 
-  // The registry and the roster are lookup caches, not gate inputs, so neither is
-  // on the background tick and this button is the main way to freshen them. The
-  // DENY LIST is different — it IS a gate input — and it is pulled here too,
-  // because refreshing the badges without it is worse than not refreshing at all:
-  // the operator sees a ban applied that the barrier has never heard of.
+  // The vehicle REGISTRY is a lookup cache, not a gate input, so it rides the
+  // hourly essentials tick and this button is the main way to freshen it. The
+  // pass roster and the DENY LIST are gate inputs and come down on their own
+  // 5-minute tick — they are pulled here anyway so all three land together:
+  // refreshing the badges without the deny list is worse than not refreshing at
+  // all, because the operator sees a ban applied that the barrier has never
+  // heard of.
   const [syncFromCloud, syncing] = useAsyncAction(async () => {
     const [vehicleResult, passResult, blockedResult] = await Promise.all([
       window.bridge.syncCloudVehiclesNow(),
