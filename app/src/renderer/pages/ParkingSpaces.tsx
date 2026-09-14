@@ -4,7 +4,7 @@ import type { ParkingSpace } from '@shared/types';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { InfoTip } from '../components/InfoTip';
-import { fmtDateTime } from '../lib/datetime';
+import { fmtDate, fmtDateTime } from '../lib/datetime';
 import { toast } from '../toast';
 
 /**
@@ -54,11 +54,6 @@ const BAY_TYPE_BADGE: Record<string, string> = {
  */
 function bayDesignation(space: ParkingSpace): string | null {
   return space.bayType ?? null;
-}
-
-function fmtDate(v: string | null): string {
-  if (!v) return '—';
-  return new Date(v).toLocaleDateString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 /** Split a level's bays into zone sections — zones A→Z (numeric-aware),

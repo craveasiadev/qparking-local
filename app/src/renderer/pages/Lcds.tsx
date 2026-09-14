@@ -9,6 +9,7 @@ import { InfoTip } from '../components/InfoTip';
 import { DeviceHealthBadge } from '../components/DeviceHealthBadge';
 import { useDeviceHealth } from '../hooks/useDeviceHealth';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
+import { Field } from '../components/Field';
 import { fmtTimeSeconds } from '../lib/datetime';
 import { useCurrentSite } from '../context/SiteContext';
 import { toast } from '../toast';
@@ -530,16 +531,6 @@ function LcdForm({
           </button>
         </footer>
       </form>
-      <style>{`.input { height: 40px; padding: 0 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 14px; width: 100%; } .input:focus { border-color: #111827; }`}</style>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
-      {children}
     </div>
   );
 }

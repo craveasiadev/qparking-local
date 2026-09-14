@@ -208,20 +208,46 @@ function identityField(session: ParkingSession): { external_id?: string } {
  * Public enqueue helpers. parking-flow / IPC handlers call these instead of
  * fetching directly so retries are guaranteed.
  */
+/**
+ * The fields every session upsert carries, open or closed. Built in one place so
+ * entry, exit and update can never describe the same stay differently — the cloud
+ * upserts on these, and a field present on one path but missing on another shows
+ * up as a record that changes shape between pushes.
+ */
+function openSessionFields(session: ParkingSession, entryImage: string | null): Record<string, unknown> {
+	return {
+		...scopeField(session),
+		...identityField(session),
+		plate_number: session.plate,
+		entry_time: session.entryAt,
+		...(entryImage ? { entry_image_base64: entryImage } : {}),
+	};
+}
+
+/** …plus everything that only exists once the car has actually left. */
+function closedSessionFields(
+	session: ParkingSession,
+	entryImage: string | null,
+	exitImage: string | null,
+): Record<string, unknown> {
+	return {
+		...openSessionFields(session, entryImage),
+		exit_time: session.exitAt,
+		fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
+		duration_minutes: session.durationMinutes ?? 0,
+		status: session.status,
+		// Why this exit cost nothing ('pass-monthly' / 'within-grace' / 'rate-zero' /
+		// 'no-policy'). Without it the cloud's Parking Activity page can only say
+		// "free", and a legitimate pass exit is indistinguishable from a
+		// misconfigured RM0 rate plan — the one distinction revenue assurance needs.
+		free_reason: session.freeReason ?? null,
+		...(exitImage ? { exit_image_base64: exitImage } : {}),
+	};
+}
+
 export function enqueueEntry(session: ParkingSession): void {
 	const entryImage = readImageForUpload(session.entryImagePath);
-	enqueueSync(
-		"session.entry",
-		{
-			...scopeField(session),
-			...identityField(session),
-			plate_number: session.plate,
-			entry_time: session.entryAt,
-			...(entryImage ? { entry_image_base64: entryImage } : {}),
-		},
-		session.id,
-		session.rev,
-	);
+	enqueueSync("session.entry", openSessionFields(session, entryImage), session.id, session.rev);
 	scheduleDrain();
 }
 
@@ -230,28 +256,7 @@ export function enqueueExit(session: ParkingSession): void {
 	// Payment outcome is NOT sent here — that's enqueueTransaction → /transactions.
 	const entryImage = readImageForUpload(session.entryImagePath);
 	const exitImage = readImageForUpload(session.exitImagePath);
-	enqueueSync(
-		"session.exit",
-		{
-			...scopeField(session),
-			...identityField(session),
-			plate_number: session.plate,
-			entry_time: session.entryAt,
-			exit_time: session.exitAt,
-			fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
-			duration_minutes: session.durationMinutes ?? 0,
-			status: session.status,
-			// Why this exit cost nothing ('pass-monthly' / 'within-grace' / 'rate-zero' /
-			// 'no-policy'). Without it the cloud's Parking Activity page can only say
-			// "free", and a legitimate pass exit is indistinguishable from a
-			// misconfigured RM0 rate plan — the one distinction revenue assurance needs.
-			free_reason: session.freeReason ?? null,
-			...(entryImage ? { entry_image_base64: entryImage } : {}),
-			...(exitImage ? { exit_image_base64: exitImage } : {}),
-		},
-		session.id,
-		session.rev,
-	);
+	enqueueSync("session.exit", closedSessionFields(session, entryImage, exitImage), session.id, session.rev);
 	scheduleDrain();
 }
 
@@ -274,42 +279,15 @@ export function enqueueUpdate(session: ParkingSession, previousPlate?: string | 
 	// same upsert endpoint as enqueueEntry/enqueueExit, images included (safe to
 	// resend: persistPlateImage overwrites the same object key).
 	const entryImage = readImageForUpload(session.entryImagePath);
-	if (session.exitAt) {
-		const exitImage = readImageForUpload(session.exitImagePath);
-		enqueueSync(
-			"session.update",
-			{
-				...scopeField(session),
-				...identityField(session),
-				...previousPlateField(session, previousPlate),
-				plate_number: session.plate,
-				entry_time: session.entryAt,
-				exit_time: session.exitAt,
-				fee_amount: session.feeCents != null ? (session.feeCents / 100).toFixed(2) : 0,
-				duration_minutes: session.durationMinutes ?? 0,
-				status: session.status,
-				free_reason: session.freeReason ?? null,
-				...(entryImage ? { entry_image_base64: entryImage } : {}),
-				...(exitImage ? { exit_image_base64: exitImage } : {}),
-			},
-			session.id,
-			session.rev,
-		);
-	} else {
-		enqueueSync(
-			"session.update",
-			{
-				...scopeField(session),
-				...identityField(session),
-				...previousPlateField(session, previousPlate),
-				plate_number: session.plate,
-				entry_time: session.entryAt,
-				...(entryImage ? { entry_image_base64: entryImage } : {}),
-			},
-			session.id,
-			session.rev,
-		);
-	}
+	const fields = session.exitAt
+		? closedSessionFields(session, entryImage, readImageForUpload(session.exitImagePath))
+		: openSessionFields(session, entryImage);
+	enqueueSync(
+		"session.update",
+		{ ...fields, ...previousPlateField(session, previousPlate) },
+		session.id,
+		session.rev,
+	);
 	scheduleDrain();
 }
 
@@ -456,23 +434,11 @@ async function sendParkingRecord(
 	// update by what fields are present (exit_time present = closing record;
 	// absent = open/update). Delete is the exception: a body flag the server
 	// recognises as "soft-delete this record".
-	if (op === "transaction.upsert") {
-		try {
-			const response = await cloud.post("/transactions/upsert", payload, { timeout: timeoutForPayload(payload) });
-			return { ok: true, status: response.status };
-		} catch (error: any) {
-			if (axios.isAxiosError(error) && error.response) {
-				const responseBody: any = error.response.data;
-				const message = responseBody?.message || responseBody?.error || error.response.statusText;
-				return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
-			}
-			const isTimeout = axios.isAxiosError(error) && error.code === "ECONNABORTED";
-			return { ok: false, timedOut: isTimeout, error: isTimeout ? `timeout (${Math.round(timeoutForPayload(payload) / 1000)}s)` : (error?.message ?? String(error)) };
-		}
-	}
+	const url = op === "transaction.upsert" ? "/transactions/upsert" : "/parking-records/upsert";
 	const body = op === "session.delete" ? { ...payload, _delete: true } : payload;
+	const timeout = timeoutForPayload(body);
 	try {
-		const response = await cloud.post("/parking-records/upsert", body, { timeout: timeoutForPayload(body) });
+		const response = await cloud.post(url, body, { timeout });
 		return { ok: true, status: response.status };
 	} catch (error: any) {
 		if (axios.isAxiosError(error) && error.response) {
@@ -480,8 +446,10 @@ async function sendParkingRecord(
 			const message = responseBody?.message || responseBody?.error || error.response.statusText;
 			return { ok: false, status: error.response.status, error: `${error.response.status} ${message}` };
 		}
+		// A timeout is the one failure the caller retries differently — it strips
+		// the photos off before the next attempt (see drainOnce).
 		const isTimeout = axios.isAxiosError(error) && error.code === "ECONNABORTED";
-		return { ok: false, timedOut: isTimeout, error: isTimeout ? `timeout (${Math.round(timeoutForPayload(body) / 1000)}s)` : (error?.message ?? String(error)) };
+		return { ok: false, timedOut: isTimeout, error: isTimeout ? `timeout (${Math.round(timeout / 1000)}s)` : (error?.message ?? String(error)) };
 	}
 }
 

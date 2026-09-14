@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Plus, Trash2, CreditCard, X, Activity, Loader2, Search, Radio, Copy, Check, MapPin,
+  Plus, Trash2, CreditCard, X, Activity, Loader2, Search, Radio, MapPin,
   Wifi, XCircle, FlaskConical, ChevronDown,
 } from 'lucide-react';
 import type { DeviceHealth, PaymentTerminal, ParkingLane } from '@shared/types';
@@ -12,6 +12,8 @@ import { InfoTip } from '../components/InfoTip';
 import { DeviceHealthBadge } from '../components/DeviceHealthBadge';
 import { useDeviceHealth } from '../hooks/useDeviceHealth';
 import { DeviceSyncButtons } from '../components/DeviceSyncButtons';
+import { Field } from '../components/Field';
+import { CopyButton } from '../components/CopyButton';
 import { fmtTimeSeconds } from '../lib/datetime';
 import { useCurrentSite } from '../context/SiteContext';
 
@@ -515,16 +517,6 @@ function DeviceForm({ value, onChange, onCancel, onSave, saving, error }:
           </button>
         </footer>
       </div>
-      <style>{`.input { height: 40px; padding: 0 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 14px; width: 100%; } .input:focus { border-color: #111827; }`}</style>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
-      {children}
     </div>
   );
 }
@@ -697,12 +689,3 @@ function Chip({ children, icon: Icon, mono, tone = 'default' }: { children: Reac
   );
 }
 
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}
-      className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wide font-bold text-gray-500 hover:text-gray-900">
-      {copied ? <Check size={11} /> : <Copy size={11} />} {copied ? 'Copied' : 'Copy'}
-    </button>
-  );
-}

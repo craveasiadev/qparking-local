@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Car, RefreshCw, CloudDownload, Clock, Ban, Building2, User, Ticket,
+  Car, Clock, Ban, Building2, User, Ticket,
 } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip';
 import type { CloudVehicle, SeasonPass } from '@shared/types';
@@ -8,6 +8,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useReloadOnCloudSync } from '../hooks/useReloadOnCloudSync';
 import { usePagedList } from '../hooks/usePagination';
 import { PaginationBar } from '../components/Pagination';
+import { CloudMirrorButtons } from '../components/CloudMirrorButtons';
 import { toast } from '../toast';
 import { fmtDateTime, todayInAppTz } from '../lib/datetime';
 import { canonicalPlate } from '@shared/plate';
@@ -161,16 +162,7 @@ export function VehicleManagement() {
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => load()} disabled={loading}
-            className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg border border-gray-200 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700 disabled:opacity-50">
-            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
-          </button>
-          <button onClick={() => syncFromCloud()} disabled={syncing}
-            className="inline-flex items-center justify-center gap-1.5 h-10 px-4 rounded-lg bg-gray-900 text-white hover:bg-gray-700 text-xs font-bold uppercase tracking-wide disabled:opacity-50">
-            <CloudDownload size={13} className={syncing ? 'animate-pulse' : ''} /> Sync from cloud
-          </button>
-        </div>
+        <CloudMirrorButtons onRefresh={load} refreshing={loading} onSync={syncFromCloud} syncing={syncing} />
       </header>
 
       <div className="mb-4 flex flex-wrap gap-2">

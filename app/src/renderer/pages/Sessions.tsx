@@ -13,6 +13,7 @@ import { usePagination } from '../hooks/usePagination';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { PaginationBar, PageLoadingOverlay } from '../components/Pagination';
 import { InfoTip } from '../components/InfoTip';
+import { Field } from '../components/Field';
 import {
   fmtDateTime, fmtTimeSeconds, elapsedMinutesSince,
   todayInAppTz, appTzDayStartUtc, appTzDayEndUtc, appTzInputValue, appTzInputToUtc,
@@ -1586,11 +1587,11 @@ function EditSessionModal({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs px-3 py-2">{error}</div>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field label="Plate">
-              <input className="input font-mono" value={plate} onChange={(e) => setPlate(e.target.value)} />
+            <Field compact label="Plate">
+              <input className="input input-compact font-mono" value={plate} onChange={(e) => setPlate(e.target.value)} />
             </Field>
-            <Field label="Payment status">
-              <select className="input" value={paymentStatus} onChange={(e) => setPaymentStatus(e.target.value as any)}>
+            <Field compact label="Payment status">
+              <select className="input input-compact" value={paymentStatus} onChange={(e) => setPaymentStatus(e.target.value as any)}>
                 <option value="pending">pending</option>
                 <option value="paid">paid</option>
                 <option value="declined">declined</option>
@@ -1599,12 +1600,12 @@ function EditSessionModal({
                 <option value="manual_release">manual_release</option>
               </select>
             </Field>
-            <Field label="Entry time">
-              <input type="datetime-local" className="input" value={entryAt} onChange={(e) => setEntryAt(e.target.value)} step="1" />
+            <Field compact label="Entry time">
+              <input type="datetime-local" className="input input-compact" value={entryAt} onChange={(e) => setEntryAt(e.target.value)} step="1" />
             </Field>
-            <Field label="Exit time (blank = still inside)">
+            <Field compact label="Exit time (blank = still inside)">
               <div className="flex gap-2 min-w-0">
-                <input type="datetime-local" className="input flex-1 min-w-0" value={exitAt} onChange={(e) => setExitAt(e.target.value)} step="1" />
+                <input type="datetime-local" className="input input-compact flex-1 min-w-0" value={exitAt} onChange={(e) => setExitAt(e.target.value)} step="1" />
                 <button type="button" onClick={() => setExitAt(toLocalInput(new Date().toISOString()))}
                   title="Set exit time to now"
                   className="shrink-0 h-[38px] px-3 rounded-lg border border-gray-300 hover:border-gray-900 text-xs font-bold uppercase tracking-wide text-gray-700">
@@ -1619,15 +1620,15 @@ function EditSessionModal({
                 )}
               </div>
             </Field>
-            <Field label={`Policy (default: ${defaultPolicy?.policyName ?? 'lane has no policy'})`}>
-              <select className="input" value={policyOverride} onChange={(e) => setScopeOverride(e.target.value)}>
+            <Field compact label={`Policy (default: ${defaultPolicy?.policyName ?? 'lane has no policy'})`}>
+              <select className="input input-compact" value={policyOverride} onChange={(e) => setScopeOverride(e.target.value)}>
                 <option value="">— use lane's policy ({defaultPolicy?.policyName ?? 'none'}) —</option>
                 {policies.map((sc) => <option key={sc.policyId} value={sc.policyId}>{sc.policyName}</option>)}
               </select>
             </Field>
             <div className="sm:col-span-2">
-              <Field label="Notes">
-                <textarea className="input min-h-[60px]" value={notes} onChange={(e) => setNotes(e.target.value)} />
+              <Field compact label="Notes">
+                <textarea className="input input-compact min-h-[60px]" value={notes} onChange={(e) => setNotes(e.target.value)} />
               </Field>
             </div>
           </div>
@@ -1668,7 +1669,6 @@ function EditSessionModal({
             {saving ? 'Saving…' : 'Save'}
           </button>
         </footer>
-        <style>{`.input { height: 38px; padding: 0 0.625rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 13px; width: 100%; background: white; } textarea.input { padding: 0.5rem 0.625rem; height: auto; } .input:focus { border-color: #111827; }`}</style>
       </div>
     </div>
   );
@@ -1709,15 +1709,6 @@ function ConfirmModal({
           </button>
         </footer>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
-      {children}
     </div>
   );
 }

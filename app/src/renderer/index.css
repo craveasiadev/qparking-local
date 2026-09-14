@@ -4,3 +4,16 @@
 
 html, body, #root { height: 100%; }
 body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif; }
+
+/*
+ * The setup-form control. Was injected by a per-page <style> tag on six pages,
+ * five of them byte-identical; defined once here instead. Unlayered, like the
+ * <style> tags were, so it still beats the Tailwind utilities alongside it.
+ */
+.input { height: 40px; padding: 0 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 14px; width: 100%; }
+.input:focus { border-color: #111827; }
+
+/* Denser variant for the Sessions edit dialog, which is a modal rather than a
+ * full page. Must stay after .input so it wins on the properties it restates. */
+.input-compact { height: 38px; padding: 0 0.625rem; font-size: 13px; background: white; }
+textarea.input-compact { padding: 0.5rem 0.625rem; height: auto; }

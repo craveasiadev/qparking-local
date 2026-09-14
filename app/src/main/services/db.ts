@@ -3430,6 +3430,47 @@ function siteDayKey(at?: string | null): string {
 }
 
 /**
+ * The "is this pass in force?" date window, as SQL. Bound to @entryDay / @exitDay
+ * (site-local YYYY-MM-DD keys from siteDayKey) and shared by all three pass
+ * lookups below — by plate, by near-miss plate, and by id.
+ *
+ * It is ONE constant rather than three copies because the three must never
+ * disagree about what "valid" means: the exit path re-checks by id what the
+ * entry path admitted by plate, and a drift between them either waives a fare it
+ * should charge or strands a paid-up holder at the boom.
+ *
+ * NULLIF guards against a cloud row carrying '' instead of NULL for an
+ * open-ended pass (resident / complimentary) — '' would fail every date
+ * comparison and silently deny a forever-pass. A pass counts if it covers the
+ * entry instant OR the exit instant; which of the two matched is the EXIT FLOW's
+ * business, not this predicate's.
+ */
+const PASS_VALID_WINDOW_SQL = `      AND (
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
+        )
+        OR
+        (
+          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
+          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
+        )
+      )`;
+
+/**
+ * Pick order when a plate rides on more than one valid pass: free/waived first,
+ * then the BROADEST coverage.
+ *
+ * SQLite sorts NULL below every value, so a plain `end_date DESC` ranked an
+ * open-ended pass (NULL end_date = never expires, e.g. a resident or
+ * complimentary entitlement) LAST — the exact opposite of "longest coverage".
+ * The explicit IS NULL key fixes that. Every candidate row is already valid
+ * thanks to the window above, so this only decides WHICH pass_id / pass-<type>
+ * reason lands in the audit trail, not whether the exit is free.
+ */
+const PASS_PICK_ORDER_SQL = "ORDER BY is_free DESC, (NULLIF(end_date, '') IS NULL) DESC, end_date DESC";
+
+/**
  * Find a valid pass for the given plate. Season passes are site-scoped (one site
  * per install), so the lookup is purely by plate. Returns the longest-coverage
  * pass first so a plate riding on two passes (a personal one and a sponsored
@@ -3452,35 +3493,13 @@ export function findSeasonPassByPlate(plate: string, window?: { entryAt?: string
 	const normalisedPlate = canonicalPlate(plate);
 	const entryDay = siteDayKey(window?.entryAt ?? null);
 	const exitDay = siteDayKey(window?.exitAt ?? null);
-	// NULLIF guards against a cloud row carrying '' instead of NULL for an
-	// open-ended pass (resident / complimentary) — '' would fail every date
-	// comparison and silently deny a forever-pass.
-	//
-	// ORDER BY: free/waived first, then the BROADEST coverage. SQLite sorts NULL
-	// below every value, so a plain `end_date DESC` ranked an open-ended pass (NULL
-	// end_date = never expires, e.g. a resident or complimentary entitlement) LAST —
-	// the exact opposite of "longest coverage". The explicit IS NULL key fixes that.
-	// Every candidate row is already valid at this moment thanks to the WHERE clause,
-	// so this only decides WHICH pass_id / pass-<type> reason lands in the audit
-	// trail, not whether the exit is free.
 	const row = getDb()
 		.prepare(
 			`
     SELECT * FROM season_passes
     WHERE plate_number = @plate AND status = 'active'
-      AND (
-        (
-          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
-          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
-        )
-        OR
-        (
-          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
-          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
-        )
-      )
-    -- free first, then open-ended (never-expiring), then latest end date.
-    ORDER BY is_free DESC, (NULLIF(end_date, '') IS NULL) DESC, end_date DESC
+${PASS_VALID_WINDOW_SQL}
+    ${PASS_PICK_ORDER_SQL}
     LIMIT 1
   `,
 		)
@@ -3515,26 +3534,16 @@ export function findSeasonPassByNearPlate(
 	const entryDay = siteDayKey(window?.entryAt ?? null);
 	const exitDay = siteDayKey(window?.exitAt ?? null);
 
-	// Same WHERE as findSeasonPassByPlate with the plate predicate removed. A site
-	// roster is tens to low hundreds of rows, so scanning it beats maintaining a
-	// second notion of validity that could drift from the exact-match path.
+	// findSeasonPassByPlate's query with the plate predicate dropped. A site roster
+	// is tens to low hundreds of rows, so scanning the lot is cheap — and this only
+	// runs at all once the exact match has already missed.
 	const rows = getDb()
 		.prepare(
 			`
     SELECT * FROM season_passes
     WHERE status = 'active'
-      AND (
-        (
-          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
-          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
-        )
-        OR
-        (
-          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
-          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
-        )
-      )
-    ORDER BY is_free DESC, (NULLIF(end_date, '') IS NULL) DESC, end_date DESC
+${PASS_VALID_WINDOW_SQL}
+    ${PASS_PICK_ORDER_SQL}
   `,
 		)
 		.all({ entryDay, exitDay }) as any[];
@@ -3575,17 +3584,7 @@ export function findSeasonPassById(
 			`
     SELECT * FROM season_passes
     WHERE pass_id = @passId AND status = 'active'
-      AND (
-        (
-          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @entryDay)
-          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @entryDay)
-        )
-        OR
-        (
-          (NULLIF(start_date, '') IS NULL OR NULLIF(start_date, '') <= @exitDay)
-          AND (NULLIF(end_date, '') IS NULL OR NULLIF(end_date, '') >= @exitDay)
-        )
-      )
+${PASS_VALID_WINDOW_SQL}
     LIMIT 1
   `,
 		)

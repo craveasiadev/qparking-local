@@ -25,6 +25,7 @@ import { fmtTimeSeconds, fmtDate } from '../lib/datetime';
 import { toast } from '../toast';
 import { useCurrentSite } from '../context/SiteContext';
 import { InfoTip } from '../components/InfoTip';
+import { Field } from '../components/Field';
 
 // ─── Types local to this page ────────────────────────────────────────────────
 
@@ -648,7 +649,6 @@ export function Settings() {
         </div>
       </div>
 
-      <style>{`.input { height: 40px; padding: 0 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; outline: none; font-size: 14px; width: 100%; } .input:focus { border-color: #111827; }`}</style>
     </div>
   );
 }
@@ -667,11 +667,3 @@ function SectionHeader({ icon: Icon, title, children }: { icon: any; title: stri
 }
 
 /** Labelled form row — tiny uppercase label above whatever input is passed in. */
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">{label}</label>
-      {children}
-    </div>
-  );
-}
