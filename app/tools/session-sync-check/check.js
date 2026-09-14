@@ -125,13 +125,36 @@ try {
   const dupeRows = db.listDueSync().filter((row) => row.op === 'session.entry' && row.payload.plate_number === 'DEDUPE001');
   check('three identical pushes queue ONE row', dupeRows.length === 1, `queued ${dupeRows.length}`);
 
-  // …but a real change must still get its own row.
+  // …but a real change must still be pushed — and, since 2026-09-14, it REPLACES
+  // the older pending snapshot rather than queueing beside it. Nothing on the
+  // wire carries a revision and the cloud is last-write-wins, so an older row
+  // that was merely backed off could drain after the newer one and put the old
+  // plate/times back. Every entry/exit/update payload is a whole-stay snapshot,
+  // so the older row has nothing the newer one lacks.
   db.updateSessionFields(s3.id, { notes: 'edited by the operator' });
   const s3Edited = db.getSessionById(s3.id);
   check('an edit bumps the session rev', s3Edited.rev > s3.rev, `${s3.rev} → ${s3Edited.rev}`);
   queue.enqueueUpdate(s3Edited);
   const afterEdit = db.listDueSync().filter((row) => row.sessionId === s3.id);
-  check('…and the changed version queues a SECOND row', afterEdit.length === 2, `queued ${afterEdit.length}`);
+  check('…and the changed version SUPERSEDES the older pending push (one row, the newer rev)',
+    afterEdit.length === 1 && afterEdit[0].sessionRev === s3Edited.rev && afterEdit[0].op === 'session.update',
+    `queued ${afterEdit.map((r) => `${r.op}@rev${r.sessionRev}`).join(', ')}`);
+
+  // The case that motivated it: the OLDER row is not merely pending but backed
+  // off after a failure, and the newer edit lands while it waits.
+  const s3b = db.createEntrySession('STALE0001', bareLane.id, null, null);
+  queue.enqueueEntry(s3b);
+  const staleRow = db.listDueSync().find((r) => r.sessionId === s3b.id);
+  db.markSyncRetry(staleRow.id, 'timeout', 60_000);   // backed off a minute
+  check('precondition: the older push is backed off (not due)',
+    !db.listDueSync().some((r) => r.sessionId === s3b.id));
+  db.updateSessionFields(s3b.id, { plate: 'STALE0011' });   // the plate correction
+  queue.enqueueUpdate(db.getSessionById(s3b.id));
+  const farFuture = new Date(Date.now() + 3_600_000).toISOString();
+  const s3bRows = db.listDueSync(farFuture).filter((r) => r.sessionId === s3b.id);
+  check('a backed-off older snapshot is dropped when a newer one is queued',
+    s3bRows.length === 1 && s3bRows[0].payload.plate_number === 'STALE0011',
+    `rows: ${s3bRows.map((r) => `${r.op} plate=${r.payload.plate_number}`).join(', ')}`);
 
   // ─── 9. a cloud-restored session isn't reported as needing a push back ────
   // It came FROM the cloud, so pushing it up again is pure noise. (It starts with
@@ -162,8 +185,19 @@ try {
   queue.enqueueEntry(cap1);          // the imageless push that already went out
   queue.enqueueEntry(attached);      // the capture push
   const capRows = db.listDueSync().filter((r) => r.payload.plate_number === 'CAPTURE01');
-  check('…so it queues its OWN push rather than collapsing into the imageless one', capRows.length === 2,
-    `queued ${capRows.length}`);
+  check('…so the photo-bearing push is what stays queued (it supersedes the imageless one)',
+    capRows.length === 1 && capRows[0].sessionRev === attached.rev,
+    `queued ${capRows.map((r) => `rev${r.sessionRev}`).join(', ')}`);
+
+  // A split-off images row is NOT a snapshot and must survive a newer push —
+  // the next snapshot does not re-carry photos that were split off.
+  const imgRowId = db.enqueueSync('session.images', { plate_number: 'CAPTURE01', entry_image_base64: 'x' }, cap1.id, cap1.rev);
+  db.updateSessionFields(cap1.id, { notes: 'after split' });
+  queue.enqueueUpdate(db.getSessionById(cap1.id));
+  const survivors = db.listDueSync().filter((r) => r.sessionId === cap1.id).map((r) => r.op);
+  check('…while a split-off session.images row is never superseded',
+    survivors.includes('session.images') && survivors.filter((op) => op !== 'session.images').length === 1,
+    `ops now: ${survivors.join(', ')} (images row id ${imgRowId})`);
 
   // An already-photographed session must never be overwritten by a re-post.
   const reattach = db.attachSessionCapture('CAPTURE01', 'entry', 'C:\\plates\\WRONG.jpg');
@@ -267,7 +301,8 @@ try {
     && beforeDel.filter((r) => r.sessionId === otherStay.id).length === 1,
     `doomed=${beforeDel.filter((r) => r.sessionId === delStay.id).length} other=${beforeDel.filter((r) => r.sessionId === otherStay.id).length}`);
 
-  queue.enqueueDelete(db.getSessionById(delStay.id));
+  const doomed = db.getSessionById(delStay.id);
+  queue.enqueueDelete(doomed);
   const afterDel = db.listDueSync(far(), 200);
   const leftForStay = afterDel.filter((r) => r.sessionId === delStay.id);
   const deleteRows = afterDel.filter((r) => r.op === 'session.delete' && r.payload.plate_number === 'DELRACE1');
@@ -275,6 +310,12 @@ try {
     leftForStay.length === 0, `still queued: ${leftForStay.map((r) => r.op).join(', ') || 'none'}`);
   check('…and queues the delete itself, so the cloud is still told',
     deleteRows.length === 1, `delete rows=${deleteRows.length}`);
+  // The delete must carry the durable id like every other op. Without it a
+  // delete after an unsynced plate/entry-time edit fell to the cloud's
+  // plate+time lookup, missed, and answered cancel_noop — car inside forever.
+  check('…and the delete carries external_id, not just plate + entry_time',
+    !!doomed.externalId && deleteRows[0]?.payload?.external_id === doomed.externalId,
+    `session external_id=${doomed.externalId} payload=${JSON.stringify(deleteRows[0]?.payload)}`);
   check('…while a different stay keeps its own queued push',
     afterDel.filter((r) => r.sessionId === otherStay.id).length === 1);
 

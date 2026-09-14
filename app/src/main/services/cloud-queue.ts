@@ -333,8 +333,13 @@ export function enqueueDelete(session: ParkingSession): void {
 	}
 	// No session id attached: the row is being deleted locally, so there is nothing
 	// left to stamp a sync watermark on by the time this drains.
+	// identityField too — the docblock above it promised "sent on every op", and
+	// this was the one op that did not. Without it a delete after an unsynced
+	// plate or entry-time edit fell to the cloud's plate+time lookup, missed,
+	// and answered cancel_noop: the car stayed "inside" in the cloud forever.
 	enqueueSync("session.delete", {
 		...scopeField(session),
+		...identityField(session),
 		plate_number: session.plate,
 		entry_time: session.entryAt,
 	});

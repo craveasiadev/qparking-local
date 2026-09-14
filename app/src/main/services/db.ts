@@ -2817,11 +2817,40 @@ export function enqueueSync(op: SyncOp, payload: Record<string, unknown>, sessio
 		if (existing) return existing.id;
 	}
 
+	// A NEWER snapshot supersedes older pending ones for the same stay.
+	//
+	// Nothing on the wire carries a revision and the cloud is last-write-wins on
+	// an external_id match, so an OLDER row that is merely backed off (a timed-out
+	// exit push, say) could drain AFTER a newer one had landed and write the old
+	// plate / times back — on a closed stay, permanently, while this box showed
+	// it as synced. Every entry/exit/update payload is a full snapshot of the
+	// stay, so the older row has nothing to say that the newer one does not.
+	//
+	// `session.images` rows are left alone: photos split off a timed-out push are
+	// NOT re-carried by the next snapshot (see splitImagesOff), so dropping that
+	// row would lose them. `session.delete` carries no session id and is never
+	// touched here either.
+	let superseded = 0;
+	if (sessionId != null && sessionRev != null && SUPERSEDABLE_SESSION_OPS.has(op)) {
+		superseded = db
+			.prepare(
+				`DELETE FROM sync_queue WHERE status = 'pending' AND session_id = ? AND session_rev < ?
+				 AND op IN ('session.entry', 'session.exit', 'session.update')`,
+			)
+			.run(sessionId, sessionRev).changes;
+	}
+
 	const info = db
 		.prepare(`INSERT INTO sync_queue (op, payload, session_id, session_rev) VALUES (?, ?, ?, ?)`)
 		.run(op, JSON.stringify(payload), sessionId ?? null, sessionRev ?? null);
+	if (superseded > 0) {
+		console.log(`[sync-queue] session ${sessionId} rev ${sessionRev} superseded ${superseded} older pending push(es)`);
+	}
 	return Number(info.lastInsertRowid);
 }
+
+/** The ops whose payload is a whole-stay snapshot, so a newer rev replaces an older pending one. */
+const SUPERSEDABLE_SESSION_OPS = new Set<string>(["session.entry", "session.exit", "session.update"]);
 
 /**
  * Rewrite a queued row's payload in place, keeping its id, attempts and backoff.
