@@ -78,11 +78,63 @@ const CASES = [
     // 1800min total: 300 + ceil(1740/60)*200 = 300 + 29*200 = 6100
     expect: 6100,
   },
+  // ── A fare is always a whole, finite, non-negative number of sen ──────────
+  // Added 2026-09-15 after probing computeFee directly. The cloud is supposed to
+  // refuse a negative tariff, but this box charges cars OFFLINE from whatever it
+  // last mirrored, and the figure goes straight to the LCD and the terminal.
+  // Before the sanitizeFee wrapper each of these returned the raw arithmetic:
+  // -700, -999, NaN, Infinity and -200 respectively.
+  {
+    id: 'G negative block amounts on a rule',
+    why: 'a negative tariff must read as FREE, never as a negative fare',
+    policy: policy([rule({ firstBlockAmountCents: -500, subsequentBlockAmountCents: -200 })]),
+    entry: '2026-07-28T10:00:00+08:00', exit: '2026-07-28T12:00:00+08:00',
+    expect: 0,
+  },
+  {
+    id: 'H negative flat amount on a rule',
+    why: 'same for the flat-rate mode',
+    policy: policy([rule({ ruleType: 'flat_rate', flatAmountCents: -999 })]),
+    entry: '2026-07-28T10:00:00+08:00', exit: '2026-07-28T12:00:00+08:00',
+    expect: 0,
+  },
+  {
+    id: 'I NaN duration on the legacy block path',
+    why: 'no rules = legacy math, which did no arithmetic checks at all',
+    policy: policy([]),
+    durationMinutes: NaN,
+    entry: '2026-07-28T10:00:00+08:00', exit: '2026-07-28T12:00:00+08:00',
+    expect: 0,
+  },
+  {
+    id: 'J Infinity duration on the legacy block path',
+    why: 'an unbounded fare is worse than a wrong one — it cannot be paid',
+    policy: policy([]),
+    durationMinutes: Infinity,
+    entry: '2026-07-28T10:00:00+08:00', exit: '2026-07-28T12:00:00+08:00',
+    expect: 0,
+  },
+  {
+    id: 'K negative per-block on the legacy block mirror',
+    why: 'the mirror fields are synced too, and were equally unchecked',
+    policy: policy([], { perBlockCents: -500 }),
+    entry: '2026-07-28T10:00:00+08:00', exit: '2026-07-28T12:00:00+08:00',
+    expect: 0,
+  },
+  {
+    id: 'L a legitimate fare is still returned unchanged',
+    why: 'the clamp must not round, floor or zero a real price (regression guard)',
+    policy: policy([rule()]),
+    entry: '2026-07-28T10:00:00+08:00', exit: '2026-07-28T13:30:00+08:00',
+    expect: 900, // 300 + ceil(150/60)*200
+  },
 ];
 
 const out = [];
 for (const c of CASES) {
-  const durationMinutes = Math.max(0, Math.floor((Date.parse(c.exit) - Date.parse(c.entry)) / 60000));
+  const durationMinutes = c.durationMinutes !== undefined
+    ? c.durationMinutes
+    : Math.max(0, Math.floor((Date.parse(c.exit) - Date.parse(c.entry)) / 60000));
   const started = Date.now();
   let got = null, err = null;
   try { got = computeFee(durationMinutes, c.policy, c.entry, c.exit); }

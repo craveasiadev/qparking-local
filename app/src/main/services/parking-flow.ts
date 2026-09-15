@@ -1218,7 +1218,39 @@ export function stayDurationMinutes(entryAt: string | number, exitAt: string | n
  * which is what older qparking-local installs and the legacy SaaS payload
  * shape still rely on.
  */
+/**
+ * The money the barrier asks for. Every path out of the calculation goes
+ * through `sanitizeFee`, because this figure is shown on the LCD and taken by
+ * the payment terminal — a NaN, an Infinity or a negative is not a price.
+ *
+ * Three ways the raw arithmetic could produce one, all found by probing on
+ * 2026-09-15:
+ *   - a NaN or Infinity `durationMinutes` (the legacy block path does no
+ *     arithmetic checks, so `Math.ceil(NaN / 60)` propagates straight out);
+ *   - a NEGATIVE amount on a rule or on the legacy block mirror, which the
+ *     cloud should never send but which nothing here refused;
+ *   - both together, on a policy synced from an older cloud.
+ * The cloud validating its own rate policies is not enough: this box charges
+ * cars while it is offline, from whatever it last mirrored.
+ */
 export function computeFee(
+  durationMinutes: number,
+  policy: RatePolicy | null,
+  entryAt?: string | Date,
+  exitAt?: string | Date,
+): number {
+  return sanitizeFee(computeFeeRaw(durationMinutes, policy, entryAt, exitAt));
+}
+
+/** A fare is a whole, finite, non-negative number of sen. Anything else is a
+ *  bug upstream, and free is the safe direction to fail at a barrier: it lets
+ *  the car out rather than demanding an impossible amount. */
+function sanitizeFee(cents: number): number {
+  if (!Number.isFinite(cents) || cents <= 0) return 0;
+  return Math.round(cents);
+}
+
+function computeFeeRaw(
   durationMinutes: number,
   policy: RatePolicy | null,
   entryAt?: string | Date,
