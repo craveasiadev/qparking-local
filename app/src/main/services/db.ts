@@ -2171,6 +2171,21 @@ export function getSessionById(id: number): ParkingSession | null {
 }
 
 /**
+ * Find a stay by the durable id the cloud knows it as (sessions.external_id).
+ *
+ * This is how a cloud-side instruction addresses one of OUR sessions — the
+ * cloud has no idea about local row ids. Preferred over plate matching, which
+ * is ambiguous the moment a misread plate is corrected: the correction updates
+ * this row in place and keeps the same external_id, so the cloud and this box
+ * still agree on which stay is meant.
+ */
+export function findSessionByExternalId(externalId: string): ParkingSession | null {
+	if (!externalId) return null;
+	const row = getDb().prepare("SELECT * FROM sessions WHERE external_id = ? LIMIT 1").get(externalId) as any;
+	return row ? rowToSession(row) : null;
+}
+
+/**
  * Restore OPEN sessions from the cloud's parking records — cars the cloud says
  * are still inside this site. This is the recovery path for a rebound /
  * reinstalled / wiped box: without it, a car that entered before the wipe has

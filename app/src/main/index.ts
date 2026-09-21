@@ -127,6 +127,7 @@ import {
   startDeviceHealth, stopDeviceHealth, sweepDeviceHealth, snapshotDeviceHealth, deviceHealthEvents,
 } from './services/device-health';
 import { startHealthHeartbeat, stopHealthHeartbeat, postHeartbeat, getHeartbeatState } from './services/health-heartbeat';
+import { startManualReleasePoller, stopManualReleasePoller } from './services/manual-release-poller';
 import { startRtspGrabbers, stopRtspGrabbers, resync as resyncRtspGrabbers, restartFeeds as restartRtspFeeds } from './services/camera-rtsp';
 import { previewDeviceSync, pushDevicesToCloud, pullDevicesFromCloud, type DeviceType } from './services/device-sync';
 import {
@@ -242,6 +243,10 @@ app.whenReady().then(async () => {
   // Report that health up to the cloud. Started after the monitor so its first
   // post carries a real snapshot rather than an empty one.
   startHealthHeartbeat();
+  // Collect manual releases an operator raised in the SaaS. After the heartbeat
+  // deliberately: the cloud refuses to queue a release for a site it has not
+  // heard from, so there is nothing to collect until we have reported in once.
+  startManualReleasePoller(performManualRelease);
   // Housekeeping last: it only reads and deletes, and its first pass should see
   // whatever the boot pull has already written.
   startRetentionSweep();
@@ -264,6 +269,7 @@ function stopBackgroundServices() {
   try { stopLcdDisplays(); } catch { /* ignore */ }
   try { stopDeviceHealth(); } catch { /* ignore */ }
   try { stopHealthHeartbeat(); } catch { /* ignore */ }
+  try { stopManualReleasePoller(); } catch { /* ignore */ }
   try { stopRetentionSweep(); } catch { /* ignore */ }
 }
 
@@ -1381,7 +1387,16 @@ ipcMain.handle('sessions:delete', (_e, id: number) => {
   }
   return ok;
 });
-ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) => {
+/**
+ * The whole manual-release act, in one place.
+ *
+ * Extracted from the `sessions:release` IPC handler so the cloud poller
+ * (services/manual-release-poller) runs EXACTLY this and not a second
+ * implementation — the voiding, the already-closed race, the barrier, the LCD
+ * and the audit are the parts that make a release accountable, and a parallel
+ * copy would drift out of agreement with this one on the first fix.
+ */
+export function performManualRelease(id: number, reason: string, laneId?: number | null) {
   // A release without payment is a recorded, accountable act — it must carry a
   // reason. The modal already blocks an empty one, but the server is the real
   // gate (a direct IPC caller would otherwise release with an empty note).
@@ -1435,7 +1450,9 @@ ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: num
     });
   }
   return session;
-});
+}
+ipcMain.handle('sessions:release', (_e, id: number, reason: string, laneId?: number | null) =>
+  performManualRelease(id, reason, laneId));
 // DEV/QA: timed live flow — open a session at a chosen entry time, then exit at
 // a chosen exit time (prices the stay + drives the terminal).
 ipcMain.handle('sessions:simulate-entry', (_e, laneId: number, plate: string, entryIso: string) =>
